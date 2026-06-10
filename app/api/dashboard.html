@@ -3,82 +3,156 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Betting Picks — Decision Support</title>
+    <title>PICKS TERMINAL — Decision Support</title>
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%233fb950'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23060906'/%3E%3Ccircle cx='8' cy='8' r='5' fill='none' stroke='%2300ff9d' stroke-width='2'/%3E%3C/svg%3E"
     />
     <style>
       :root {
-        --bg: #0d1117;
-        --panel: #161b22;
-        --line: #21262d;
-        --text: #e6edf3;
-        --dim: #8b949e;
-        --green: #3fb950;
-        --red: #f85149;
-        --amber: #d29922;
-        --blue: #58a6ff;
+        --bg: #060906;
+        --bg2: #0a0f0a;
+        --panel: #0d130d;
+        --line: #1a241a;
+        --text: #cfe3cf;
+        --dim: #5e7a5e;
+        --faint: #3a4f3a;
+        --green: #00ff9d;
+        --green-soft: #2bd576;
+        --red: #ff5c57;
+        --amber: #ffb454;
+        --cyan: #6ad7ff;
+        --mono:
+          ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
       }
       * {
         box-sizing: border-box;
         margin: 0;
       }
-      body {
+      html {
         background: var(--bg);
-        color: var(--text);
-        font:
-          14px/1.5 -apple-system,
-          "Segoe UI",
-          Roboto,
-          sans-serif;
-        padding: 24px;
       }
-      h1 {
-        font-size: 20px;
-        font-weight: 600;
+      body {
+        color: var(--text);
+        font: 13px/1.55 var(--mono);
+        padding: 28px 32px 40px;
+        min-height: 100vh;
+        background:
+          radial-gradient(
+            1200px 500px at 50% -10%,
+            rgba(0, 255, 157, 0.06),
+            transparent 60%
+          ),
+          var(--bg);
+      }
+      /* CRT scanlines — barely there */
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 9;
+        background: repeating-linear-gradient(
+          0deg,
+          rgba(255, 255, 255, 0.015) 0 1px,
+          transparent 1px 3px
+        );
+      }
+
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+      .brand {
+        font-size: 19px;
+        font-weight: 800;
+        letter-spacing: 0.22em;
+        color: var(--green);
+        text-shadow: 0 0 18px rgba(0, 255, 157, 0.35);
+      }
+      .live {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--dim);
+        font-size: 11px;
+        letter-spacing: 0.15em;
+      }
+      .live i {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+        animation: pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.25;
+        }
       }
       .sub {
         color: var(--dim);
-        font-size: 13px;
-        margin-top: 2px;
+        font-size: 12px;
+        margin-top: 4px;
+        letter-spacing: 0.04em;
       }
+
       .banner {
-        background: #1c2128;
-        border: 1px solid var(--line);
-        border-left: 3px solid var(--amber);
-        border-radius: 8px;
-        padding: 10px 14px;
-        margin: 16px 0;
-        color: var(--dim);
-        font-size: 13px;
+        margin: 18px 0;
+        padding: 9px 14px;
+        font-size: 12px;
+        color: var(--amber);
+        border: 1px dashed rgba(255, 180, 84, 0.35);
+        border-radius: 4px;
+        background: rgba(255, 180, 84, 0.04);
+        letter-spacing: 0.03em;
       }
+      .banner b {
+        color: var(--amber);
+      }
+
       .cards {
-        display: flex;
-        gap: 12px;
-        flex-wrap: wrap;
-        margin-bottom: 16px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 10px;
+        margin-bottom: 18px;
       }
       .card {
-        background: var(--panel);
+        background: linear-gradient(180deg, var(--panel), var(--bg2));
         border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 14px 18px;
-        min-width: 150px;
+        border-radius: 6px;
+        padding: 13px 16px 11px;
+        position: relative;
+        overflow: hidden;
+      }
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 2px;
+        background: var(--green);
+        opacity: 0.5;
       }
       .card .v {
-        font-size: 22px;
+        font-size: 24px;
         font-weight: 700;
+        color: var(--green-soft);
+        text-shadow: 0 0 12px rgba(43, 213, 118, 0.25);
       }
       .card .k {
         color: var(--dim);
-        font-size: 12px;
+        font-size: 10px;
+        letter-spacing: 0.18em;
         text-transform: uppercase;
-        letter-spacing: 0.05em;
+        margin-top: 2px;
       }
+
       .controls {
         display: flex;
-        gap: 10px;
+        gap: 9px;
         align-items: center;
         flex-wrap: wrap;
         margin-bottom: 12px;
@@ -86,128 +160,196 @@
       select,
       input[type="search"],
       button {
-        background: var(--panel);
+        background: var(--bg2);
         color: var(--text);
         border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 7px 12px;
-        font-size: 13px;
+        border-radius: 4px;
+        padding: 7px 11px;
+        font: 12px var(--mono);
+        letter-spacing: 0.03em;
       }
       input[type="search"] {
-        width: 240px;
+        width: 280px;
+      }
+      input[type="search"]::placeholder {
+        color: var(--faint);
+      }
+      select:focus,
+      input:focus,
+      button:focus {
+        outline: 1px solid var(--green);
+        outline-offset: 0;
       }
       button {
         cursor: pointer;
+        color: var(--green-soft);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 11px;
       }
       button:hover {
-        border-color: var(--blue);
+        border-color: var(--green-soft);
+        background: rgba(0, 255, 157, 0.06);
       }
       .stamp {
         color: var(--dim);
-        font-size: 12px;
+        font-size: 11px;
         margin-left: auto;
+        letter-spacing: 0.05em;
       }
+
       .tablewrap {
         overflow-x: auto;
         border: 1px solid var(--line);
-        border-radius: 10px;
+        border-radius: 6px;
+        background: var(--panel);
       }
       table {
         border-collapse: collapse;
         width: 100%;
-        min-width: 1080px;
-        background: var(--panel);
+        min-width: 1180px;
       }
       th {
         text-align: left;
-        font-size: 11px;
+        font-size: 10px;
+        letter-spacing: 0.16em;
         text-transform: uppercase;
-        letter-spacing: 0.06em;
         color: var(--dim);
         padding: 10px 12px;
         border-bottom: 1px solid var(--line);
         position: sticky;
         top: 0;
         background: var(--panel);
+        z-index: 2;
       }
       td {
-        padding: 10px 12px;
-        border-bottom: 1px solid var(--line);
+        padding: 9px 12px;
+        border-bottom: 1px solid rgba(26, 36, 26, 0.6);
         white-space: nowrap;
-      }
-      tr:last-child td {
-        border-bottom: none;
-      }
-      tr:hover td {
-        background: #1c2128;
-      }
-      .num {
         font-variant-numeric: tabular-nums;
       }
+      tbody tr {
+        animation: rowin 0.35s ease both;
+      }
+      @keyframes rowin {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+      }
+      tbody tr:hover td {
+        background: rgba(0, 255, 157, 0.035);
+      }
+      tbody tr:hover td:first-child {
+        box-shadow: inset 2px 0 0 var(--green);
+      }
+
+      .ko {
+        color: var(--text);
+      }
+      .ko small {
+        display: block;
+        color: var(--faint);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+      }
+      .ko small.soon {
+        color: var(--amber);
+      }
       .match {
-        font-weight: 600;
+        font-weight: 700;
       }
       .league {
-        color: var(--dim);
-        font-size: 12px;
+        display: block;
+        color: var(--faint);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
       }
       .sel {
-        color: var(--blue);
-        font-weight: 600;
+        color: var(--cyan);
+        font-weight: 700;
       }
-      .edge-hi {
+      .odds {
+        font-weight: 700;
+      }
+      .edgecell {
+        min-width: 86px;
+      }
+      .edge {
         color: var(--green);
         font-weight: 700;
       }
-      .edge-md {
-        color: var(--green);
+      .bar {
+        height: 3px;
+        border-radius: 2px;
+        background: var(--faint);
+        margin-top: 4px;
+        position: relative;
+        overflow: hidden;
+      }
+      .bar i {
+        position: absolute;
+        inset: 0 auto 0 0;
+        background: var(--green);
+        box-shadow: 0 0 6px rgba(0, 255, 157, 0.6);
       }
       .badge {
         display: inline-block;
-        border-radius: 999px;
-        padding: 2px 10px;
-        font-size: 12px;
-        font-weight: 600;
+        border-radius: 3px;
+        padding: 2px 8px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
       }
       .b-green {
-        background: rgba(63, 185, 80, 0.15);
+        background: rgba(0, 255, 157, 0.12);
         color: var(--green);
       }
       .b-red {
-        background: rgba(248, 81, 73, 0.15);
+        background: rgba(255, 92, 87, 0.12);
         color: var(--red);
       }
       .b-gray {
-        background: rgba(139, 148, 158, 0.12);
+        background: rgba(94, 122, 94, 0.12);
         color: var(--dim);
       }
-      .b-blue {
-        background: rgba(88, 166, 255, 0.12);
-        color: var(--blue);
+      .b-cyan {
+        background: rgba(106, 215, 255, 0.1);
+        color: var(--cyan);
       }
       .empty {
-        padding: 28px;
+        padding: 34px;
         text-align: center;
         color: var(--dim);
+        white-space: normal;
       }
+
       footer {
-        color: var(--dim);
-        font-size: 12px;
+        color: var(--faint);
+        font-size: 11px;
         margin-top: 16px;
+        letter-spacing: 0.04em;
+      }
+      footer code {
+        color: var(--dim);
       }
     </style>
   </head>
   <body>
-    <h1>Betting Picks — Decision Support</h1>
+    <header>
+      <span class="brand">PICKS&nbsp;TERMINAL</span>
+      <span class="live"><i></i>POLLING</span>
+    </header>
     <div class="sub">
-      Sharp-vs-soft value picks · fair price anchored on the sharpest book ·
-      CLV-tracked
+      sharp-vs-soft value · fair price = devig(sharpest book) · CLV-tracked ·
+      odds ≥ 1.60
     </div>
 
     <div class="banner">
-      Manual review required. This system does <b>not</b> place bets. Stakes are
-      informational (fractional Kelly). Betting involves risk — nothing here is
-      a guarantee of profit.
+      ⚠ Manual review required. This system does <b>not</b> place bets. Stakes
+      are informational (fractional Kelly). Betting involves risk — nothing here
+      is a guarantee of profit.
     </div>
 
     <div class="cards">
@@ -231,14 +373,14 @@
 
     <div class="controls">
       <select id="f-status">
-        <option value="">All statuses</option>
-        <option value="alerted" selected>Open (alerted)</option>
-        <option value="settled">Settled</option>
+        <option value="">ALL STATUSES</option>
+        <option value="alerted" selected>OPEN (ALERTED)</option>
+        <option value="settled">SETTLED</option>
       </select>
       <input
         type="search"
         id="f-search"
-        placeholder="Search match, team, book, league…"
+        placeholder="search match / team / book / league…"
       />
       <button id="refresh">Refresh</button>
       <span class="stamp" id="stamp">loading…</span>
@@ -271,8 +413,8 @@
     </div>
 
     <footer>
-      Auto-refreshes every 60s · data: <code>GET /picks</code> · CLV = closing
-      line value; consistently positive CLV is the proof of real edge.
+      auto-refresh 60s · data <code>GET /picks</code> · CLV = closing line value
+      — consistently positive CLV is the proof of real edge
     </footer>
 
     <script>
@@ -280,10 +422,14 @@
       let PICKS = [];
       const $ = (id) => document.getElementById(id);
       const MARKETS = {
-        h2h: "1X2",
-        totals: "O/U 2.5",
-        spreads: "Handicap",
+        h2h: "1X2 / ML",
+        totals: "O/U",
+        spreads: "AH",
         btts: "BTTS",
+        dnb: "DNB",
+        double_chance: "DC",
+        team_totals: "TT",
+        correct_score: "CS",
       };
 
       const fmtLocal = (iso) =>
@@ -294,6 +440,21 @@
           minute: "2-digit",
         });
       const pct = (x) => (Number(x) * 100).toFixed(1) + "%";
+
+      function countdown(iso) {
+        const ms = new Date(iso) - Date.now();
+        if (ms <= 0) return { text: "started", soon: false };
+        const h = Math.floor(ms / 3.6e6),
+          m = Math.floor((ms % 3.6e6) / 6e4);
+        return {
+          text:
+            "in " +
+            (h >= 24
+              ? Math.floor(h / 24) + "d " + (h % 24) + "h"
+              : h + "h " + m + "m"),
+          soon: ms < 2 * 3.6e6,
+        };
+      }
 
       function badge(text, cls) {
         const s = document.createElement("span");
@@ -337,15 +498,26 @@
           return;
         }
 
-        for (const p of rows) {
+        rows.forEach((p, idx) => {
           const tr = document.createElement("tr");
-          td(tr, fmtLocal(p.starts_at), "num");
+          tr.style.animationDelay = Math.min(idx * 22, 400) + "ms";
+
+          const ko = document.createElement("div");
+          ko.className = "ko";
+          const when = document.createElement("span");
+          when.textContent = fmtLocal(p.starts_at);
+          const cd = countdown(p.starts_at);
+          const rel = document.createElement("small");
+          rel.textContent = cd.text;
+          if (cd.soon) rel.className = "soon";
+          ko.append(when, rel);
+          td(tr, ko);
 
           const m = document.createElement("div");
-          const name = document.createElement("div");
+          const name = document.createElement("span");
           name.className = "match";
           name.textContent = p.event;
-          const lg = document.createElement("div");
+          const lg = document.createElement("span");
           lg.className = "league";
           lg.textContent = p.league;
           m.append(name, lg);
@@ -354,22 +526,29 @@
           td(tr, MARKETS[p.market] || p.market);
           td(tr, p.selection, "sel");
           td(tr, p.bookmaker);
-          td(tr, Number(p.decimal_odds).toFixed(2), "num");
-          td(tr, pct(p.model_probability), "num");
+          td(tr, Number(p.decimal_odds).toFixed(2), "odds");
+          td(tr, pct(p.model_probability));
+
           const e = Number(p.edge);
-          td(
-            tr,
-            "+" + pct(p.edge),
-            "num " + (e >= 0.05 ? "edge-hi" : "edge-md"),
-          );
-          td(tr, "+" + pct(p.ev), "num");
+          const ed = document.createElement("div");
+          const ev_ = document.createElement("span");
+          ev_.className = "edge";
+          ev_.textContent = "+" + pct(p.edge);
+          const bar = document.createElement("div");
+          bar.className = "bar";
+          const fill = document.createElement("i");
+          fill.style.width = Math.min(e / 0.1, 1) * 100 + "%"; // 10% edge = full bar
+          bar.appendChild(fill);
+          ed.append(ev_, bar);
+          td(tr, ed, "edgecell");
+
+          td(tr, "+" + pct(p.ev));
           td(
             tr,
             Number(p.recommended_stake_amount).toFixed(2) +
               " (" +
               pct(p.recommended_stake_fraction) +
               ")",
-            "num",
           );
 
           if (p.clv_log === null) td(tr, badge("pending", "b-gray"));
@@ -387,11 +566,11 @@
             tr,
             badge(
               p.status === "alerted" ? "open" : p.status,
-              p.status === "alerted" ? "b-blue" : "b-gray",
+              p.status === "alerted" ? "b-cyan" : "b-gray",
             ),
           );
           tbody.appendChild(tr);
-        }
+        });
       }
 
       function summarize() {

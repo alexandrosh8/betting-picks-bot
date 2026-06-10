@@ -63,7 +63,9 @@ class Settings(BaseSettings):
     # picks). Volume tier: VALUE_MIN_EDGE=0.015 (v2 holdout n=379, CLV +0.019).
     pick_strategy: str = "value"
     value_min_edge: float = 0.03
-    value_min_odds: float = 1.30
+    # User policy: never pick odds below 1.60. The backtest validated at
+    # >= 1.30; a higher floor only narrows to a subset of validated picks.
+    value_min_odds: float = 1.60
     value_devig: str = "shin"  # power|shin|multiplicative|additive
 
     # --- Odds sources (read-only access) -----------------------------------------
@@ -71,6 +73,14 @@ class Settings(BaseSettings):
     # "odds_api"   = The Odds API (needs keys below).
     odds_source: str = "oddsportal"
     oddsportal_football_leagues: str = "england-premier-league"  # csv of slugs
+    # Devig-sound markets only (loader rejects handicaps — derived pricing
+    # is the roadmap for those). 1x2+ou25 are backtest-validated; btts/dnb/
+    # double_chance use the identical mechanism on thinner evidence.
+    oddsportal_football_markets: str = "1x2,over_under_2_5,btts,dnb,double_chance"
+    # Basketball (club competitions only — OddsHarvester maps no national-team
+    # events like EuroBasket). Empty leagues = basketball polling off.
+    oddsportal_basketball_leagues: str = "nba,euroleague"
+    oddsportal_basketball_markets: str = "home_away"  # moneyline; totals lines vary per game
     footballdata_league_codes: str = "E0"  # csv, European mmz4281 divisions
     footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
     # Optional: train on a "new leagues" country code (e.g. BRA) instead of the

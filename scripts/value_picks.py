@@ -63,7 +63,7 @@ async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--league", default="brazil-serie-a", help="oddsportal slug")
     p.add_argument("--min-edge", type=float, default=0.015)
-    p.add_argument("--min-odds", type=float, default=1.30, help="ignore ultra-short prices")
+    p.add_argument("--min-odds", type=float, default=1.60, help="ignore ultra-short prices")
     p.add_argument("--top", type=int, default=25)
     p.add_argument("--max-pages", type=int, default=2)
     args = p.parse_args()

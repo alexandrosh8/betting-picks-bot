@@ -28,6 +28,7 @@ class UpstreamModel(BaseModel):
 class Market(StrEnum):
     H2H = "h2h"  # 1X2 / moneyline
     DOUBLE_CHANCE = "double_chance"
+    DNB = "dnb"  # draw no bet
     SPREADS = "spreads"  # incl. Asian handicap
     TOTALS = "totals"
     TEAM_TOTALS = "team_totals"

@@ -150,3 +150,51 @@ def test_duplicate_selection_names_return_nothing() -> None:
     prices = {"Draw": {"Pinnacle": 2.0}, "away": {"Pinnacle": 2.0}}
     bets = find_value_bets(prices, min_edge=0.0)
     assert isinstance(bets, list)  # contract: no crash; gates handle oddities
+
+
+# --- double chance (derived from the 1X2 anchor) ------------------------------
+
+
+def test_double_chance_fair_is_pairwise_sum_of_h2h_fair() -> None:
+    from app.edge.value import double_chance_fair
+
+    h2h = {"Home FC": 0.50, "Draw": 0.30, "Away FC": 0.20}
+    dc = double_chance_fair(h2h, "Home FC", "Away FC")
+    assert dc == {
+        "Home FC or Draw": 0.80,
+        "Home FC or Away FC": 0.70,
+        "Draw or Away FC": 0.50,
+    }
+    # missing any 1X2 leg -> no derivation (never guess)
+    assert double_chance_fair({"Home FC": 0.5, "Draw": 0.3}, "Home FC", "Away FC") == {}
+
+
+def test_double_chance_direct_devig_is_rejected_by_anchor_sanity() -> None:
+    # DC quotes sum to ~200% implied — anchor_fair_probs must refuse them.
+    from app.edge.value import anchor_fair_probs
+
+    prices = {
+        "1X": {"Pinnacle": 1.25, "SoftBook": 1.28},
+        "12": {"Pinnacle": 1.40, "SoftBook": 1.42},
+        "X2": {"Pinnacle": 1.65, "SoftBook": 1.70},
+    }
+    assert anchor_fair_probs(prices) is None
+
+
+def test_find_value_bets_with_fair_flags_soft_dc_price() -> None:
+    from app.edge.value import find_value_bets_with_fair
+
+    dc_fair = {"Home FC or Draw": 0.80}
+    # fair 0.80 -> fair odds 1.25; SoftBook posts 1.70 (implied 0.588) -> value
+    prices = {"Home FC or Draw": {"Pinnacle": 1.22, "SoftBook": 1.70}}
+    bets = find_value_bets_with_fair(prices, dc_fair, "Pinnacle", min_edge=0.01, min_odds=1.60)
+    assert len(bets) == 1
+    assert bets[0].best_book == "SoftBook"
+    assert abs(bets[0].edge - (0.80 - 1 / 1.70)) < 1e-9
+    # the anchor book's own price is never the pick
+    assert (
+        find_value_bets_with_fair(
+            {"Home FC or Draw": {"Pinnacle": 1.70}}, dc_fair, "Pinnacle", min_edge=0.0, min_odds=1.0
+        )
+        == []
+    )

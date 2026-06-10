@@ -123,10 +123,57 @@ def find_value_bets(
     if anchored is None:
         return []
     anchor_book, fair_by_sel = anchored
-    selections = list(prices.keys())
+    return _scan_against_fair(prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions)
 
+
+def double_chance_fair(
+    h2h_fair: Mapping[str, float], home: str, away: str, draw: str = "Draw"
+) -> dict[str, float]:
+    """Fair double-chance probabilities DERIVED from an anchored 1X2 market.
+
+    DC outcomes overlap (each covers two 1X2 outcomes; the three quotes sum
+    to ~200%), so devigging a DC book directly is invalid — the overround
+    sanity check rightly rejects it. Fair DC value is the pairwise sum of the
+    1X2 anchor's fair probabilities. Selection names mirror the oddsportal
+    loader ("{home} or Draw", "{home} or {away}", "Draw or {away}")."""
+    h, d, a = h2h_fair.get(home), h2h_fair.get(draw), h2h_fair.get(away)
+    if h is None or d is None or a is None:
+        return {}
+    return {
+        f"{home} or {draw}": h + d,
+        f"{home} or {away}": h + a,
+        f"{draw} or {away}": d + a,
+    }
+
+
+def find_value_bets_with_fair(
+    prices: Mapping[str, Mapping[str, float]],
+    fair_by_sel: Mapping[str, float],
+    anchor_book: str,
+    *,
+    min_edge: float = 0.01,
+    min_odds: float = 1.30,
+    commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+) -> list[ValueBet]:
+    """Value scan against EXTERNALLY-derived fair probabilities (e.g. double
+    chance derived from the 1X2 anchor via `double_chance_fair`). Selections
+    without a derived fair probability are skipped."""
+    return _scan_against_fair(prices, fair_by_sel, anchor_book, min_edge, min_odds, commissions)
+
+
+def _scan_against_fair(
+    prices: Mapping[str, Mapping[str, float]],
+    fair_by_sel: Mapping[str, float],
+    anchor_book: str,
+    min_edge: float,
+    min_odds: float,
+    commissions: Mapping[str, float],
+) -> list[ValueBet]:
     out: list[ValueBet] = []
-    for sel in selections:
+    for sel in prices:
+        fair_p = fair_by_sel.get(sel)
+        if fair_p is None:
+            continue
         best = _best_other_book(prices[sel], anchor_book, commissions)
         if best is None:
             continue
@@ -134,7 +181,6 @@ def find_value_bets(
         if raw < min_odds:
             continue
         implied = 1.0 / eff
-        fair_p = fair_by_sel[sel]
         edge = fair_p - implied
         if edge < min_edge:
             continue

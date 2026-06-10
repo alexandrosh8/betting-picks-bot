@@ -169,7 +169,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
 
     No prediction model involved; deps.model is unused here.
     """
-    from app.edge.value import CONSENSUS_ANCHOR, find_value_bets
+    from app.edge.value import (
+        CONSENSUS_ANCHOR,
+        anchor_fair_probs,
+        double_chance_fair,
+        find_value_bets,
+        find_value_bets_with_fair,
+    )
 
     snapshots = await deps.loader.fetch_odds(sport_key)
     # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
@@ -178,14 +184,39 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         logger.info("no snapshots for %s", sport_key)
         return []
 
+    grouped = group_market_prices(snapshots)
+    # 1X2 anchors per event — double chance has no devig-able book (its
+    # outcomes overlap), so its fair value derives from the 1X2 anchor.
+    h2h_anchor: dict[str, tuple[str, dict[str, float]]] = {}
+    for (event_id, market), (prices, _) in grouped.items():
+        if market is Market.H2H:
+            anchored = anchor_fair_probs(prices, devig_method=deps.devig_method)
+            if anchored is not None:
+                h2h_anchor[event_id] = anchored
+
     picks: list[PickOut] = []
-    for (event_id, market), (prices, captured) in group_market_prices(snapshots).items():
-        for v in find_value_bets(
-            prices,
-            min_edge=deps.value_min_edge,
-            min_odds=deps.value_min_odds,
-            devig_method=deps.devig_method,
-        ):
+    for (event_id, market), (prices, captured) in grouped.items():
+        if market is Market.DOUBLE_CHANCE:
+            anchored_h2h = h2h_anchor.get(event_id)
+            teams = deps.directory.lookup(event_id) if deps.directory is not None else None
+            if anchored_h2h is None or teams is None:
+                continue
+            dc_fair = double_chance_fair(anchored_h2h[1], teams.home, teams.away)
+            value_bets = find_value_bets_with_fair(
+                prices,
+                dc_fair,
+                anchored_h2h[0],
+                min_edge=deps.value_min_edge,
+                min_odds=deps.value_min_odds,
+            )
+        else:
+            value_bets = find_value_bets(
+                prices,
+                min_edge=deps.value_min_edge,
+                min_odds=deps.value_min_odds,
+                devig_method=deps.devig_method,
+            )
+        for v in value_bets:
             cap = captured.get((v.selection, v.best_book))
             age = max((now - cap).total_seconds(), 0.0) if cap else 0.0
             if age > deps.gate_policy.max_odds_age_seconds:
@@ -203,15 +234,18 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             confidence = 0.7 if v.sharp_book == CONSENSUS_ANCHOR else 0.9
 
             event_label = event_id
+            league_label = deps.league or sport_key
             if deps.directory is not None:
                 teams = deps.directory.lookup(event_id)
                 if teams is not None:
                     event_label = f"{teams.home} vs {teams.away}"
+                    if teams.league:  # scraped per-event league beats config csv
+                        league_label = teams.league
 
             pick = PickOut(
                 pick_id=str(uuid.uuid4()),
-                sport=deps.sport,
-                league=deps.league or sport_key,
+                sport=sport_key,  # one deps serves soccer AND basketball polls
+                league=league_label,
                 event=event_label,
                 event_id=event_id,
                 market=market,

@@ -116,4 +116,6 @@ async def test_latest_picks_payload_carries_event_fields(session) -> None:  # ty
     assert p["starts_at"] == kickoff.isoformat()  # real kickoff, UTC ISO-8601
     assert p["selection"] == "Alpha FC"
     assert p["reason_summary"] == "persistence test"
-    assert "does not place bets" in p["manual_betting_reminder"]
+    # API payload is data-only; the safety reminder lives in alerts
+    # (app/schemas/picks.py, safety_audit check 8) and the dashboard banner.
+    assert "manual_betting_reminder" not in p

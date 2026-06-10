@@ -140,7 +140,6 @@ async def latest_picks_with_events(session: AsyncSession, limit: int = 50) -> li
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
-            "manual_betting_reminder": "Manual review required. This system does not place bets.",
         }
         for p, home_name, away_name, league_name, starts_at in rows.all()
     ]

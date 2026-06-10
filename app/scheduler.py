@@ -12,6 +12,7 @@ orchestrator touches only this module.
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -110,12 +111,22 @@ def build_scheduler(
     if settings.odds_source == "oddsportal":
         directory = EventDirectory()
         leagues = _csv(settings.oddsportal_football_leagues)
+        config: dict[str, tuple[str, list[str]]] = {"soccer": ("football", leagues)}
+        markets_by: dict[str, Sequence[str]] = {
+            "soccer": tuple(_csv(settings.oddsportal_football_markets)),
+        }
+        sport_keys = ("soccer",)
+        bb_leagues = _csv(settings.oddsportal_basketball_leagues)
+        if bb_leagues:
+            config["basketball"] = ("basketball", bb_leagues)
+            markets_by["basketball"] = tuple(_csv(settings.oddsportal_basketball_markets))
+            sport_keys = ("soccer", "basketball")
         loader = OddsPortalLoader(
             directory=directory,
-            leagues_by_sport_key={"soccer": ("football", leagues)},
+            leagues_by_sport_key=config,
+            markets_by_sport_key=markets_by,
             # date=None -> general upcoming page (carries live pre-match odds)
         )
-        sport_keys = ("soccer",)
         league_label = settings.oddsportal_football_leagues
 
         # The Dixon-Coles goals model only runs for pick_strategy="model"

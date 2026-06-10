@@ -108,3 +108,86 @@ def test_unsupported_market_rejected_at_construction() -> None:
             leagues_by_sport_key={},
             markets=("1x2", "correct_score_9_9"),
         )
+
+
+def test_handicap_markets_rejected_with_hint() -> None:
+    # naive devig of per-line handicap submarkets is invalid — must be
+    # blocked at construction, not silently mis-grouped.
+    with pytest.raises(ValueError, match="handicap"):
+        OddsPortalLoader(
+            directory=EventDirectory(),
+            leagues_by_sport_key={},
+            markets=("1x2", "asian_handicap_-1_5"),
+        )
+
+
+def test_multiple_totals_lines_rejected() -> None:
+    # two O/U lines would collapse into one Market.TOTALS group per event
+    # and corrupt the devig (outcomes across lines are not exclusive).
+    with pytest.raises(ValueError, match="one over/under line"):
+        OddsPortalLoader(
+            directory=EventDirectory(),
+            leagues_by_sport_key={},
+            markets=("over_under_2_5", "over_under_3_5"),
+        )
+
+
+async def test_football_extended_markets_parse() -> None:
+    match = dict(MATCH)
+    match["btts_market"] = [
+        {"btts_yes": "1.80", "btts_no": "2.00", "bookmaker_name": "BookieOne"},
+    ]
+    match["dnb_market"] = [
+        {"dnb_team1": "1.65", "dnb_team2": "2.30", "bookmaker_name": "BookieOne"},
+    ]
+    match["double_chance_market"] = [
+        {"1X": "1.30", "12": "1.40", "X2": "1.85", "bookmaker_name": "BookieOne"},
+    ]
+    directory = EventDirectory()
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        markets=("1x2", "over_under_2_5", "btts", "dnb", "double_chance"),
+        scrape_fn=make_loader(directory, [match])._scrape,
+    )
+    snapshots = await loader.fetch_odds("soccer")
+    by_market = {(s.market, s.selection) for s in snapshots}
+    assert (Market.BTTS, "BTTS Yes") in by_market
+    assert (Market.DNB, "Alpha FC") in by_market
+    assert (Market.DNB, "Beta United") in by_market
+    assert (Market.DOUBLE_CHANCE, "Alpha FC or Draw") in by_market
+    assert (Market.DOUBLE_CHANCE, "Alpha FC or Beta United") in by_market
+    assert (Market.DOUBLE_CHANCE, "Draw or Beta United") in by_market
+
+
+async def test_basketball_home_away_parses_as_two_way_h2h() -> None:
+    match = {
+        "home_team": "Test Hawks",
+        "away_team": "Test Bulls",
+        "match_date": "2026-06-12 01:00:00 UTC",
+        "league_name": "NBA",
+        "match_link": "https://www.oddsportal.com/basketball/usa/nba/hawks-bulls/",
+        "scraped_date": "2026-06-10T12:00:00Z",
+        "home_away_market": [
+            {"1": "2.80", "2": "1.42", "bookmaker_name": "BookieOne", "period": "FullIncludingOT"},
+        ],
+    }
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        return SimpleNamespace(success=[match], failed=[], partial=[])
+
+    directory = EventDirectory()
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"basketball": ("basketball", ["nba"])},
+        markets_by_sport_key={"basketball": ("home_away",)},
+        scrape_fn=fake_scrape,
+    )
+    snapshots = await loader.fetch_odds("basketball")
+    assert {(s.market, s.selection) for s in snapshots} == {
+        (Market.H2H, "Test Hawks"),
+        (Market.H2H, "Test Bulls"),
+    }
+    teams = directory.lookup(str(match["match_link"]))
+    assert teams is not None
+    assert teams.starts_at is not None  # kickoff parsed from match_date

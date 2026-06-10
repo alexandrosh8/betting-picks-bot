@@ -69,5 +69,5 @@ def test_value_strategy_defaults_are_the_v3_train_chosen_optimum() -> None:
     s = make_settings()
     assert s.pick_strategy == "value"
     assert s.value_min_edge == 0.03
-    assert s.value_min_odds == 1.30
+    assert s.value_min_odds == 1.60  # user policy: no picks below 1.60
     assert DevigMethod(s.value_devig) is DevigMethod.SHIN

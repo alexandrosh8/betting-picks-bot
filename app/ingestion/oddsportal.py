@@ -23,12 +23,51 @@ logger = logging.getLogger(__name__)
 
 ScrapeFn = Callable[..., Awaitable[Any]]
 
-# OddsHarvester market key -> (our Market, [(odds_label, selection_builder)])
-_MARKETS: dict[str, Market] = {
-    "1x2": Market.H2H,
-    "over_under_2_5": Market.TOTALS,
+# OddsHarvester market keys we can devig SOUNDLY (mutually-exclusive,
+# full-coverage outcomes). Asian/European handicap keys are deliberately
+# rejected: each line is a separate submarket (integer/quarter AH lines
+# carry push outcomes), so naive devig is invalid — pricing those needs the
+# penaltyblog grid bridge (goal_expectancy_extended + create_dixon_coles_grid,
+# docs/research/value-platform-repo-research.md).
+_EXACT_MARKETS: dict[str, Market] = {
+    "1x2": Market.H2H,  # football/basketball 3-way
+    "home_away": Market.H2H,  # basketball moneyline (OddsHarvester has no "moneyline" key)
     "btts": Market.BTTS,
+    "dnb": Market.DNB,
+    "double_chance": Market.DOUBLE_CHANCE,
 }
+
+
+def _market_for_key(key: str) -> Market | None:
+    if key in _EXACT_MARKETS:
+        return _EXACT_MARKETS[key]
+    if key.startswith("over_under_"):
+        return Market.TOTALS
+    return None
+
+
+def _totals_line(market_key: str) -> str:
+    """'over_under_2_5' -> '2.5'; 'over_under_games_215_5' -> '215.5'."""
+    raw = market_key.removeprefix("over_under_").removeprefix("games_")
+    return raw.replace("_", ".")
+
+
+def _validate_markets(markets: Sequence[str]) -> None:
+    unknown = [m for m in markets if _market_for_key(m) is None]
+    if unknown:
+        hint = ""
+        if any("handicap" in m for m in unknown):
+            hint = (
+                " (handicap submarkets cannot be naively devigged — they need "
+                "the derived-pricing bridge, see app/edge/value.py docstring)"
+            )
+        raise ValueError(f"unsupported oddsportal markets: {unknown}{hint}")
+    totals = [m for m in markets if m.startswith("over_under_")]
+    if len(totals) > 1:
+        # multiple totals lines would collapse into ONE Market.TOTALS group
+        # per event and corrupt devig (selections across lines are not
+        # mutually exclusive).
+        raise ValueError(f"configure at most one over/under line, got: {totals}")
 
 
 async def _default_scrape(**kwargs: Any) -> Any:
@@ -51,14 +90,17 @@ class OddsPortalLoader:
         headless: bool = True,
         max_pages: int = 1,
         date: str | None = None,
+        markets_by_sport_key: dict[str, Sequence[str]] | None = None,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
-        (oddsharvester sport, [oddsportal league slugs]). `date` is an
-        optional YYYYMMDD filter; None (default) scrapes the general upcoming
-        page, which is what carries live pre-match odds."""
-        unknown = [m for m in markets if m not in _MARKETS]
-        if unknown:
-            raise ValueError(f"unsupported oddsportal markets: {unknown}")
+        (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
+        overrides `markets` per sport key (football and basketball use
+        different OddsHarvester market keys). `date` is an optional YYYYMMDD
+        filter; None (default) scrapes the general upcoming page, which is
+        what carries live pre-match odds."""
+        self._markets_by_sport = {k: tuple(v) for k, v in (markets_by_sport_key or {}).items()}
+        for market_list in (tuple(markets), *self._markets_by_sport.values()):
+            _validate_markets(market_list)
         self._directory = directory
         self._config = dict(leagues_by_sport_key)
         self._markets = tuple(markets)
@@ -66,6 +108,9 @@ class OddsPortalLoader:
         self._headless = headless
         self._max_pages = max_pages
         self._date = date
+
+    def _markets_for(self, sport_key: str) -> tuple[str, ...]:
+        return self._markets_by_sport.get(sport_key, self._markets)
 
     async def fetch_odds(self, sport_key: str) -> list[OddsSnapshotIn]:
         if sport_key not in self._config:
@@ -77,20 +122,22 @@ class OddsPortalLoader:
             sport=sport,
             date=self._date,
             leagues=leagues,
-            markets=list(self._markets),
+            markets=list(self._markets_for(sport_key)),
             headless=self._headless,
             max_pages=self._max_pages,
         )
         matches = getattr(result, "success", None) or []
         snapshots: list[OddsSnapshotIn] = []
         for match in matches:
-            snapshots.extend(self._convert_match(match, now))
+            snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))
         logger.info(
             "oddsportal %s: %d matches -> %d snapshots", sport_key, len(matches), len(snapshots)
         )
         return snapshots
 
-    def _convert_match(self, match: dict[str, Any], now: datetime) -> list[OddsSnapshotIn]:
+    def _convert_match(
+        self, match: dict[str, Any], now: datetime, markets: Sequence[str]
+    ) -> list[OddsSnapshotIn]:
         home = str(match.get("home_team") or "").strip()
         away = str(match.get("away_team") or "").strip()
         if not home or not away:
@@ -109,9 +156,11 @@ class OddsPortalLoader:
         captured_at = _parse_ts(match.get("scraped_date")) or now
 
         snapshots: list[OddsSnapshotIn] = []
-        for market_key in self._markets:
+        for market_key in markets:
             entries = match.get(f"{market_key}_market") or []
-            market = _MARKETS[market_key]
+            market = _market_for_key(market_key)
+            if market is None:  # pragma: no cover — blocked by _validate_markets
+                continue
             seen_books: set[str] = set()
             for entry in entries:
                 if not isinstance(entry, dict):
@@ -142,13 +191,25 @@ class OddsPortalLoader:
 
 def _selections(market_key: str, home: str, away: str) -> list[tuple[str, str]]:
     """OddsHarvester odds-label -> our selection name (must match what the
-    model layer emits so the pipeline join works)."""
+    model layer emits so the pipeline join works). Label names verified
+    against OddsHarvester's SportMarketRegistrar (2026-06-10 research)."""
     if market_key == "1x2":
         return [("1", home), ("X", "Draw"), ("2", away)]
-    if market_key == "over_under_2_5":
-        return [("odds_over", "Over 2.5"), ("odds_under", "Under 2.5")]
+    if market_key == "home_away":  # basketball moneyline
+        return [("1", home), ("2", away)]
     if market_key == "btts":
         return [("btts_yes", "BTTS Yes"), ("btts_no", "BTTS No")]
+    if market_key == "dnb":
+        return [("dnb_team1", home), ("dnb_team2", away)]
+    if market_key == "double_chance":
+        return [
+            ("1X", f"{home} or Draw"),
+            ("12", f"{home} or {away}"),
+            ("X2", f"Draw or {away}"),
+        ]
+    if market_key.startswith("over_under_"):
+        line = _totals_line(market_key)
+        return [("odds_over", f"Over {line}"), ("odds_under", f"Under {line}")]
     return []
 
 

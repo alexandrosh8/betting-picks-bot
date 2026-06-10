@@ -37,6 +37,12 @@ across 18 leagues (≈2-3/week). For more volume at a thinner edge, set
 incremental CLV +0.019). **ROI at n=62 is noise-dominated — the number to
 trust is the incremental CLV; plan around CLV, not the +22% point estimate.**
 
+**User odds floor (`VALUE_MIN_ODDS=1.60`):** re-running the full procedure
+with `--min-odds 1.6` leaves the train choice unchanged (shin/0.03, train
+ROI +18.8% n=234) and the holdout intact: **n=58, ROI +21.1%, incremental
+CLV +0.1082 (> 2SE), CLV vs Max close +0.0826.** The floor costs almost
+nothing — picks at this edge threshold rarely sit below 1.60 anyway.
+
 ## Corrected methodology (what changed in v2 and why)
 
 The first version of this document overstated the result. The deep review

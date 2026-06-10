@@ -132,6 +132,7 @@ def bets_for(
     thr: float,
     devig_method: DevigMethod = DevigMethod.POWER,
     markets: tuple[str, ...] = ("1x2",),
+    min_odds: float = 1.0,
 ) -> list[VBet]:
     """One bet per (match, market): the highest-edge selection >= threshold."""
     out: list[VBet] = []
@@ -149,6 +150,8 @@ def bets_for(
             close_m = devig(mxc, method=devig_method) if None not in mxc else None  # type: ignore[arg-type]
             best: tuple[float, int] | None = None  # (edge, idx)
             for i in range(len(ps)):
+                if mx[i] < min_odds:  # type: ignore[operator]
+                    continue  # odds floor (user policy: no short prices)
                 edge = sharp[i] - 1.0 / mx[i]  # type: ignore[operator]
                 if edge >= thr and (best is None or edge > best[0]):
                     best = (edge, i)
@@ -216,13 +219,15 @@ async def main() -> None:
     p.add_argument("--train-seasons", default="1920,2021,2122,2223,2324")
     p.add_argument("--test-seasons", default="2425,2526")
     p.add_argument("--markets", default="1x2,ou25")
+    p.add_argument("--min-odds", type=float, default=1.0, help="odds floor for candidate picks")
     args = p.parse_args()
     leagues = [x.strip() for x in args.leagues.split(",") if x.strip()]
     train_s = [x.strip() for x in args.train_seasons.split(",") if x.strip()]
     test_s = [x.strip() for x in args.test_seasons.split(",") if x.strip()]
     markets = tuple(x.strip() for x in args.markets.split(",") if x.strip())
+    min_odds = args.min_odds
 
-    print(f"\nVALUE BACKTEST v3 — {len(leagues)} leagues, markets {markets}")
+    print(f"\nVALUE BACKTEST v3 — {len(leagues)} leagues, markets {markets}, min_odds {min_odds}")
     print(f"TRAIN {train_s} (devig x threshold sweep) | TEST {test_s} (held out, one shot)")
     print("One bet per (match, market); CLV vs Pinnacle close AND Max-of-books close.\n")
 
@@ -237,10 +242,10 @@ async def main() -> None:
     sweep: list[tuple[DevigMethod, float, Stats]] = []
     baselines: dict[DevigMethod, Stats] = {}
     for dm in devig_methods:
-        baselines[dm] = Stats.from_bets(bets_for(train_rows, 0.0, dm, markets))
+        baselines[dm] = Stats.from_bets(bets_for(train_rows, 0.0, dm, markets, min_odds))
         print(_fmt(baselines[dm], f"{dm.value[:5]}/0.000"))
         for thr in thresholds:
-            s = Stats.from_bets(bets_for(train_rows, thr, dm, markets))
+            s = Stats.from_bets(bets_for(train_rows, thr, dm, markets, min_odds))
             sweep.append((dm, thr, s))
             print(_fmt(s, f"{dm.value[:5]}/{thr:.3f}", baselines[dm]))
 
@@ -256,12 +261,12 @@ async def main() -> None:
     )
 
     print("\nHELD-OUT TEST evaluation (single shot, never tuned on):")
-    baseline_test = Stats.from_bets(bets_for(test_rows, 0.0, best_dm, markets))
-    test = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, markets))
+    baseline_test = Stats.from_bets(bets_for(test_rows, 0.0, best_dm, markets, min_odds))
+    test = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, markets, min_odds))
     print(_fmt(baseline_test, "0.000"))
     print(_fmt(test, f"{best_thr:.3f}", baseline_test))
     for market in markets:
-        m_stats = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, (market,)))
+        m_stats = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, (market,), min_odds))
         print(_fmt(m_stats, f"  {market}", baseline_test))
 
     # computed verdict (never hardcoded): selection skill on held-out data =

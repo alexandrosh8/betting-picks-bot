@@ -123,8 +123,9 @@ async def main() -> None:
         )
     print("\nManual review required. This system does not place bets.")
     print(
-        "Backtest: edge>=0.015 -> +9.25% ROI, CLV +0.043 (conclusive), beats close 77% "
-        "(EPL+5 leagues, 5 seasons). Real CLV lower — soft books limit winners."
+        "Backtest v3 (18 leagues, 7 seasons, holdout): edge>=0.03 -> +22.4% ROI, "
+        "incremental CLV +0.107 (>2SE); edge>=0.015 tier -> +2.5% ROI, CLV +0.019. "
+        "Real CLV lower — soft books limit winners."
     )
 
 

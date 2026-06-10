@@ -7,19 +7,31 @@ place a bet.
 
 import logging
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import insert, select, update
+from fastapi.responses import HTMLResponse
+from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
 from app.schemas.events import ResultIn
 from app.storage.models import ManualBetLog, Pick, ResultTracking
+from app.storage.repositories import latest_picks_with_events
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Self-contained dashboard page (no build step, no CDN — works offline and
+# identically on the Ubuntu VPS). Data is fetched from /picks client-side.
+_DASHBOARD_HTML = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+
+
+@router.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard() -> str:
+    return _DASHBOARD_HTML
 
 
 @router.get("/health")
@@ -32,31 +44,7 @@ async def latest_picks(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[dict[str, Any]]:
-    result = await session.execute(select(Pick).order_by(Pick.created_at.desc()).limit(limit))
-    picks = result.scalars().all()
-    return [
-        {
-            "id": p.id,
-            "event_id": p.event_id,
-            "market": p.market,
-            "selection": p.selection,
-            "bookmaker": p.bookmaker,
-            "decimal_odds": str(p.decimal_odds),
-            "model_probability": str(p.model_probability),
-            "fair_probability": str(p.fair_probability),
-            "edge": str(p.edge),
-            "ev": str(p.ev),
-            "confidence": str(p.confidence),
-            "recommended_stake_fraction": str(p.recommended_stake_fraction),
-            "recommended_stake_amount": str(p.recommended_stake_amount),
-            "status": p.status,
-            "created_at": p.created_at.isoformat(),
-            "clv_log": str(p.clv_log) if p.clv_log is not None else None,
-            "beat_close": p.beat_close,
-            "manual_betting_reminder": "Manual review required. This system does not place bets.",
-        }
-        for p in picks
-    ]
+    return await latest_picks_with_events(session, limit)
 
 
 @router.post("/picks/{pick_id}/result", status_code=201)

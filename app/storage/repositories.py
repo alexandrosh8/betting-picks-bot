@@ -8,10 +8,12 @@ re-poll of the same market state never duplicates rows.
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.ingestion.base import EventTeams
 from app.schemas.picks import PickOut
@@ -63,10 +65,16 @@ async def _get_or_create_event(
     away_id: int,
     external_ref: str,
     starts_at: datetime,
+    known_kickoff: bool = False,
 ) -> int:
-    found = await session.scalar(select(Event.id).where(Event.external_ref == external_ref))
-    if found is not None:
-        return found
+    existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
+    if existing is not None:
+        # Earlier rows may carry a pick-time placeholder; a real kickoff from
+        # the source upgrades it so the dashboard shows the true start.
+        if known_kickoff and existing.starts_at != starts_at:
+            existing.starts_at = starts_at
+            await session.flush()
+        return existing.id
     event = Event(
         sport_id=sport_id,
         league_id=league_id,
@@ -94,6 +102,50 @@ async def _get_or_create_model_version(
     return mv.id
 
 
+async def latest_picks_with_events(session: AsyncSession, limit: int = 50) -> list[dict[str, Any]]:
+    """Latest picks joined with their event (match label, league, kickoff) —
+    the payload served by GET /picks and rendered by the dashboard.
+    All datetimes are UTC ISO-8601; the frontend converts for display only."""
+    home = aliased(Team)
+    away = aliased(Team)
+    rows = await session.execute(
+        select(Pick, home.name, away.name, League.name, Event.starts_at)
+        .join(Event, Pick.event_id == Event.id)
+        .join(home, Event.home_team_id == home.id)
+        .join(away, Event.away_team_id == away.id)
+        .join(League, Event.league_id == League.id)
+        .order_by(Pick.created_at.desc())
+        .limit(limit)
+    )
+    return [
+        {
+            "id": p.id,
+            "event_id": p.event_id,
+            "event": f"{home_name} vs {away_name}",
+            "league": league_name,
+            "starts_at": starts_at.isoformat(),
+            "market": p.market,
+            "selection": p.selection,
+            "bookmaker": p.bookmaker,
+            "decimal_odds": str(p.decimal_odds),
+            "model_probability": str(p.model_probability),
+            "fair_probability": str(p.fair_probability),
+            "edge": str(p.edge),
+            "ev": str(p.ev),
+            "confidence": str(p.confidence),
+            "recommended_stake_fraction": str(p.recommended_stake_fraction),
+            "recommended_stake_amount": str(p.recommended_stake_amount),
+            "reason_summary": p.reason_summary,
+            "status": p.status,
+            "created_at": p.created_at.isoformat(),
+            "clv_log": str(p.clv_log) if p.clv_log is not None else None,
+            "beat_close": p.beat_close,
+            "manual_betting_reminder": "Manual review required. This system does not place bets.",
+        }
+        for p, home_name, away_name, league_name, starts_at in rows.all()
+    ]
+
+
 async def persist_pick(
     session: AsyncSession,
     pick: PickOut,
@@ -108,7 +160,15 @@ async def persist_pick(
     home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
     away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
     event_id = await _get_or_create_event(
-        session, sport_id, league_id, home_id, away_id, pick.event_id, pick.created_at
+        session,
+        sport_id,
+        league_id,
+        home_id,
+        away_id,
+        pick.event_id,
+        # real kickoff when the loader knows it; else pick time as placeholder
+        starts_at=teams.starts_at or pick.created_at,
+        known_kickoff=teams.starts_at is not None,
     )
     model_version_id = await _get_or_create_model_version(
         session, sport_id, model_name, model_version

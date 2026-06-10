@@ -97,7 +97,15 @@ class OddsPortalLoader:
             return []
         event_id = str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
         league = str(match.get("league_name") or "")
-        self._directory.register(event_id, EventTeams(home=home, away=away, league=league))
+        self._directory.register(
+            event_id,
+            EventTeams(
+                home=home,
+                away=away,
+                league=league,
+                starts_at=_parse_ts(match.get("match_date")),
+            ),
+        )
         captured_at = _parse_ts(match.get("scraped_date")) or now
 
         snapshots: list[OddsSnapshotIn] = []

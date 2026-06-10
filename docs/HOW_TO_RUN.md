@@ -54,7 +54,17 @@ What runs (defaults from `.env`/`app/config.py` — the v3-validated config:
 - every 30 min: CLV true-up — refreshes each open pick's closing fair
   probability and `clv_log` (the live proof of edge)
 
-Check it:
+Check it — **open the dashboard in your browser**:
+
+```
+http://localhost:8000/
+```
+
+Crystal view of every pick: match, kickoff (your local time), market,
+selection, book, odds, edge, recommended stake, CLV badge, status — with
+search, status filter, summary cards, and 60s auto-refresh.
+
+Or raw JSON:
 
 ```bash
 curl localhost:8000/health

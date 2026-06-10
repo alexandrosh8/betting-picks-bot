@@ -86,6 +86,7 @@ export ODDS_SOURCE=oddsportal
 export ODDSPORTAL_FOOTBALL_LEAGUES=brazil-serie-a
 export FOOTBALLDATA_NEW_LEAGUE_CODE=BRA          # train DC on Brazil history
 uv run uvicorn app.main:app
+open http://localhost:8000/                       # the picks dashboard
 curl localhost:8000/picks
 curl -X POST localhost:8000/picks/1/result -H 'content-type: application/json' \
   -d '{"pick_id":"1","outcome":"won","bet_placed":true,"actual_stake":"10","actual_odds":2.1,"settled_at":"2026-06-10T20:00:00Z"}'

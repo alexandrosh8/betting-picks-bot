@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Betting Picks — Decision Support</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%233fb950'/%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --line: #21262d;
+        --text: #e6edf3;
+        --dim: #8b949e;
+        --green: #3fb950;
+        --red: #f85149;
+        --amber: #d29922;
+        --blue: #58a6ff;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font:
+          14px/1.5 -apple-system,
+          "Segoe UI",
+          Roboto,
+          sans-serif;
+        padding: 24px;
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 600;
+      }
+      .sub {
+        color: var(--dim);
+        font-size: 13px;
+        margin-top: 2px;
+      }
+      .banner {
+        background: #1c2128;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--amber);
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin: 16px 0;
+        color: var(--dim);
+        font-size: 13px;
+      }
+      .cards {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px 18px;
+        min-width: 150px;
+      }
+      .card .v {
+        font-size: 22px;
+        font-weight: 700;
+      }
+      .card .k {
+        color: var(--dim);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+      select,
+      input[type="search"],
+      button {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 12px;
+        font-size: 13px;
+      }
+      input[type="search"] {
+        width: 240px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        border-color: var(--blue);
+      }
+      .stamp {
+        color: var(--dim);
+        font-size: 12px;
+        margin-left: auto;
+      }
+      .tablewrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 1080px;
+        background: var(--panel);
+      }
+      th {
+        text-align: left;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--dim);
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        position: sticky;
+        top: 0;
+        background: var(--panel);
+      }
+      td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      tr:hover td {
+        background: #1c2128;
+      }
+      .num {
+        font-variant-numeric: tabular-nums;
+      }
+      .match {
+        font-weight: 600;
+      }
+      .league {
+        color: var(--dim);
+        font-size: 12px;
+      }
+      .sel {
+        color: var(--blue);
+        font-weight: 600;
+      }
+      .edge-hi {
+        color: var(--green);
+        font-weight: 700;
+      }
+      .edge-md {
+        color: var(--green);
+      }
+      .badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 2px 10px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .b-green {
+        background: rgba(63, 185, 80, 0.15);
+        color: var(--green);
+      }
+      .b-red {
+        background: rgba(248, 81, 73, 0.15);
+        color: var(--red);
+      }
+      .b-gray {
+        background: rgba(139, 148, 158, 0.12);
+        color: var(--dim);
+      }
+      .b-blue {
+        background: rgba(88, 166, 255, 0.12);
+        color: var(--blue);
+      }
+      .empty {
+        padding: 28px;
+        text-align: center;
+        color: var(--dim);
+      }
+      footer {
+        color: var(--dim);
+        font-size: 12px;
+        margin-top: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Betting Picks — Decision Support</h1>
+    <div class="sub">
+      Sharp-vs-soft value picks · fair price anchored on the sharpest book ·
+      CLV-tracked
+    </div>
+
+    <div class="banner">
+      Manual review required. This system does <b>not</b> place bets. Stakes are
+      informational (fractional Kelly). Betting involves risk — nothing here is
+      a guarantee of profit.
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="v" id="c-open">–</div>
+        <div class="k">Open picks</div>
+      </div>
+      <div class="card">
+        <div class="v" id="c-edge">–</div>
+        <div class="k">Avg edge (open)</div>
+      </div>
+      <div class="card">
+        <div class="v" id="c-clv">–</div>
+        <div class="k">Beat close (CLV)</div>
+      </div>
+      <div class="card">
+        <div class="v" id="c-settled">–</div>
+        <div class="k">Settled</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <select id="f-status">
+        <option value="">All statuses</option>
+        <option value="alerted" selected>Open (alerted)</option>
+        <option value="settled">Settled</option>
+      </select>
+      <input
+        type="search"
+        id="f-search"
+        placeholder="Search match, team, book, league…"
+      />
+      <button id="refresh">Refresh</button>
+      <span class="stamp" id="stamp">loading…</span>
+    </div>
+
+    <div class="tablewrap">
+      <table id="picks-table">
+        <thead>
+          <tr>
+            <th>Kickoff</th>
+            <th>Match</th>
+            <th>Market</th>
+            <th>Pick</th>
+            <th>Book</th>
+            <th>Odds</th>
+            <th>Fair&nbsp;%</th>
+            <th>Edge</th>
+            <th>EV</th>
+            <th>Stake</th>
+            <th>CLV</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr>
+            <td colspan="12" class="empty">loading…</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <footer>
+      Auto-refreshes every 60s · data: <code>GET /picks</code> · CLV = closing
+      line value; consistently positive CLV is the proof of real edge.
+    </footer>
+
+    <script>
+      "use strict";
+      let PICKS = [];
+      const $ = (id) => document.getElementById(id);
+      const MARKETS = {
+        h2h: "1X2",
+        totals: "O/U 2.5",
+        spreads: "Handicap",
+        btts: "BTTS",
+      };
+
+      const fmtLocal = (iso) =>
+        new Date(iso).toLocaleString(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      const pct = (x) => (Number(x) * 100).toFixed(1) + "%";
+
+      function badge(text, cls) {
+        const s = document.createElement("span");
+        s.className = "badge " + cls;
+        s.textContent = text; // untrusted strings only ever via textContent
+        return s;
+      }
+
+      function td(parent, content, cls) {
+        const c = document.createElement("td");
+        if (cls) c.className = cls;
+        if (content instanceof Node) c.appendChild(content);
+        else c.textContent = content;
+        parent.appendChild(c);
+        return c;
+      }
+
+      function render() {
+        const status = $("f-status").value;
+        const q = $("f-search").value.trim().toLowerCase();
+        const rows = PICKS.filter(
+          (p) =>
+            (!status || p.status === status) &&
+            (!q ||
+              [p.event, p.selection, p.bookmaker, p.league, p.market]
+                .join(" ")
+                .toLowerCase()
+                .includes(q)),
+        );
+
+        const tbody = $("rows");
+        tbody.replaceChildren();
+        if (!rows.length) {
+          const tr = document.createElement("tr");
+          td(
+            tr,
+            "No picks match. New picks appear when a book beats the sharp fair price — check back after the next poll cycle.",
+            "empty",
+          ).colSpan = 12;
+          tbody.appendChild(tr);
+          return;
+        }
+
+        for (const p of rows) {
+          const tr = document.createElement("tr");
+          td(tr, fmtLocal(p.starts_at), "num");
+
+          const m = document.createElement("div");
+          const name = document.createElement("div");
+          name.className = "match";
+          name.textContent = p.event;
+          const lg = document.createElement("div");
+          lg.className = "league";
+          lg.textContent = p.league;
+          m.append(name, lg);
+          td(tr, m);
+
+          td(tr, MARKETS[p.market] || p.market);
+          td(tr, p.selection, "sel");
+          td(tr, p.bookmaker);
+          td(tr, Number(p.decimal_odds).toFixed(2), "num");
+          td(tr, pct(p.model_probability), "num");
+          const e = Number(p.edge);
+          td(
+            tr,
+            "+" + pct(p.edge),
+            "num " + (e >= 0.05 ? "edge-hi" : "edge-md"),
+          );
+          td(tr, "+" + pct(p.ev), "num");
+          td(
+            tr,
+            Number(p.recommended_stake_amount).toFixed(2) +
+              " (" +
+              pct(p.recommended_stake_fraction) +
+              ")",
+            "num",
+          );
+
+          if (p.clv_log === null) td(tr, badge("pending", "b-gray"));
+          else {
+            const clvPct = (Math.exp(Number(p.clv_log)) - 1) * 100;
+            td(
+              tr,
+              badge(
+                (clvPct >= 0 ? "+" : "") + clvPct.toFixed(1) + "%",
+                p.beat_close ? "b-green" : "b-red",
+              ),
+            );
+          }
+          td(
+            tr,
+            badge(
+              p.status === "alerted" ? "open" : p.status,
+              p.status === "alerted" ? "b-blue" : "b-gray",
+            ),
+          );
+          tbody.appendChild(tr);
+        }
+      }
+
+      function summarize() {
+        const open = PICKS.filter((p) => p.status === "alerted");
+        $("c-open").textContent = String(open.length);
+        $("c-settled").textContent = String(
+          PICKS.filter((p) => p.status === "settled").length,
+        );
+        $("c-edge").textContent = open.length
+          ? pct(open.reduce((a, p) => a + Number(p.edge), 0) / open.length)
+          : "–";
+        const withClv = PICKS.filter((p) => p.clv_log !== null);
+        $("c-clv").textContent = withClv.length
+          ? withClv.filter((p) => p.beat_close).length + " / " + withClv.length
+          : "–";
+      }
+
+      async function load() {
+        try {
+          const res = await fetch("/picks?limit=200");
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          PICKS = await res.json();
+          summarize();
+          render();
+          $("stamp").textContent = "updated " + new Date().toLocaleTimeString();
+        } catch (err) {
+          $("stamp").textContent =
+            "load failed (" + err.message + ") — retrying in 60s";
+        }
+      }
+
+      $("f-status").addEventListener("change", render);
+      $("f-search").addEventListener("input", render);
+      $("refresh").addEventListener("click", load);
+      load();
+      setInterval(load, 60000);
+    </script>
+  </body>
+</html>

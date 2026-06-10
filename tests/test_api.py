@@ -31,6 +31,18 @@ def test_health_reports_picks_only_mode() -> None:
     assert body["mode"] == "picks-only"
 
 
+def test_dashboard_served_at_root() -> None:
+    client = TestClient(make_app())
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    # safety reminder must be visible on the dashboard
+    assert "not</b> place bets" in response.text
+    assert 'id="picks-table"' in response.text
+    # untrusted scrape strings must never go through innerHTML
+    assert "innerHTML" not in response.text
+
+
 def test_result_payload_validation_rejects_bad_outcome() -> None:
     client = TestClient(make_app())
     response = client.post(

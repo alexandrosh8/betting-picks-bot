@@ -3,6 +3,7 @@ in this package may write to any bookmaker, exchange, or odds provider."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from app.schemas.odds import OddsSnapshotIn
@@ -21,6 +22,7 @@ class EventTeams:
     home: str
     away: str
     league: str = ""
+    starts_at: datetime | None = None  # kickoff (UTC) when the source knows it
 
 
 class EventDirectory:

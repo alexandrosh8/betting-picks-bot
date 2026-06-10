@@ -15,7 +15,7 @@ from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.models import Pick
-from app.storage.repositories import persist_pick
+from app.storage.repositories import latest_picks_with_events, persist_pick
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
 
@@ -97,3 +97,23 @@ async def test_persisted_pick_roundtrips_fields(session) -> None:  # type: ignor
     assert row.status == "alerted"
     assert row.decimal_odds == Decimal("2.1000")
     assert row.stake_breakdown["final"] == 0.02
+
+
+async def test_latest_picks_payload_carries_event_fields(session) -> None:  # type: ignore[no-untyped-def]
+    # The dashboard needs match label / league / kickoff — not bare event ids.
+    kickoff = datetime(2026, 6, 11, 19, 0, tzinfo=UTC)
+    teams = EventTeams(
+        home="Alpha FC", away="Beta United", league="test-league-persist", starts_at=kickoff
+    )
+    await persist_pick(session, make_pick("evt-dashboard"), teams, "value-sharp-vs-soft", "t-3")
+
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["bookmaker"] == "testbook"]
+    assert ours, "persisted pick missing from the /picks payload"
+    p = ours[0]
+    assert p["event"] == "Alpha FC vs Beta United"
+    assert p["league"] == "test-league-persist"
+    assert p["starts_at"] == kickoff.isoformat()  # real kickoff, UTC ISO-8601
+    assert p["selection"] == "Alpha FC"
+    assert p["reason_summary"] == "persistence test"
+    assert "does not place bets" in p["manual_betting_reminder"]

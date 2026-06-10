@@ -47,6 +47,7 @@ async def scrape(league: str, max_pages: int) -> list[dict]:
         markets=["1x2"],
         headless=True,
         max_pages=max_pages,
+        browser_timezone_id="UTC",  # else timestamps inherit the host offset
     )
     return getattr(res, "success", []) or []
 

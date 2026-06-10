@@ -84,6 +84,7 @@ async def scrape_wc(markets: tuple[str, ...] = ("1x2",)) -> list[dict]:
         markets=list(markets),
         headless=True,
         max_pages=2,
+        browser_timezone_id="UTC",  # else timestamps inherit the host offset
     )
     return getattr(res, "success", []) or []
 

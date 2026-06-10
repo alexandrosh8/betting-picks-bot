@@ -17,3 +17,11 @@
 - **OddsHarvester loader**: pass `date=None` (general upcoming page) for live
   odds — pinning `date=today` filters to that exact date and usually returns
   0 matches. Needs `uv run playwright install chromium`.
+
+- **OddsPortal timestamps inherit the scraping BROWSER's timezone** (found
+  2026-06-10): the page's embedded `startDate` epoch is pre-shifted to the
+  browser tz, so a Cyprus-time Mac produced kickoffs/capture times +3h while
+  labeled "UTC". Fix: ALWAYS pass `browser_timezone_id="UTC"` to
+  OddsHarvester's run_scraper (done in app/ingestion/oddsportal.py and both
+  pick scripts). Verified vs published WC2026 kickoffs. This was also the
+  root cause of the "future captured_at" clamp.

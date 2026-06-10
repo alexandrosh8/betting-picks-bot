@@ -148,6 +148,10 @@ class OddsPortalLoader:
             markets=list(self._markets_for(sport_key)),
             headless=self._headless,
             max_pages=self._max_pages,
+            # CRITICAL: oddsportal embeds timestamps shifted to the BROWSER's
+            # timezone; without this, kickoffs/capture times inherit the host
+            # offset (observed +3h on a Cyprus-time Mac) while labeled UTC.
+            browser_timezone_id="UTC",
         )
         matches = getattr(result, "success", None) or []
         snapshots: list[OddsSnapshotIn] = []

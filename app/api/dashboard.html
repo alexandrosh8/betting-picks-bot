@@ -357,7 +357,7 @@
       </div>
       <div class="card">
         <div class="v" id="c-clv">–</div>
-        <div class="k">Beat close (CLV)</div>
+        <div class="k" id="c-clv-k">Beat close (all picks)</div>
       </div>
       <div class="card">
         <div class="v" id="c-settled">–</div>
@@ -582,10 +582,17 @@
         $("c-edge").textContent = open.length
           ? pct(open.reduce((a, p) => a + Number(p.edge), 0) / open.length)
           : "–";
+        // CLV record counts ALL picks ever trued-up (incl. superseded
+        // history); "pending" = open picks awaiting their first 30-min
+        // true-up pass since creation.
         const withClv = PICKS.filter((p) => p.clv_log !== null);
         $("c-clv").textContent = withClv.length
           ? withClv.filter((p) => p.beat_close).length + " / " + withClv.length
           : "–";
+        const pending = open.filter((p) => p.clv_log === null).length;
+        $("c-clv-k").textContent =
+          "Beat close (all picks)" +
+          (pending ? " · " + pending + " pending" : "");
       }
 
       async function load() {

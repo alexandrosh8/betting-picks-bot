@@ -1,5 +1,21 @@
 # Decisions Log
 
+- 2026-06-10 (END OF SESSION, commit 5cc61d6) — **v4 config live**:
+  VALUE_DEVIG=differential_margin_weighting (7-method train sweep with 1.60
+  floor; holdout n=61 ROI +21.1% incCLV +0.1058 >2SE; shin indistinguishable;
+  holdout consulted 3x — trust CLV not ROI). 7 devig methods parity-tested
+  vs penaltyblog. **Markets live**: football 1x2/OU2.5/BTTS/DNB/DC(derived)
+  /AH-1.5(half-lines only — push lines rejected)/EH-1; basketball home_away
+  - totals band 215.5/220.5/225.5 (nba,euroleague). market_detail keys each
+    line's devig group. **Critical fix: browser_timezone_id="UTC" on ALL
+    run_scraper calls** — oddsportal epochs inherit browser tz (+3h on Cyprus
+    Mac); verified vs published WC2026 kickoffs. Dashboard: Cyprus time
+    display, supersede dedupe (version bump), kickoff refresh every cycle,
+    CLV card shows pending count, demo picks purged, safety note in footer.
+    Scheduler: misfire_grace_time=None (run on Mac wake). 199 tests.
+    **Next**: settlement engine (phase 4); optional dashboard settle button;
+    quarter-line AH needs penaltyblog grid bridge (researched, not built).
+
 - 2026-06-10 — Project is a **manual-betting +EV picks decision-support
   platform** (never an auto-betting bot, never "paper trading" by default).
   Enforcement layers: ADR-0002.

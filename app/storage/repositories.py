@@ -146,6 +146,30 @@ async def latest_picks_with_events(session: AsyncSession, limit: int = 50) -> li
     ]
 
 
+async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, datetime]) -> int:
+    """Upgrade stored events' starts_at to the kickoff the source reports.
+
+    Earlier rows carried a pick-time placeholder; this fixes ALL known events
+    seen in a scrape, independent of whether their picks re-emit. Returns the
+    number of rows changed."""
+    if not kickoffs:
+        return 0
+    changed = 0
+    rows = (
+        (await session.execute(select(Event).where(Event.external_ref.in_(kickoffs.keys()))))
+        .scalars()
+        .all()
+    )
+    for event in rows:
+        target = kickoffs[event.external_ref]
+        if event.starts_at != target:
+            event.starts_at = target
+            changed += 1
+    if changed:
+        await session.flush()
+    return changed
+
+
 async def persist_pick(
     session: AsyncSession,
     pick: PickOut,

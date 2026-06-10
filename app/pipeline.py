@@ -145,6 +145,30 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     return picks
 
 
+async def _refresh_kickoffs(deps: "PipelineDeps", event_ids: set[str]) -> None:
+    """Upgrade stored kickoffs for every scraped event (the source reports
+    the real match start; early rows carried pick-time placeholders)."""
+    if deps.session_factory is None or deps.directory is None:
+        return
+    kickoffs = {
+        event_id: teams.starts_at
+        for event_id in event_ids
+        if (teams := deps.directory.lookup(event_id)) is not None and teams.starts_at is not None
+    }
+    if not kickoffs:
+        return
+    from app.storage.repositories import refresh_event_kickoffs
+
+    try:
+        async with deps.session_factory() as session:
+            changed = await refresh_event_kickoffs(session, kickoffs)
+            await session.commit()
+        if changed:
+            logger.info("kickoff refresh updated %d events", changed)
+    except Exception as exc:  # kickoff hygiene must never break picking
+        logger.error("kickoff refresh failed: %s", type(exc).__name__)
+
+
 async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> None:
     """Persist the pick to the DB when a session factory + directory are set."""
     if deps.session_factory is None or deps.directory is None:
@@ -180,6 +204,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
 
     grouped = group_market_prices(snapshots)
     fair = event_fair_probs(grouped, deps.devig_method)
+    await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
 
     picks: list[PickOut] = []
     for (event_id, market, detail), (prices, captured) in grouped.items():
@@ -309,7 +334,7 @@ def event_fair_probs(grouped: GroupedMarkets, devig_method: DevigMethod) -> Even
                 out[(event_id, market, detail)] = anchored
                 if market is Market.H2H and len(prices) == 3:
                     h2h_3way[event_id] = (anchored, list(prices.keys()))
-    for (event_id, market, detail), (prices, _) in grouped.items():
+    for (event_id, market, detail), _group in grouped.items():
         if market is Market.DOUBLE_CHANCE and event_id in h2h_3way:
             anchored, selections = h2h_3way[event_id]
             home, away = selections[0], selections[-1]  # loader order: 1, X, 2

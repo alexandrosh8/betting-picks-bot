@@ -14,8 +14,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
-from app.storage.models import Pick
-from app.storage.repositories import latest_picks_with_events, persist_pick
+from app.storage.models import Event, Pick
+from app.storage.repositories import (
+    latest_picks_with_events,
+    persist_pick,
+    refresh_event_kickoffs,
+)
 
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
 
@@ -116,6 +120,22 @@ async def test_version_bump_supersedes_older_open_pick(session) -> None:  # type
         .all()
     )
     assert rows == ["superseded", "alerted"]
+
+
+async def test_refresh_event_kickoffs_upgrades_placeholder(session) -> None:  # type: ignore[no-untyped-def]
+    # Events created before the source kickoff was known carry a pick-time
+    # placeholder; a later scrape with the real kickoff must correct them.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(session, make_pick("evt-kickoff-fix"), teams, "value-sharp-vs-soft", "t-4")
+
+    real_kickoff = datetime(2026, 6, 25, 1, 0, tzinfo=UTC)
+    changed = await refresh_event_kickoffs(session, {"evt-kickoff-fix": real_kickoff})
+    assert changed == 1
+    row = await session.scalar(select(Event).where(Event.external_ref == "evt-kickoff-fix"))
+    assert row is not None
+    assert row.starts_at == real_kickoff
+    # idempotent: same kickoff again -> no change
+    assert await refresh_event_kickoffs(session, {"evt-kickoff-fix": real_kickoff}) == 0
 
 
 async def test_latest_picks_payload_carries_event_fields(session) -> None:  # type: ignore[no-untyped-def]

@@ -19,7 +19,18 @@
 - 2026-06-10 — **Fixed .gitignore bug**: `models/` (unanchored) was ignoring
   the whole `app/models/` source package — every fresh clone was broken.
   Anchored to `/models/`; verified via throwaway clone. [[gitignore-models-trap]]
-- 2026-06-10 — **BACKTEST PROVES no edge** (`docs/backtesting/findings.md`):
+- 2026-06-10 — **THE solid pick finder = sharp-vs-soft line shopping**
+  (`app/edge/value.py`, `docs/backtesting/value-findings.md`). NOT a goals
+  model. Fair value from the sharpest book (Pinnacle pref / lowest-overround
+  fallback); pick = another book beating it. Backtested CONCLUSIVE POSITIVE
+  CLV: edge>=0.015 → +9.25% ROI, CLV +0.043 (95% CI excludes 0), beats close
+  77% over 11,667 matches / 6 leagues / 5 seasons. Live demo: 12 sane WC value
+  picks. **Why:** this is the only approach that beat the market in backtest.
+  **How to apply:** `scripts/value_picks.py` for live; best data is The Odds
+  API regions=eu (has Pinnacle); OddsPortal free scrape works where it lists
+  enough books. Caveat: real CLV lower (soft books limit winners). The goals
+  model below is kept for context but is NOT the pick strategy.
+- 2026-06-10 — **BACKTEST PROVES goals model has no edge** (`docs/backtesting/findings.md`):
   walk-forward Dixon-Coles vs Bet365, CLV vs Pinnacle close. EPL ROI −3.4%,
   CLV −0.075; Championship ROI −9.1%, CLV −0.072 — both conclusive negative.
   The naive goals-only model does NOT beat the market; threshold/devig/blend

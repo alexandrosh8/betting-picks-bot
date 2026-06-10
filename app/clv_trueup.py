@@ -18,9 +18,8 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from app.backtesting.clv import clv_log
-from app.edge.value import anchor_fair_probs
 from app.ingestion.base import OddsLoader
-from app.pipeline import group_market_prices
+from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
 from app.storage.models import Event, Pick
 
@@ -46,16 +45,18 @@ async def true_up_clv(
             continue
         if not snapshots:
             continue
-        # (external event ref, market str) -> fair probs from the freshest book panel
-        fair_by_market: dict[tuple[str, str], dict[str, float]] = {}
-        for (event_id, market), (prices, _) in group_market_prices(snapshots).items():
-            # Same devig as the pick strategy, so live CLV is comparable to
-            # the backtest's CLV columns.
-            anchored = anchor_fair_probs(prices, devig_method=devig_method)
-            if anchored is not None:
-                fair_by_market[(event_id, str(market))] = anchored[1]
+        # Same devig + same fair rules as the pick pipeline (event_fair_probs),
+        # so live CLV is comparable to the backtest's CLV columns. Keyed by
+        # SELECTION: line-bearing selections ("Over 215.5", "Alpha FC -1.5")
+        # disambiguate submarkets that share one Market enum value.
+        fair_by_key: dict[tuple[str, str, str], float] = {}
+        for (event_id, market, _detail), (_book, fair) in event_fair_probs(
+            group_market_prices(snapshots), devig_method
+        ).items():
+            for sel, p in fair.items():
+                fair_by_key[(event_id, str(market), sel)] = p
 
-        if not fair_by_market:
+        if not fair_by_key:
             continue
         async with session_factory() as session:
             rows = (
@@ -66,10 +67,7 @@ async def true_up_clv(
                 )
             ).all()
             for pick, external_ref in rows:
-                fair = fair_by_market.get((external_ref, pick.market))
-                if fair is None:
-                    continue
-                closing_fair = fair.get(pick.selection)
+                closing_fair = fair_by_key.get((external_ref, pick.market, pick.selection))
                 if closing_fair is None or not 0.0 < closing_fair < 1.0:
                     continue
                 clv = clv_log(float(pick.decimal_odds), closing_fair)

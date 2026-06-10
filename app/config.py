@@ -58,29 +58,38 @@ class Settings(BaseSettings):
     #           docs/backtesting/value-findings.md). The validated default.
     # "model" = Dixon-Coles goals model (negative CLV in backtest; screens only).
     #
-    # Defaults below are the v3 train-chosen optimum (shin devig, edge >= 0.03:
-    # holdout ROI +22.4%, incremental CLV +0.107 > 2SE — few, high-conviction
-    # picks). Volume tier: VALUE_MIN_EDGE=0.015 (v2 holdout n=379, CLV +0.019).
+    # Defaults below are the v4 train-chosen optimum over SEVEN devig methods
+    # with the 1.60 odds floor: differential-margin devig, edge >= 0.03 —
+    # holdout n=61, ROI +21.1%, incremental CLV +0.106 (> 2SE). shin/0.03 is
+    # statistically indistinguishable (n=58, CLV +0.108). Volume tier:
+    # VALUE_MIN_EDGE=0.015 (v2 holdout n=379, CLV +0.019).
     pick_strategy: str = "value"
     value_min_edge: float = 0.03
     # User policy: never pick odds below 1.60. The backtest validated at
     # >= 1.30; a higher floor only narrows to a subset of validated picks.
     value_min_odds: float = 1.60
-    value_devig: str = "shin"  # power|shin|multiplicative|additive
+    value_devig: str = "differential_margin_weighting"  # any DevigMethod value
 
     # --- Odds sources (read-only access) -----------------------------------------
     # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);
     # "odds_api"   = The Odds API (needs keys below).
     odds_source: str = "oddsportal"
     oddsportal_football_leagues: str = "england-premier-league"  # csv of slugs
-    # Devig-sound markets only (loader rejects handicaps — derived pricing
-    # is the roadmap for those). 1x2+ou25 are backtest-validated; btts/dnb/
-    # double_chance use the identical mechanism on thinner evidence.
-    oddsportal_football_markets: str = "1x2,over_under_2_5,btts,dnb,double_chance"
+    # Devig-sound markets only: full mutually-exclusive outcome sets. Asian
+    # handicaps are HALF-LINES only (integer/quarter lines carry pushes and
+    # are rejected by the loader); European handicap is 3-way. 1x2+ou25 are
+    # backtest-validated; the rest use the identical mechanism on thinner
+    # evidence. Every extra market adds scrape time per match.
+    oddsportal_football_markets: str = (
+        "1x2,over_under_2_5,btts,dnb,double_chance,asian_handicap_-1_5,european_handicap_-1"
+    )
     # Basketball (club competitions only — OddsHarvester maps no national-team
     # events like EuroBasket). Empty leagues = basketball polling off.
+    # Totals lines are per-game; configure a band around current league totals.
+    oddsportal_basketball_markets: str = (
+        "home_away,over_under_games_215_5,over_under_games_220_5,over_under_games_225_5"
+    )
     oddsportal_basketball_leagues: str = "nba,euroleague"
-    oddsportal_basketball_markets: str = "home_away"  # moneyline; totals lines vary per game
     footballdata_league_codes: str = "E0"  # csv, European mmz4281 divisions
     footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
     # Optional: train on a "new leagues" country code (e.g. BRA) instead of the

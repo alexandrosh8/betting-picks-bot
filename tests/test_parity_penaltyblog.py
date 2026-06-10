@@ -22,6 +22,9 @@ METHOD_MAP = {
     DevigMethod.ADDITIVE: "additive",
     DevigMethod.POWER: "power",
     DevigMethod.SHIN: "shin",
+    DevigMethod.ODDS_RATIO: "odds_ratio",
+    DevigMethod.LOGARITHMIC: "logarithmic",
+    DevigMethod.DIFFERENTIAL_MARGIN: "differential_margin_weighting",
 }
 
 

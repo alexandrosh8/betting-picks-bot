@@ -235,7 +235,14 @@ async def main() -> None:
     test_rows = await load(leagues, test_s)
     print(f"train: {len(train_rows)} matches | test: {len(test_rows)} matches\n")
 
-    devig_methods = (DevigMethod.POWER, DevigMethod.SHIN, DevigMethod.MULTIPLICATIVE)
+    devig_methods = (
+        DevigMethod.POWER,
+        DevigMethod.SHIN,
+        DevigMethod.MULTIPLICATIVE,
+        DevigMethod.ODDS_RATIO,
+        DevigMethod.LOGARITHMIC,
+        DevigMethod.DIFFERENTIAL_MARGIN,
+    )
     thresholds = (0.005, 0.010, 0.015, 0.020, 0.030)
 
     print("TRAIN sweep (thr=0.000 rows are the BASELINE null — bet everything):")

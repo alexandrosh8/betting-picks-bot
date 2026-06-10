@@ -99,6 +99,25 @@ async def test_persisted_pick_roundtrips_fields(session) -> None:  # type: ignor
     assert row.stake_breakdown["final"] == 0.02
 
 
+async def test_version_bump_supersedes_older_open_pick(session) -> None:  # type: ignore[no-untyped-def]
+    # Same (event, market, selection) under a NEW strategy version must not
+    # show twice on the dashboard: the old open row flips to 'superseded'.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(session, make_pick("evt-supersede"), teams, "value-sharp-vs-soft", "v2")
+    await persist_pick(session, make_pick("evt-supersede"), teams, "value-sharp-vs-soft", "v3")
+
+    rows = (
+        (
+            await session.execute(
+                select(Pick.status).where(Pick.bookmaker == "testbook").order_by(Pick.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert rows == ["superseded", "alerted"]
+
+
 async def test_latest_picks_payload_carries_event_fields(session) -> None:  # type: ignore[no-untyped-def]
     # The dashboard needs match label / league / kickoff — not bare event ids.
     kickoff = datetime(2026, 6, 11, 19, 0, tzinfo=UTC)

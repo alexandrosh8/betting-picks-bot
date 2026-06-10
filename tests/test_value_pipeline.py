@@ -132,6 +132,35 @@ async def test_value_pipeline_handles_future_captured_at() -> None:
     assert picks[0].odds_age_seconds == 0.0
 
 
+async def test_value_pipeline_prices_half_line_handicap_directly() -> None:
+    # Half-line AH is a full 2-way market: direct devig anchor, line kept
+    # separate via market_detail. Pinnacle tight, SoftBook generous on home.
+    def ah(book: str, sel: str, odds: float) -> OddsSnapshotIn:
+        return OddsSnapshotIn(
+            event_id="evt-1",
+            bookmaker=book,
+            market=Market.SPREADS,
+            selection=sel,
+            decimal_odds=odds,
+            captured_at=NOW - timedelta(seconds=30),
+            ingested_at=NOW,
+            market_detail="asian_handicap_-1_5",
+        )
+
+    snaps = [
+        ah("Pinnacle", "Home FC -1.5", 2.00),
+        ah("Pinnacle", "Away FC +1.5", 1.95),
+        ah("SoftBook", "Home FC -1.5", 2.35),
+        ah("SoftBook", "Away FC +1.5", 1.70),
+    ]
+    sink = RecordingSink()
+    picks = await run_value_pipeline(make_deps(sink, FakeLoader(snaps)), "soccer")
+    assert len(picks) == 1
+    assert picks[0].selection == "Home FC -1.5"
+    assert picks[0].market == Market.SPREADS
+    assert picks[0].bookmaker == "SoftBook"
+
+
 async def test_value_pipeline_no_anchor_no_picks() -> None:
     # Only two books and neither is a named sharp -> no trustworthy anchor.
     snaps = [s for s in market_snapshots() if s.bookmaker != "Pinnacle"]

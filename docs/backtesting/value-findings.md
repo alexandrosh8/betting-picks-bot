@@ -43,6 +43,19 @@ ROI +18.8% n=234) and the holdout intact: **n=58, ROI +21.1%, incremental
 CLV +0.1082 (> 2SE), CLV vs Max close +0.0826.** The floor costs almost
 nothing — picks at this edge threshold rarely sit below 1.60 anyway.
 
+**v4 — seven devig methods (odds_ratio, logarithmic,
+differential_margin_weighting added, parity-tested vs penaltyblog 1e-8):**
+with the 1.60 floor the train sweep now chooses **differential-margin /
+0.03** (train ROI +19.5%, n=249, ahead of shin's +18.8%); one-shot holdout:
+**n=61, ROI +21.1%, incremental CLV +0.1058 (> 2SE), beats the Max close.**
+These are the live defaults. Caveats: (1) shin/0.03 is statistically
+indistinguishable on holdout (+0.1082 vs +0.1058, n≈60) — the conclusion is
+method-robust; (2) the holdout has now been consulted by three sweep rounds
+(v3, min-odds, v4), so treat the ROI point estimates with extra humility —
+the incremental-CLV signal, stable at +0.10–0.11 across every round, is the
+number to trust. odds_ratio and logarithmic produce IDENTICAL picks here
+(both are monotone margin reallocations that agree at these overrounds).
+
 ## Corrected methodology (what changed in v2 and why)
 
 The first version of this document overstated the result. The deep review

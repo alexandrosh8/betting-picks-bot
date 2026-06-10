@@ -24,11 +24,13 @@ logger = logging.getLogger(__name__)
 ScrapeFn = Callable[..., Awaitable[Any]]
 
 # OddsHarvester market keys we can devig SOUNDLY (mutually-exclusive,
-# full-coverage outcomes). Asian/European handicap keys are deliberately
-# rejected: each line is a separate submarket (integer/quarter AH lines
-# carry push outcomes), so naive devig is invalid — pricing those needs the
-# penaltyblog grid bridge (goal_expectancy_extended + create_dixon_coles_grid,
-# docs/research/value-platform-repo-research.md).
+# full-coverage outcomes). Each line of a totals/handicap family groups
+# separately via OddsSnapshotIn.market_detail. HALF-LINE Asian handicaps
+# (±0.5, ±1.5, …) and European handicaps (3-way incl. handicap-draw) are
+# full markets — direct devig is valid. INTEGER/QUARTER AH lines carry push
+# outcomes (probabilities do not sum to 1) and are rejected at construction;
+# pricing those would need the penaltyblog score-grid bridge
+# (docs/research/value-platform-repo-research.md).
 _EXACT_MARKETS: dict[str, Market] = {
     "1x2": Market.H2H,  # football/basketball 3-way
     "home_away": Market.H2H,  # basketball moneyline (OddsHarvester has no "moneyline" key)
@@ -43,31 +45,52 @@ def _market_for_key(key: str) -> Market | None:
         return _EXACT_MARKETS[key]
     if key.startswith("over_under_"):
         return Market.TOTALS
+    if key.startswith(("asian_handicap_", "european_handicap_")):
+        return Market.SPREADS
     return None
 
 
-def _totals_line(market_key: str) -> str:
-    """'over_under_2_5' -> '2.5'; 'over_under_games_215_5' -> '215.5'."""
-    raw = market_key.removeprefix("over_under_").removeprefix("games_")
-    return raw.replace("_", ".")
+def _line_from_key(market_key: str) -> float | None:
+    """'over_under_2_5' -> 2.5; 'asian_handicap_-1_5' -> -1.5;
+    'asian_handicap_games_-7_5_games' -> -7.5; 'european_handicap_+1' -> 1.0."""
+    raw = market_key
+    for prefix in (
+        "over_under_games_",
+        "over_under_",
+        "asian_handicap_games_",
+        "asian_handicap_",
+        "european_handicap_",
+    ):
+        if raw.startswith(prefix):
+            raw = raw.removeprefix(prefix).removesuffix("_games")
+            try:
+                return float(raw.replace("_", "."))
+            except ValueError:
+                return None
+    return None
+
+
+def _fmt_line(line: float) -> str:
+    return f"{line:+g}"
 
 
 def _validate_markets(markets: Sequence[str]) -> None:
     unknown = [m for m in markets if _market_for_key(m) is None]
     if unknown:
-        hint = ""
-        if any("handicap" in m for m in unknown):
-            hint = (
-                " (handicap submarkets cannot be naively devigged — they need "
-                "the derived-pricing bridge, see app/edge/value.py docstring)"
-            )
-        raise ValueError(f"unsupported oddsportal markets: {unknown}{hint}")
-    totals = [m for m in markets if m.startswith("over_under_")]
-    if len(totals) > 1:
-        # multiple totals lines would collapse into ONE Market.TOTALS group
-        # per event and corrupt devig (selections across lines are not
-        # mutually exclusive).
-        raise ValueError(f"configure at most one over/under line, got: {totals}")
+        raise ValueError(f"unsupported oddsportal markets: {unknown}")
+    for m in markets:
+        if m.startswith("asian_handicap"):
+            line = _line_from_key(m)
+            if line is None or abs(line % 1.0) != 0.5:
+                # integer/quarter lines have PUSH outcomes -> direct devig
+                # invalid; only half-lines are sound without a score grid.
+                raise ValueError(
+                    f"asian handicap line must be a half line (±0.5, ±1.5, …), got: {m}"
+                )
+        if m.startswith("over_under_") and _line_from_key(m) is None:
+            raise ValueError(f"cannot parse totals line from: {m}")
+        if m.startswith("european_handicap_") and _line_from_key(m) is None:
+            raise ValueError(f"cannot parse handicap line from: {m}")
 
 
 async def _default_scrape(**kwargs: Any) -> Any:
@@ -184,6 +207,7 @@ class OddsPortalLoader:
                             decimal_odds=odds,
                             captured_at=captured_at,
                             ingested_at=now,
+                            market_detail=market_key,
                         )
                     )
         return snapshots
@@ -207,9 +231,27 @@ def _selections(market_key: str, home: str, away: str) -> list[tuple[str, str]]:
             ("12", f"{home} or {away}"),
             ("X2", f"Draw or {away}"),
         ]
+    line = _line_from_key(market_key)
+    if line is None:
+        return []
     if market_key.startswith("over_under_"):
-        line = _totals_line(market_key)
-        return [("odds_over", f"Over {line}"), ("odds_under", f"Under {line}")]
+        return [("odds_over", f"Over {line:g}"), ("odds_under", f"Under {line:g}")]
+    if market_key.startswith("asian_handicap_games_"):  # basketball AH labels differ
+        return [
+            ("handicap_team_1", f"{home} {_fmt_line(line)}"),
+            ("handicap_team_2", f"{away} {_fmt_line(-line)}"),
+        ]
+    if market_key.startswith("asian_handicap_"):
+        return [
+            ("team1_handicap", f"{home} {_fmt_line(line)}"),
+            ("team2_handicap", f"{away} {_fmt_line(-line)}"),
+        ]
+    if market_key.startswith("european_handicap_"):
+        return [
+            ("team1_handicap", f"{home} {_fmt_line(line)}"),
+            ("draw_handicap", f"Draw ({_fmt_line(line)})"),
+            ("team2_handicap", f"{away} {_fmt_line(-line)}"),
+        ]
     return []
 
 

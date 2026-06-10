@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -199,4 +200,19 @@ async def persist_pick(
     )
     result = await session.execute(stmt)
     inserted = result.scalar_one_or_none()
+    if inserted is not None:
+        # A strategy-version bump re-emits the same opportunity under the new
+        # version; older OPEN rows for the same (event, market, selection)
+        # are duplicates on the dashboard — supersede them, keep history.
+        await session.execute(
+            sa_update(Pick)
+            .where(
+                Pick.event_id == event_id,
+                Pick.market == str(pick.market),
+                Pick.selection == pick.selection,
+                Pick.model_version_id != model_version_id,
+                Pick.status == "alerted",
+            )
+            .values(status="superseded")
+        )
     return inserted is not None

@@ -60,14 +60,15 @@ def test_odds_api_key_rotation_drops_empties() -> None:
     assert s.odds_api_keys() == ("test-key-one", "test-key-three")
 
 
-def test_value_strategy_defaults_are_the_v3_train_chosen_optimum() -> None:
-    # Chosen on TRAIN seasons only (shin devig, thr=0.03) and confirmed once
-    # on holdout — docs/backtesting/value-findings.md. Must parse as a valid
-    # DevigMethod or the scheduler would crash at startup.
+def test_value_strategy_defaults_are_the_train_chosen_optimum() -> None:
+    # v4: chosen on TRAIN seasons only over 7 devig methods with the 1.60
+    # odds floor, confirmed one-shot on holdout — docs/backtesting/
+    # value-findings.md. Must parse as a valid DevigMethod or the scheduler
+    # would crash at startup.
     from app.probabilities.devig import DevigMethod
 
     s = make_settings()
     assert s.pick_strategy == "value"
     assert s.value_min_edge == 0.03
     assert s.value_min_odds == 1.60  # user policy: no picks below 1.60
-    assert DevigMethod(s.value_devig) is DevigMethod.SHIN
+    assert DevigMethod(s.value_devig) is DevigMethod.DIFFERENTIAL_MARGIN

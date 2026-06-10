@@ -24,6 +24,10 @@ class DevigMethod(StrEnum):
     ADDITIVE = "additive"
     POWER = "power"
     SHIN = "shin"
+    # Buchdahl "Wisdom of the Crowds" family (parity-tested vs penaltyblog):
+    ODDS_RATIO = "odds_ratio"
+    LOGARITHMIC = "logarithmic"
+    DIFFERENTIAL_MARGIN = "differential_margin_weighting"
 
 
 def devig(
@@ -49,6 +53,12 @@ def devig(
         p = _power(q)
     elif method is DevigMethod.SHIN:
         p = _shin(q)
+    elif method is DevigMethod.ODDS_RATIO:
+        p = _odds_ratio(q)
+    elif method is DevigMethod.LOGARITHMIC:
+        p = _logarithmic(q)
+    elif method is DevigMethod.DIFFERENTIAL_MARGIN:
+        p = _differential_margin(arr, q)
     else:  # pragma: no cover - enum exhausts
         raise ValueError(f"unknown devig method: {method}")
 
@@ -89,6 +99,62 @@ def _power(q: _FloatArray) -> _FloatArray:
     except (RuntimeError, ValueError):
         logger.warning("power devig solve failed (booksum=%.6f); falling back", booksum)
         return _multiplicative(q)
+
+
+def _odds_ratio(q: _FloatArray) -> _FloatArray:
+    """Keith Cheung's odds-ratio method (Buchdahl, Wisdom of the Crowds):
+    p_i = q_i / (c + q_i - c*q_i), c solved so probabilities sum to 1."""
+
+    def probs_for(c: float) -> _FloatArray:
+        return q / (c + q - c * q)
+
+    def f(c: float) -> float:
+        return float(1.0 - probs_for(c).sum())
+
+    try:
+        c = float(brentq(f, 1e-9, 100.0, xtol=1e-12))
+        return probs_for(c)
+    except ValueError:
+        logger.warning("odds-ratio devig solve failed (booksum=%.6f); falling back", q.sum())
+        return _multiplicative(q)
+
+
+def _logarithmic(q: _FloatArray) -> _FloatArray:
+    """Additive shift in logit space: logit(p_i) = logit(q_i) - c, with c
+    solved so probabilities sum to 1 (penaltyblog's 'logarithmic')."""
+    if abs(q.sum() - 1.0) < 1e-12:
+        return q.copy()
+    safe = np.clip(q, 1e-15, 1.0 - 1e-15)
+    log_odds = np.log(safe / (1.0 - safe))
+
+    def f(c: float) -> float:
+        return float((1.0 / (1.0 + np.exp(-(log_odds - c)))).sum() - 1.0)
+
+    try:
+        try:
+            c = float(brentq(f, 0.0, 20.0, xtol=1e-12))
+        except ValueError:  # underround books need a negative shift
+            c = float(brentq(f, -20.0, 20.0, xtol=1e-12))
+        return 1.0 / (1.0 + np.exp(-(log_odds - c)))
+    except ValueError:
+        logger.warning("logarithmic devig solve failed (booksum=%.6f); falling back", q.sum())
+        return _multiplicative(q)
+
+
+def _differential_margin(odds: _FloatArray, q: _FloatArray) -> _FloatArray:
+    """Buchdahl's differential margin weighting: the overround is distributed
+    proportionally to the odds — fair_odds_i = n*odds_i / (n - margin*odds_i)."""
+    margin = q.sum() - 1.0
+    n = float(odds.size)
+    denom = n - margin * odds
+    if np.any(denom <= 0.0):
+        logger.warning("differential-margin devig denominator <= 0; falling back")
+        return _multiplicative(q)
+    p = denom / (n * odds)
+    if np.any(p <= 0.0) or np.any(p >= 1.0):
+        logger.warning("differential-margin devig out-of-range probability; falling back")
+        return _multiplicative(q)
+    return p
 
 
 def _shin(q: _FloatArray) -> _FloatArray:

@@ -169,13 +169,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
 
     No prediction model involved; deps.model is unused here.
     """
-    from app.edge.value import (
-        CONSENSUS_ANCHOR,
-        anchor_fair_probs,
-        double_chance_fair,
-        find_value_bets,
-        find_value_bets_with_fair,
-    )
+    from app.edge.value import CONSENSUS_ANCHOR, find_value_bets_with_fair
 
     snapshots = await deps.loader.fetch_odds(sport_key)
     # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
@@ -185,37 +179,21 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         return []
 
     grouped = group_market_prices(snapshots)
-    # 1X2 anchors per event — double chance has no devig-able book (its
-    # outcomes overlap), so its fair value derives from the 1X2 anchor.
-    h2h_anchor: dict[str, tuple[str, dict[str, float]]] = {}
-    for (event_id, market), (prices, _) in grouped.items():
-        if market is Market.H2H:
-            anchored = anchor_fair_probs(prices, devig_method=deps.devig_method)
-            if anchored is not None:
-                h2h_anchor[event_id] = anchored
+    fair = event_fair_probs(grouped, deps.devig_method)
 
     picks: list[PickOut] = []
-    for (event_id, market), (prices, captured) in grouped.items():
-        if market is Market.DOUBLE_CHANCE:
-            anchored_h2h = h2h_anchor.get(event_id)
-            teams = deps.directory.lookup(event_id) if deps.directory is not None else None
-            if anchored_h2h is None or teams is None:
-                continue
-            dc_fair = double_chance_fair(anchored_h2h[1], teams.home, teams.away)
-            value_bets = find_value_bets_with_fair(
-                prices,
-                dc_fair,
-                anchored_h2h[0],
-                min_edge=deps.value_min_edge,
-                min_odds=deps.value_min_odds,
-            )
-        else:
-            value_bets = find_value_bets(
-                prices,
-                min_edge=deps.value_min_edge,
-                min_odds=deps.value_min_odds,
-                devig_method=deps.devig_method,
-            )
+    for (event_id, market, detail), (prices, captured) in grouped.items():
+        anchored = fair.get((event_id, market, detail))
+        if anchored is None:
+            continue  # no trustworthy fair value for this market
+        anchor_book, fair_by_sel = anchored
+        value_bets = find_value_bets_with_fair(
+            prices,
+            fair_by_sel,
+            anchor_book,
+            min_edge=deps.value_min_edge,
+            min_odds=deps.value_min_odds,
+        )
         for v in value_bets:
             cap = captured.get((v.selection, v.best_book))
             age = max((now - cap).total_seconds(), 0.0) if cap else 0.0
@@ -287,19 +265,57 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
 
 
 GroupedMarkets = dict[
-    tuple[str, Market],
+    tuple[str, Market, str | None],
     tuple[dict[str, dict[str, float]], dict[tuple[str, str], datetime]],
 ]
 
 
 def group_market_prices(snapshots: Sequence[OddsSnapshotIn]) -> GroupedMarkets:
-    """Group snapshots into {(event_id, market): (selection->{book: odds},
-    (selection, book)->captured_at)} for the value finder and CLV true-up."""
+    """Group snapshots into {(event_id, market, market_detail):
+    (selection->{book: odds}, (selection, book)->captured_at)} for the value
+    finder and CLV true-up. `market_detail` keeps distinct lines (handicaps,
+    totals) in separate devig groups — mixing lines corrupts fair value."""
     out: GroupedMarkets = {}
     for snap in snapshots:
-        prices, captured = out.setdefault((snap.event_id, snap.market), ({}, {}))
+        key = (snap.event_id, snap.market, snap.market_detail)
+        prices, captured = out.setdefault(key, ({}, {}))
         prices.setdefault(snap.selection, {})[snap.bookmaker] = snap.decimal_odds
         captured[(snap.selection, snap.bookmaker)] = snap.captured_at
+    return out
+
+
+# Markets whose outcomes are mutually exclusive and exhaustive — direct
+# anchor devig of one book is sound. Loader config guarantees SPREADS groups
+# are half-line AH (no pushes) or 3-way European handicap. Double chance is
+# NOT direct (overlapping legs, quotes sum ~200%) — derived from 1X2.
+_DIRECT_MARKETS = frozenset({Market.H2H, Market.TOTALS, Market.BTTS, Market.DNB, Market.SPREADS})
+
+EventFairProbs = dict[tuple[str, Market, str | None], tuple[str, dict[str, float]]]
+
+
+def event_fair_probs(grouped: GroupedMarkets, devig_method: DevigMethod) -> EventFairProbs:
+    """Trustworthy (anchor_book, selection->fair) per (event, market, line).
+
+    Shared by the live value pipeline and the CLV true-up so picks and their
+    closing-line values are priced by the SAME rules."""
+    from app.edge.value import anchor_fair_probs, double_chance_fair
+
+    out: EventFairProbs = {}
+    h2h_3way: dict[str, tuple[tuple[str, dict[str, float]], list[str]]] = {}
+    for (event_id, market, detail), (prices, _) in grouped.items():
+        if market in _DIRECT_MARKETS:
+            anchored = anchor_fair_probs(prices, devig_method=devig_method)
+            if anchored is not None:
+                out[(event_id, market, detail)] = anchored
+                if market is Market.H2H and len(prices) == 3:
+                    h2h_3way[event_id] = (anchored, list(prices.keys()))
+    for (event_id, market, detail), (prices, _) in grouped.items():
+        if market is Market.DOUBLE_CHANCE and event_id in h2h_3way:
+            anchored, selections = h2h_3way[event_id]
+            home, away = selections[0], selections[-1]  # loader order: 1, X, 2
+            dc_fair = double_chance_fair(anchored[1], home, away)
+            if dc_fair:
+                out[(event_id, market, detail)] = (anchored[0], dc_fair)
     return out
 
 

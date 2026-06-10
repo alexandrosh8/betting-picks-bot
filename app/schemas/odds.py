@@ -21,6 +21,9 @@ class OddsSnapshotIn(InternalModel):
     liquidity: float | None = Field(default=None, ge=0.0)
     captured_at: datetime  # provider-reported time of the price
     ingested_at: datetime  # our wall-clock at ingestion
+    # Provider submarket key (e.g. "asian_handicap_-1_5", "over_under_215_5").
+    # Distinct lines of the same Market MUST group separately for devig.
+    market_detail: str | None = None
 
     _utc_captured = field_validator("captured_at")(to_utc)
     _utc_ingested = field_validator("ingested_at")(to_utc)

@@ -110,26 +110,31 @@ def test_unsupported_market_rejected_at_construction() -> None:
         )
 
 
-def test_handicap_markets_rejected_with_hint() -> None:
-    # naive devig of per-line handicap submarkets is invalid — must be
-    # blocked at construction, not silently mis-grouped.
-    with pytest.raises(ValueError, match="handicap"):
-        OddsPortalLoader(
-            directory=EventDirectory(),
-            leagues_by_sport_key={},
-            markets=("1x2", "asian_handicap_-1_5"),
-        )
+def test_push_bearing_handicap_lines_rejected() -> None:
+    # Integer/quarter AH lines carry PUSH outcomes (probs do not sum to 1) —
+    # direct devig is invalid; only half-lines are accepted.
+    for bad in ("asian_handicap_-1", "asian_handicap_+0_25", "asian_handicap_-1_75"):
+        with pytest.raises(ValueError, match="half line"):
+            OddsPortalLoader(
+                directory=EventDirectory(),
+                leagues_by_sport_key={},
+                markets=("1x2", bad),
+            )
+    # half lines and European (3-way) handicaps are sound full markets
+    OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={},
+        markets=("asian_handicap_-1_5", "asian_handicap_games_-7_5_games", "european_handicap_-1"),
+    )
 
 
-def test_multiple_totals_lines_rejected() -> None:
-    # two O/U lines would collapse into one Market.TOTALS group per event
-    # and corrupt the devig (outcomes across lines are not exclusive).
-    with pytest.raises(ValueError, match="one over/under line"):
-        OddsPortalLoader(
-            directory=EventDirectory(),
-            leagues_by_sport_key={},
-            markets=("over_under_2_5", "over_under_3_5"),
-        )
+def test_multiple_totals_lines_allowed_via_detail_grouping() -> None:
+    # distinct lines group separately by market_detail — no devig mixing.
+    OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={},
+        markets=("over_under_2_5", "over_under_3_5"),
+    )
 
 
 async def test_football_extended_markets_parse() -> None:
@@ -158,6 +163,35 @@ async def test_football_extended_markets_parse() -> None:
     assert (Market.DOUBLE_CHANCE, "Alpha FC or Draw") in by_market
     assert (Market.DOUBLE_CHANCE, "Alpha FC or Beta United") in by_market
     assert (Market.DOUBLE_CHANCE, "Draw or Beta United") in by_market
+
+
+async def test_handicap_markets_parse_with_line_in_selection_and_detail() -> None:
+    match = dict(MATCH)
+    match["asian_handicap_-1_5_market"] = [
+        {"team1_handicap": "2.10", "team2_handicap": "1.75", "bookmaker_name": "BookieOne"},
+    ]
+    match["european_handicap_-1_market"] = [
+        {
+            "team1_handicap": "2.60",
+            "draw_handicap": "3.50",
+            "team2_handicap": "2.40",
+            "bookmaker_name": "BookieOne",
+        },
+    ]
+    directory = EventDirectory()
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        markets=("asian_handicap_-1_5", "european_handicap_-1"),
+        scrape_fn=make_loader(directory, [match])._scrape,
+    )
+    snapshots = await loader.fetch_odds("soccer")
+    triples = {(s.market, s.selection, s.market_detail) for s in snapshots}
+    assert (Market.SPREADS, "Alpha FC -1.5", "asian_handicap_-1_5") in triples
+    assert (Market.SPREADS, "Beta United +1.5", "asian_handicap_-1_5") in triples
+    assert (Market.SPREADS, "Alpha FC -1", "european_handicap_-1") in triples
+    assert (Market.SPREADS, "Draw (-1)", "european_handicap_-1") in triples
+    assert (Market.SPREADS, "Beta United +1", "european_handicap_-1") in triples
 
 
 async def test_basketball_home_away_parses_as_two_way_h2h() -> None:

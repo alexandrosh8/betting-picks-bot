@@ -205,6 +205,9 @@ def build_scheduler(
             id="poll_odds",
             max_instances=1,
             coalesce=True,
+            # Laptop sleep makes jobs "miss" their slot; run them on wake
+            # (coalesced to one run) instead of skipping to the next slot.
+            misfire_grace_time=None,
         )
 
         if session_factory is not None:
@@ -224,6 +227,7 @@ def build_scheduler(
                 id="clv_trueup",
                 max_instances=1,
                 coalesce=True,
+                misfire_grace_time=None,  # run on wake, don't skip
             )
 
     async def settle_results() -> None:

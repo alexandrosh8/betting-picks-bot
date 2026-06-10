@@ -3,6 +3,23 @@
 - 2026-06-10 — Project is a **manual-betting +EV picks decision-support
   platform** (never an auto-betting bot, never "paper trading" by default).
   Enforcement layers: ADR-0002.
+- 2026-06-10 (markets + dashboard, commit 0c0954a) — **PICKS TERMINAL
+  dashboard at GET /** (self-contained HTML, textContent-only XSS-safe,
+  test-enforced). **Markets live**: football 1x2/OU2.5/BTTS/DNB/double-chance
+  - basketball home_away (nba,euroleague; OddsHarvester maps NO EuroBasket).
+    Double-chance fair is DERIVED from the 1X2 anchor (pairwise sums —
+    `double_chance_fair`); direct DC devig is invalid (quotes sum ~200%).
+    Handicap market keys are REJECTED by the loader (per-line submarkets +
+    push outcomes break naive devig); the researched path is penaltyblog
+    v1.9+ `goal_expectancy_extended` + `create_dixon_coles_grid` (build score
+    grid from sharp 1X2+OU, price AH/EH off it) — NOT yet built. **User
+    policy VALUE_MIN_ODDS=1.60** re-validated (--min-odds 1.6: train choice
+    unchanged shin/0.03; holdout n=58, ROI +21.1%, incCLV +0.1082 >2SE).
+    /picks payload no longer carries manual_betting_reminder (alerts+banner
+    keep it; audit check 8 targets app/schemas/picks.py). penaltyblog 1.11.0
+    notes: extra devig methods (odds_ratio/logarithmic/diff-margin),
+    predict_many(), per-match neutral_venue — candidates, not adopted.
+    WagerBrain re-rejected with fresh source evidence (Kelly p/q swap).
 - 2026-06-10 (v3 FINAL, maximal-data optimization) — **Production config =
   shin devig, edge ≥ 0.03** (`VALUE_DEVIG=shin`, `VALUE_MIN_EDGE=0.03`),
   chosen by sweeping devig×threshold on TRAIN seasons 1920-2324 only across

@@ -23,6 +23,7 @@ from app.notifications.dispatcher import AlertDispatcher
 from app.probabilities.devig import DevigMethod, devig
 from app.risk.exposure import DailyExposureLedger
 from app.risk.staking import StakePolicy, recommended_stake, stake_amount
+from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut, StakeBreakdownOut
 
@@ -49,12 +50,17 @@ class PipelineDeps:
     session_factory: "async_sessionmaker | None" = None  # set => persist picks to DB
     model_name: str = "model"
     model_version: str = "0"
+    # value-strategy thresholds (run_value_pipeline)
+    value_min_edge: float = 0.015
+    value_min_odds: float = 1.30
 
 
 async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
     """One polling cycle. Returns the accepted picks (alerts already sent)."""
-    now = datetime.now(tz=UTC)
     snapshots = await deps.loader.fetch_odds(sport_key)
+    # `now` AFTER the fetch: live scrapes take minutes and stamp captured_at
+    # during the run — taking now first yields negative odds ages.
+    now = datetime.now(tz=UTC)
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
         return []
@@ -123,7 +129,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                     capped=breakdown.capped,
                     final=granted,
                 ),
-                odds_age_seconds=candidate.odds_age_seconds,
+                odds_age_seconds=max(candidate.odds_age_seconds, 0.0),
                 liquidity=snap.liquidity,
                 reason_summary=(
                     f"model {prediction.probability:.3f} vs fair {fair_p:.3f} "
@@ -154,6 +160,110 @@ async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> 
             await session.commit()
     except Exception as exc:  # persistence must never break alerting
         logger.error("pick persistence failed for %s: %s", pick.pick_id, type(exc).__name__)
+
+
+async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
+    """One polling cycle of the VALIDATED strategy (sharp-vs-soft value,
+    docs/backtesting/value-findings.md): group multi-book odds per market,
+    anchor fair value on the sharpest book, flag better prices elsewhere.
+
+    No prediction model involved; deps.model is unused here.
+    """
+    from app.edge.value import CONSENSUS_ANCHOR, find_value_bets
+
+    snapshots = await deps.loader.fetch_odds(sport_key)
+    # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
+    now = datetime.now(tz=UTC)
+    if not snapshots:
+        logger.info("no snapshots for %s", sport_key)
+        return []
+
+    picks: list[PickOut] = []
+    for (event_id, market), (prices, captured) in group_market_prices(snapshots).items():
+        for v in find_value_bets(
+            prices, min_edge=deps.value_min_edge, min_odds=deps.value_min_odds
+        ):
+            cap = captured.get((v.selection, v.best_book))
+            age = max((now - cap).total_seconds(), 0.0) if cap else 0.0
+            if age > deps.gate_policy.max_odds_age_seconds:
+                continue
+            # Stake from the sharp fair prob at the EFFECTIVE (net) price.
+            breakdown = recommended_stake(
+                v.sharp_fair_prob, v.best_odds_effective, deps.stake_policy
+            )
+            granted = deps.ledger.reserve(now.date(), breakdown.final)
+            if granted <= 0.0:
+                logger.info("daily exposure cap reached; skipping %s", v.selection)
+                continue
+            # Named sharp anchors are backtested; consensus anchors are the
+            # fallback path with weaker evidence — reflected in confidence.
+            confidence = 0.7 if v.sharp_book == CONSENSUS_ANCHOR else 0.9
+
+            event_label = event_id
+            if deps.directory is not None:
+                teams = deps.directory.lookup(event_id)
+                if teams is not None:
+                    event_label = f"{teams.home} vs {teams.away}"
+
+            pick = PickOut(
+                pick_id=str(uuid.uuid4()),
+                sport=deps.sport,
+                league=deps.league or sport_key,
+                event=event_label,
+                event_id=event_id,
+                market=market,
+                selection=v.selection,
+                bookmaker=v.best_book,
+                decimal_odds=v.best_odds,
+                model_probability=v.sharp_fair_prob,
+                fair_probability=v.implied_prob,
+                edge=v.edge,
+                ev=v.ev,
+                confidence=confidence,
+                recommended_stake_fraction=granted,
+                recommended_stake_amount=stake_amount(granted, deps.bankroll),
+                stake_breakdown=StakeBreakdownOut(
+                    raw_kelly=breakdown.raw_kelly,
+                    fractional=breakdown.fractional,
+                    capped=breakdown.capped,
+                    final=granted,
+                ),
+                odds_age_seconds=age,
+                liquidity=None,
+                reason_summary=(
+                    f"value: {v.sharp_book} fair {v.sharp_fair_prob:.3f} vs "
+                    f"{v.best_book} {v.best_odds:.2f}"
+                    + (
+                        f" (eff {v.best_odds_effective:.2f} after commission)"
+                        if v.best_odds_effective != v.best_odds
+                        else ""
+                    )
+                ),
+                created_at=now,
+            )
+            picks.append(pick)
+            await _maybe_persist(deps, pick, event_id)
+            await deps.dispatcher.dispatch(build_pick_alert(pick))
+
+    logger.info("value pipeline cycle for %s: %d picks", sport_key, len(picks))
+    return picks
+
+
+GroupedMarkets = dict[
+    tuple[str, Market],
+    tuple[dict[str, dict[str, float]], dict[tuple[str, str], datetime]],
+]
+
+
+def group_market_prices(snapshots: Sequence[OddsSnapshotIn]) -> GroupedMarkets:
+    """Group snapshots into {(event_id, market): (selection->{book: odds},
+    (selection, book)->captured_at)} for the value finder and CLV true-up."""
+    out: GroupedMarkets = {}
+    for snap in snapshots:
+        prices, captured = out.setdefault((snap.event_id, snap.market), ({}, {}))
+        prices.setdefault(snap.selection, {})[snap.bookmaker] = snap.decimal_odds
+        captured[(snap.selection, snap.bookmaker)] = snap.captured_at
+    return out
 
 
 def _fair_probabilities(

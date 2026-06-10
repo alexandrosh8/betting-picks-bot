@@ -27,6 +27,22 @@ found and we fixed:
 5. The printed verdict is **computed from the held-out numbers** — the
    script can and will print "NO PROVEN EDGE" if that's what the data says.
 
+## Broader validation (18 leagues) — the number to trust
+
+Re-run across 18 divisions (top + second tiers incl. E2/E3/SC0/D2/I2/SP2/F2/
+N1/B1/P1/T1/G1) for 3x the held-out sample:
+
+| | n | hit% | ROI | CLV vs Pinnacle close | CLV vs Max close | incremental CLV |
+| --- | --- | --- | --- | --- | --- | --- |
+| baseline (bet everything) | 4360 | 43.0 | -0.03% | +0.0057 ± 0.0025 | -0.0017 | — |
+| **picks (edge ≥ 0.015)** | **379** | **49.3** | **+2.46%** | **+0.0249 ± 0.0110** | **+0.0123** | **+0.0192 (> 2SE)** |
+
+With 3x the data the selection skill stays conclusive (incremental CLV
++0.0192 > 2SE, positive even vs the Max-of-books close) while the ROI
+expectation regresses to a modest +2.5% — the 6-league +12.7% above was
+partly small-sample luck. **Plan around CLV ~+2% as the realistic edge; ROI
+point estimates at n=126-379 are noise-dominated.**
+
 ## Held-out result (6 leagues; train 2122-2324, test 2425-2526)
 
 Train sweep chose **edge ≥ 0.015** (best train ROI with n ≥ 100). Held-out:

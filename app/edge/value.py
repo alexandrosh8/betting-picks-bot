@@ -69,6 +69,33 @@ def _overround(odds: Sequence[float]) -> float:
     return sum(1.0 / o for o in odds) - 1.0
 
 
+def anchor_fair_probs(
+    prices: Mapping[str, Mapping[str, float]],
+    *,
+    max_overround: float = 0.12,
+    devig_method: DevigMethod = DevigMethod.POWER,
+    sharp_books: Sequence[str] = SHARP_BOOKS,
+    commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+) -> tuple[str, dict[str, float]] | None:
+    """Trustworthy fair probabilities for one market, or None.
+
+    Returns (anchor_book, {selection: fair_prob}). Shared by the value finder
+    and the live CLV true-up (closing fair probability per pick).
+    """
+    selections = list(prices.keys())
+    if len(selections) < 2 or len(set(selections)) != len(selections):
+        return None
+    anchor_book, anchor_odds = _named_sharp_anchor(
+        prices, selections, sharp_books, commissions, max_overround
+    )
+    if anchor_book is None:
+        anchor_book, anchor_odds = _consensus_anchor(prices, selections, commissions, max_overround)
+    if anchor_book is None or anchor_odds is None:
+        return None
+    fair = devig(anchor_odds, method=devig_method)
+    return anchor_book, dict(zip(selections, fair, strict=True))
+
+
 def find_value_bets(
     prices: Mapping[str, Mapping[str, float]],
     *,
@@ -86,20 +113,17 @@ def find_value_bets(
     bets sorted by edge (desc). Returns [] when no trustworthy fair-value
     anchor exists (better no pick than a contaminated one).
     """
-    selections = list(prices.keys())
-    if len(selections) < 2 or len(set(selections)) != len(selections):
-        return []
-
-    anchor_book, anchor_odds = _named_sharp_anchor(
-        prices, selections, sharp_books, commissions, max_overround
+    anchored = anchor_fair_probs(
+        prices,
+        max_overround=max_overround,
+        devig_method=devig_method,
+        sharp_books=sharp_books,
+        commissions=commissions,
     )
-    if anchor_book is None:
-        anchor_book, anchor_odds = _consensus_anchor(prices, selections, commissions, max_overround)
-    if anchor_book is None or anchor_odds is None:
+    if anchored is None:
         return []
-
-    sharp_fair = devig(anchor_odds, method=devig_method)
-    fair_by_sel = dict(zip(selections, sharp_fair, strict=True))
+    anchor_book, fair_by_sel = anchored
+    selections = list(prices.keys())
 
     out: list[ValueBet] = []
     for sel in selections:

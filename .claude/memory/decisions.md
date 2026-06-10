@@ -19,6 +19,14 @@
 - 2026-06-10 — **Fixed .gitignore bug**: `models/` (unanchored) was ignoring
   the whole `app/models/` source package — every fresh clone was broken.
   Anchored to `/models/`; verified via throwaway clone. [[gitignore-models-trap]]
+- 2026-06-10 (v3, platform) — **Value strategy is now THE app pipeline**
+  (PICK_STRATEGY=value default): `run_value_pipeline` polls -> anchors fair on
+  the sharpest book -> persists + alerts; `app/clv_trueup.py` job (30 min)
+  refreshes closing-fair/clv_log/beat_close on open picks — the live edge
+  discipline. **18-league holdout** (n=379): ROI +2.46%, incremental CLV
+  +0.0192 (>2SE), positive vs Max close — plan around CLV ~+2%; the 6-league
+  +12.7% ROI was partly small-sample luck. DC refit jobs only run for
+  PICK_STRATEGY=model. 171 tests.
 - 2026-06-10 (v2, post-review) — **Deep review confirmed 23 findings; all
   fixed.** Key: exchange commission now netted (value.py), no-Pinnacle
   fallback = ≥3-book median consensus (one bad quote can't fake edges),

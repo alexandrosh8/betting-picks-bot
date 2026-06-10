@@ -43,7 +43,7 @@ from app.notifications.dedupe import RedisIdempotencyStore
 from app.notifications.dispatcher import AlertDispatcher
 from app.notifications.telegram import TelegramSink
 from app.notifications.webhook import WebhookSink
-from app.pipeline import PipelineDeps, run_pick_pipeline
+from app.pipeline import PipelineDeps, run_pick_pipeline, run_value_pipeline
 from app.risk.exposure import DailyExposureLedger
 
 logger = logging.getLogger(__name__)
@@ -114,32 +114,37 @@ def build_scheduler(
             leagues_by_sport_key={"soccer": ("football", leagues)},
             # date=None -> general upcoming page (carries live pre-match odds)
         )
-        dc_model = DixonColesFootballModel(
-            directory,
-            confidence=settings.model_confidence,
-            totals_line=settings.football_totals_line,
-        )
-        model = dc_model
         sport_keys = ("soccer",)
         league_label = settings.oddsportal_football_leagues
 
-        async def refit_football_model() -> None:
-            rows = await fetch_football_history(settings, http_client)
-            if len(rows) < 50:
-                logger.error("refit skipped: only %d historical matches fetched", len(rows))
-                return
-            await asyncio.to_thread(dc_model.fit, rows, datetime.now(tz=UTC).date())
+        # The Dixon-Coles goals model only runs for pick_strategy="model"
+        # (negative backtested CLV — screens only). The validated "value"
+        # strategy needs no model and no daily refit.
+        if settings.pick_strategy == "model":
+            dc_model = DixonColesFootballModel(
+                directory,
+                confidence=settings.model_confidence,
+                totals_line=settings.football_totals_line,
+            )
+            model = dc_model
 
-        scheduler.add_job(
-            refit_football_model,
-            DateTrigger(),  # once at startup
-            id="refit_football_model_initial",
-        )
-        scheduler.add_job(
-            refit_football_model,
-            CronTrigger(hour=4, minute=10),
-            id="refit_football_model",
-        )
+            async def refit_football_model() -> None:
+                rows = await fetch_football_history(settings, http_client)
+                if len(rows) < 50:
+                    logger.error("refit skipped: only %d historical matches fetched", len(rows))
+                    return
+                await asyncio.to_thread(dc_model.fit, rows, datetime.now(tz=UTC).date())
+
+            scheduler.add_job(
+                refit_football_model,
+                DateTrigger(),  # once at startup
+                id="refit_football_model_initial",
+            )
+            scheduler.add_job(
+                refit_football_model,
+                CronTrigger(hour=4, minute=10),
+                id="refit_football_model",
+            )
     elif settings.odds_source == "odds_api":
         keys = settings.odds_api_keys()
         if keys:
@@ -151,6 +156,7 @@ def build_scheduler(
         logger.error("unknown odds_source %r; polling disabled", settings.odds_source)
 
     if loader is not None:
+        use_value = settings.pick_strategy == "value"
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -162,14 +168,17 @@ def build_scheduler(
             league=league_label,
             directory=directory,
             session_factory=session_factory,
-            model_name=model.name,
-            model_version=model.version,
+            model_name="value-sharp-vs-soft" if use_value else model.name,
+            model_version="v2" if use_value else model.version,
+            value_min_edge=settings.value_min_edge,
+            value_min_odds=settings.value_min_odds,
         )
+        pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 
         async def poll_odds() -> None:
             for sport_key in sport_keys:
                 try:
-                    await run_pick_pipeline(deps, sport_key)
+                    await pipeline_fn(deps, sport_key)
                 except Exception as exc:
                     logger.error("poll_odds failed for %s: %s", sport_key, type(exc).__name__)
 
@@ -180,6 +189,25 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
         )
+
+        if session_factory is not None:
+            captured_keys = sport_keys
+
+            async def clv_trueup_job() -> None:
+                from app.clv_trueup import true_up_clv
+
+                try:
+                    await true_up_clv(loader, session_factory, captured_keys)
+                except Exception as exc:
+                    logger.error("clv true-up failed: %s", type(exc).__name__)
+
+            scheduler.add_job(
+                clv_trueup_job,
+                IntervalTrigger(minutes=30),
+                id="clv_trueup",
+                max_instances=1,
+                coalesce=True,
+            )
 
     async def settle_results() -> None:
         # Roadmap phase 4: load results, settle picks, fill CLV columns.

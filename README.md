@@ -35,9 +35,15 @@ The honest result of backtesting (`docs/backtesting/`): a goals model
 (Dixon-Coles) does **not** beat the market — negative CLV. But **sharp-vs-soft
 line shopping does**: price fair value from the sharpest book (Pinnacle), bet
 another book whose price beats it. Validated with review-corrected
-methodology (one bet/match, train/holdout split, incremental-CLV null):
-**held-out 2024-26, edge ≥ 0.015 → +12.7% ROI on 126 bets, incremental CLV
-+0.026 (> 2SE) — positive even against the Max-of-books close.**
+methodology (one bet/match, train/holdout split, incremental-CLV null) across
+**18 leagues**: held-out 2024-26, edge ≥ 0.015 → **n=379, +2.5% ROI,
+incremental CLV +0.019 (> 2SE), positive even vs the Max-of-books close.**
+Plan around CLV ~+2% as the realistic edge; small-sample ROI is noisy.
+
+The strategy is wired into the running app (`PICK_STRATEGY=value`, the
+default): the scheduler polls, persists picks, alerts, and a 30-minute CLV
+true-up job refreshes each open pick's closing-line value — the live
+discipline that proves (or disproves) edge over time.
 
 ```bash
 uv run python scripts/value_backtest.py     # prove it (re-runnable)

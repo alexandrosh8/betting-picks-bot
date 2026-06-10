@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
     webhook_url: str = ""
 
+    # --- Pick strategy --------------------------------------------------------
+    # "value" = sharp-vs-soft line shopping (BACKTESTED, positive holdout CLV —
+    #           docs/backtesting/value-findings.md). The validated default.
+    # "model" = Dixon-Coles goals model (negative CLV in backtest; screens only).
+    pick_strategy: str = "value"
+    value_min_edge: float = 0.015
+    value_min_odds: float = 1.30
+
     # --- Odds sources (read-only access) -----------------------------------------
     # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);
     # "odds_api"   = The Odds API (needs keys below).

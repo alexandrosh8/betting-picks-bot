@@ -31,12 +31,24 @@ NEW_LEAGUES_BASE_URL = "https://www.football-data.co.uk/new"
 LEAGUES = {
     "E0": "England Premier League",
     "E1": "England Championship",
+    "E2": "England League One",
+    "E3": "England League Two",
+    "EC": "England National League",
+    "SC0": "Scotland Premiership",
+    "SC1": "Scotland Championship",
     "D1": "Germany Bundesliga",
+    "D2": "Germany 2. Bundesliga",
     "I1": "Italy Serie A",
+    "I2": "Italy Serie B",
     "SP1": "Spain La Liga",
+    "SP2": "Spain Segunda",
     "F1": "France Ligue 1",
+    "F2": "France Ligue 2",
     "N1": "Netherlands Eredivisie",
+    "B1": "Belgium Pro League",
     "P1": "Portugal Primeira Liga",
+    "T1": "Turkey Super Lig",
+    "G1": "Greece Super League",
 }
 
 # New-leagues country code -> human name

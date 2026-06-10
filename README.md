@@ -29,6 +29,26 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app
 ```
 
+## The pick finder that actually works (backtested positive CLV)
+
+The honest result of backtesting (`docs/backtesting/`): a goals model
+(Dixon-Coles) does **not** beat the market — negative CLV. But **sharp-vs-soft
+line shopping does**: price fair value from the sharpest book (Pinnacle), bet
+another book whose price beats it. Backtested on 11,667 matches / 6 leagues /
+5 seasons: at edge ≥ 0.015 → **+9.25% ROI, CLV +0.043 (conclusive), beats the
+close 77%**.
+
+```bash
+uv run python scripts/value_backtest.py     # prove it (re-runnable)
+uv run python scripts/value_picks.py --league world-cup --min-edge 0.015
+```
+
+`app/edge/value.py::find_value_bets` is the pure, tested core. Best live data
+for it is The Odds API `regions=eu` (includes Pinnacle + many books);
+OddsPortal's free scrape works where it lists enough books.
+Caveat: real CLV is lower than the best-price backtest — soft books limit
+winners. Manual review required; the system never places bets.
+
 ## Proven engines, bound together (the master app)
 
 The live spine uses the proven open-source repos directly (ADR-0011/0012):

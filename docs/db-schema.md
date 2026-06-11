@@ -30,11 +30,11 @@ defaults `now()`; no credential-shaped columns anywhere.
 
 ## Edge & picks
 
-| Table                | Key columns                                                                                                                                                                                                                                                   | Constraints                                                                                              |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `detected_edges`     | event_id, model_prediction_id, odds_snapshot_id FKs, devig_method, fair_probability, edge, ev, accepted bool, reject_reasons JSONB, detected_at                                                                                                               | idx(event_id, detected_at) — EVERY gate evaluation persisted, accepted or not (auditability)             |
-| `picks`              | event_id, model_version_id, detected_edge_id FKs, market, selection, bookmaker, decimal_odds, model/fair_probability, edge, ev, confidence, recommended_stake_fraction/amount, stake_breakdown JSONB, reason_summary, status (`pending→alerted→settled/void`) | UNIQUE(event_id, market, selection, model_version_id) — no duplicate picks; idx(created_at), idx(status) |
-| picks **CLV fields** | closing_odds?, closing_fair_probability?, clv_log?, beat_close?                                                                                                                                                                                               | filled at settlement true-up (ADR-0010)                                                                  |
+| Table                | Key columns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Constraints                                                                                              |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `detected_edges`     | event_id, model_prediction_id, odds_snapshot_id FKs, devig_method, fair_probability, edge, ev, accepted bool, reject_reasons JSONB, detected_at                                                                                                                                                                                                                                                                                                                                                                                                                | idx(event_id, detected_at) — EVERY gate evaluation persisted, accepted or not (auditability)             |
+| `picks`              | event_id, model_version_id, detected_edge_id FKs, market, selection, bookmaker, decimal_odds, model/fair_probability, edge, ev, confidence, recommended_stake_fraction/amount, stake_breakdown JSONB, reason_summary, status (`pending→alerted→settled/void`), tier (`premium`=alerted+exposure-capped, `volume`=CLV-evidence shadow: never alerted, never on the exposure ledger; key collisions across tiers resolve premium-first — a volume re-detection of a premium key is a no-op, a premium detection of an open volume key UPGRADES the row in place) | UNIQUE(event_id, market, selection, model_version_id) — no duplicate picks; idx(created_at), idx(status) |
+| picks **CLV fields** | closing_odds?, closing_fair_probability?, clv_log?, beat_close?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | filled at settlement true-up (ADR-0010)                                                                  |
 
 ## Manual tracking & accounting
 
@@ -45,6 +45,43 @@ defaults `now()`; no credential-shaped columns anywhere.
 | `bankroll_snapshots` | snapshot_date, balance, note                                                                                                                        | UNIQUE(snapshot_date)                                                                     |
 | `alerts`             | pick_id FK, channel (`telegram/webhook`), dedupe_key, status (`sent/failed/skipped`), sent_at                                                       | UNIQUE(dedupe_key) — DB-level idempotency behind the Redis gate; idx(pick_id)             |
 | `backtest_runs`      | name, model_version_id?, window_start/end, gate_policy JSONB, cost_assumptions JSONB, n_picks, roi, clv_log_mean, max_drawdown, metrics JSONB, seed | reproducibility record per run                                                            |
+
+## odds_snapshots — write policy, growth, retention
+
+Writes are **change-only** (`app/pipeline.py::_persist_snapshots` →
+`app/storage/repositories.py::persist_odds_snapshots`): a process-local
+last-seen cache keyed on (event*ref, bookmaker, line-qualified market,
+selection) suppresses rows whose decimal odds did not move since the last
+write. The `market` column stores the provider submarket key
+(`market_detail`, e.g. `asian_handicap*-1_5`) when present — distinct lines
+stay distinct observations. `captured_at` is the scrape observation time
+(provider-reported), never the insert time.
+
+Cache semantics (accepted trade-offs, asserted by
+`tests/test_odds_snapshot_persistence.py`):
+
+- **Restart = cold cache**: the first cycle after a restart re-writes one
+  unchanged row per live key; only same-`captured_at` re-writes dedupe on
+  `uq_odds_snapshot_observation`.
+- **Bounded**: above 100k entries, keys unseen for 3 days are swept, then
+  oldest-seen down to the cap (`ODDS_SEEN_TTL` / `ODDS_SEEN_MAX`). An
+  evicted live key costs one extra row — eviction is never lossy.
+- A failed batch is NOT cached, so it retries next cycle; persistence
+  failure never breaks pick generation (WARNING log, cycle continues).
+
+**Growth expectation**: expanded markets scrape ~5–20k observations per
+cycle, back-to-back (raw appends would be tens of millions of rows/month).
+With change-only writes, expect roughly low single-digit % of observations
+per cycle once warm → order of 0.5–2M rows/month at current breadth
+(~100 bytes/row + 2 indexes). Verify against
+`LAST_POLL[*].snapshots_persisted` (also on the dashboard ingestion strip).
+
+**Suggested retention (NOT implemented)**: keep ~90 days of raw rows;
+before deleting older rows, archive or aggregate them (e.g. per-day
+open/close/min/max per key) for long-horizon line-movement features. Pick
+CLV survives any pruning — closing fields live on `picks`. When
+implemented, this should be a maintenance job with batched deletes, not a
+migration.
 
 ## Migration discipline
 

@@ -58,7 +58,7 @@ def closing_snapshots(
     return rows
 
 
-def make_pick(event_id: str, bookmaker: str = "SoftBook") -> PickOut:
+def make_pick(event_id: str, bookmaker: str = "SoftBook", tier: str = "premium") -> PickOut:
     return PickOut(
         pick_id="p-clv",
         sport="soccer",
@@ -68,6 +68,7 @@ def make_pick(event_id: str, bookmaker: str = "SoftBook") -> PickOut:
         market=Market.H2H,
         selection="Home FC",
         bookmaker=bookmaker,
+        tier=tier,
         decimal_odds=2.50,  # we got 2.50; close fair will be shorter -> +CLV
         model_probability=0.45,
         fair_probability=0.40,
@@ -151,6 +152,35 @@ async def test_true_up_fills_clv_fields(factory) -> None:  # type: ignore[no-unt
         # fill 2.50 vs close fair ~0.435 -> clv_log = ln(2.50*0.435) > 0
         assert float(pick.clv_log) > 0
         assert pick.beat_close is True
+
+
+async def test_true_up_includes_volume_tier_picks(factory) -> None:  # type: ignore[no-untyped-def]
+    """Accumulating live CLV evidence is the volume tier's ENTIRE purpose:
+    revalidation must re-price volume rows exactly like premium ones (both
+    ride status='alerted'; tier only scopes alerts/exposure/reporting)."""
+    event_id = "evt-clv-volume"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id, tier="volume"),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    loader = FakeLoader(closing_snapshots(event_id))
+    assert await true_up_clv(loader, factory, ["soccer"]) == 1
+
+    async with factory() as session:
+        pick = await session.scalar(
+            select(Pick).where(Pick.reason_summary == "clv true-up test", Pick.tier == "volume")
+        )
+        assert pick is not None
+        assert pick.clv_log is not None  # CLV evidence accumulated
+        assert pick.beat_close is True  # fill 2.50 vs shorter close fair
+        assert pick.current_odds == Decimal("2.3000")  # live re-price too
+        assert pick.revalidated_at is not None
 
 
 async def test_true_up_ignores_unmatched_events(factory) -> None:  # type: ignore[no-untyped-def]

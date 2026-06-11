@@ -131,7 +131,11 @@ async def seed_exposure_ledger(
     a mid-day restart resets used(today) to ~0 (re-detections reserve then
     release as DB duplicates) and DOUBLES the day's recommendable exposure.
     ALL statuses count — each pick consumed budget when it was recommended
-    today, whatever happened to it since.
+    today, whatever happened to it since. PREMIUM tier only: volume picks
+    never reserve exposure (their stake fields are informational), so
+    counting them would shrink the cap premium picks are entitled to. An
+    upgraded volume pick gets created_at bumped to its upgrade moment
+    (repositories.persist_pick), which is exactly when it DID reserve.
     """
     from sqlalchemy import func, select
 
@@ -145,6 +149,7 @@ async def seed_exposure_ledger(
             select(func.coalesce(func.sum(Pick.recommended_stake_fraction), 0)).where(
                 Pick.created_at >= day_start,
                 Pick.created_at < day_end,
+                Pick.tier == "premium",
             )
         )
     used = float(total or 0)
@@ -260,6 +265,8 @@ def build_scheduler(
             model_version="v3" if use_value else model.version,
             devig_method=value_devig if use_value else DevigMethod.POWER,
             value_min_edge=settings.value_min_edge,
+            # volume (shadow) tier floor; == value_min_edge disables it
+            value_volume_min_edge=settings.value_volume_min_edge,
             value_min_odds=settings.value_min_odds,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline

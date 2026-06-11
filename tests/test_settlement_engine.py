@@ -33,6 +33,7 @@ def make_pick(
     event_id: str,
     market: Market = Market.TOTALS,
     selection: str = "Over 2.5",
+    tier: str = "premium",
 ) -> PickOut:
     return PickOut(
         pick_id="p-settle",
@@ -55,6 +56,7 @@ def make_pick(
         odds_age_seconds=30.0,
         liquidity=None,
         reason_summary="settlement test",
+        tier=tier,
         created_at=NOW - timedelta(hours=8),
     )
 
@@ -400,6 +402,44 @@ async def test_performance_report_aggregates(session) -> None:  # type: ignore[n
     assert report["stake_weighted_clv_log"] == "0.02"
     assert report["beat_close_rate"] == "0.5"
     assert report["n_pending"] == 0
+    # headline numbers are PREMIUM-scoped, and the payload says so
+    assert report["tier_scope"] == "premium"
+    assert report["volume"]["n_settled"] == 0
+
+
+async def test_performance_report_keeps_volume_out_of_headline(session) -> None:  # type: ignore[no-untyped-def]
+    """A settled VOLUME pick must not move any headline number — it lands in
+    the 'volume' breakdown instead (that accumulating evidence is the shadow
+    tier's purpose; mixing it in would mask the alerted strategy's ROI)."""
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import update as sa_update
+
+    from app.storage.repositories import performance_report
+
+    await session.execute(sa_delete(ResultTracking))
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+
+    premium = await seed_pick(session, "evt-perf-tier-p")  # Over 2.5 @ 2.10
+    volume = await seed_pick(session, "evt-perf-tier-v", tier="volume")
+    settled, _ = await settle_event_picks(session, premium.event_id, 2, 1, NOW)  # won
+    assert settled == 1
+    settled, _ = await settle_event_picks(session, volume.event_id, 0, 0, NOW)  # lost
+    assert settled == 1
+
+    report = await performance_report(session)
+    assert report["tier_scope"] == "premium"
+    assert report["n_settled"] == 1  # the lost volume pick is NOT here
+    assert report["won"] == 1
+    assert report["lost"] == 0
+    assert report["total_pnl"] == "22.00"  # premium win only
+    assert report["n_pending"] == 0
+    vol = report["volume"]
+    assert vol["n_settled"] == 1
+    assert vol["lost"] == 1
+    assert vol["total_pnl"] == "-20.00"
+    assert vol["n_pending"] == 0
 
 
 async def test_run_settlement_cycle_refuses_when_providers_empty(factory, caplog) -> None:  # type: ignore[no-untyped-def]

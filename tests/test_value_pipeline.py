@@ -199,7 +199,7 @@ def patch_persist_dedupe_after_first(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
         calls["n"] += 1
-        return calls["n"] == 1
+        return "inserted" if calls["n"] == 1 else "duplicate"
 
     monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
 
@@ -265,6 +265,130 @@ async def test_duplicate_pick_with_price_move_realerts_and_still_releases(
     assert "2.95" in sink.sent[1].title
 
 
+def test_pick_tier_boundaries() -> None:
+    """Tier floors are INCLUSIVE (>= mirrors the backtests' gates): edge
+    exactly 0.03 is premium, a hair under is volume, under 0.015 is no pick;
+    equal floors disable the volume tier entirely."""
+    from app.pipeline import pick_tier
+
+    assert pick_tier(0.03, 0.03, 0.015) == "premium"
+    assert pick_tier(0.0299, 0.03, 0.015) == "volume"
+    assert pick_tier(0.015, 0.03, 0.015) == "volume"
+    assert pick_tier(0.0149, 0.03, 0.015) is None
+    assert pick_tier(0.02, 0.03, 0.03) is None  # equal floors: tier off
+    assert pick_tier(0.03, 0.03, 0.03) == "premium"
+
+
+def patch_persist_recording(
+    monkeypatch: pytest.MonkeyPatch, outcomes: list[str]
+) -> list[tuple[str, str]]:
+    """persist_pick fake returning scripted outcomes; records (selection,
+    tier) per call so tests can assert what reached the repository."""
+    import app.storage.repositories as repos
+
+    seen: list[tuple[str, str]] = []
+    script = iter(outcomes)
+
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        seen.append((pick.selection, pick.tier))
+        return next(script)
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    return seen
+
+
+async def test_volume_tier_pick_persists_without_alert_or_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shadow tier's contract: persisted (with the informational stake
+    breakdown computed) but (a) NO alert dispatch and (b) NO exposure-ledger
+    reservation — it must never consume the cap premium picks need."""
+    seen = patch_persist_recording(monkeypatch, ["inserted"])
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    deps.value_min_edge = 0.10  # the ~4.5% edge cannot reach premium
+    deps.value_volume_min_edge = 0.015
+
+    day = datetime.now(tz=UTC).date()
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert [p.tier for p in picks] == ["volume"]
+    assert seen == [("Home FC", "volume")]
+    assert sink.sent == []  # (a) never alerted
+    assert deps.ledger.used(day) == 0.0  # (b) never on the ledger
+    assert picks[0].stake_breakdown.final > 0.0  # stake computed, informational
+    from app.pipeline import LAST_POLL
+
+    assert LAST_POLL["soccer"]["picks"] == 0  # headline count stays premium
+    assert LAST_POLL["soccer"]["volume_picks"] == 1
+
+
+async def test_volume_tier_dropped_when_persistence_unavailable() -> None:
+    # A volume pick that cannot reach the DB accumulates no CLV evidence —
+    # its only purpose — so it is dropped silently: no pick, no alert.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))  # no session_factory
+    deps.value_min_edge = 0.10
+    deps.value_volume_min_edge = 0.015
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []
+    assert sink.sent == []
+    assert deps.ledger.used(datetime.now(tz=UTC).date()) == 0.0
+
+
+async def test_volume_redetection_of_existing_key_stays_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'duplicate' covers both a volume re-detection AND a key already held
+    by a PREMIUM row — the shadow tier must never alert, never touch the
+    ledger, and never displace the premium row."""
+    patch_persist_recording(monkeypatch, ["duplicate"])
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    deps.value_min_edge = 0.10
+    deps.value_volume_min_edge = 0.015
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []
+    assert sink.sent == []
+    assert deps.ledger.used(datetime.now(tz=UTC).date()) == 0.0
+
+
+async def test_volume_to_premium_upgrade_alerts_and_reserves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The upgrade transition: a key first persisted as volume later clears
+    the premium threshold -> the repository promotes the row ('upgraded')
+    and the pipeline treats it as a NEW premium pick — alert dispatched,
+    exposure reserved (the shadow row never held a reservation)."""
+    seen = patch_persist_recording(monkeypatch, ["inserted", "upgraded"])
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    deps.value_min_edge = 0.10  # cycle 1: candidate lands in the volume band
+    deps.value_volume_min_edge = 0.015
+
+    day = datetime.now(tz=UTC).date()
+    first = await run_value_pipeline(deps, "soccer")
+    assert [p.tier for p in first] == ["volume"]
+    assert sink.sent == []
+    assert deps.ledger.used(day) == 0.0
+
+    # cycle 2: the same candidate now clears premium (threshold change here;
+    # a price move in production) — the volume row upgrades in place.
+    deps.value_min_edge = 0.03
+    second = await run_value_pipeline(deps, "soccer")
+    assert [p.tier for p in second] == ["premium"]
+    assert seen == [("Home FC", "volume"), ("Home FC", "premium")]
+    assert len(sink.sent) == 1  # the upgrade IS the alert moment
+    assert deps.ledger.used(day) > 0.0  # exposure reserved on upgrade
+
+
 async def test_value_pipeline_skips_stale_odds() -> None:
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots(age_s=400.0)))  # > 300s gate
@@ -322,3 +446,70 @@ async def test_value_pipeline_no_anchor_no_picks() -> None:
     sink = RecordingSink()
     picks = await run_value_pipeline(make_deps(sink, FakeLoader(snaps)), "soccer")
     assert picks == []
+
+
+def _detail_snap(
+    book: str, market: Market, sel: str, odds: float, detail: str | None
+) -> OddsSnapshotIn:
+    return OddsSnapshotIn(
+        event_id="evt-1",
+        bookmaker=book,
+        market=market,
+        selection=sel,
+        decimal_odds=odds,
+        captured_at=NOW - timedelta(seconds=30),
+        ingested_at=NOW,
+        market_detail=detail,
+    )
+
+
+def test_event_fair_probs_expanded_markets_devig_per_line_and_derive_dc() -> None:
+    """The expanded market set round-trips devig per (market, line) group:
+    every direct group sums to 1.0 within ITS line; double chance is never
+    devigged directly (legs overlap, quotes sum ~200%) — its fair value is
+    DERIVED from the 1X2 anchor's pairwise sums."""
+    from app.pipeline import event_fair_probs, group_market_prices
+    from app.probabilities.devig import DevigMethod
+
+    snaps = [
+        # 1X2 anchor (full 3-way at the sharp book)
+        _detail_snap("Pinnacle", Market.H2H, "Home FC", 2.50, None),
+        _detail_snap("Pinnacle", Market.H2H, "Draw", 3.30, None),
+        _detail_snap("Pinnacle", Market.H2H, "Away FC", 3.10, None),
+        # two totals lines — must anchor as separate 2-way books
+        _detail_snap("Pinnacle", Market.TOTALS, "Over 2.5", 1.95, "over_under_2_5"),
+        _detail_snap("Pinnacle", Market.TOTALS, "Under 2.5", 1.95, "over_under_2_5"),
+        _detail_snap("Pinnacle", Market.TOTALS, "Over 3.5", 2.80, "over_under_3_5"),
+        _detail_snap("Pinnacle", Market.TOTALS, "Under 3.5", 1.45, "over_under_3_5"),
+        # 3-way European handicap line (devig-sound at any integer line)
+        _detail_snap("Pinnacle", Market.SPREADS, "Home FC -1", 3.10, "european_handicap_-1"),
+        _detail_snap("Pinnacle", Market.SPREADS, "Draw (-1)", 3.60, "european_handicap_-1"),
+        _detail_snap("Pinnacle", Market.SPREADS, "Away FC +1", 2.10, "european_handicap_-1"),
+        # double-chance quotes: NEVER a direct devig input
+        _detail_snap("SoftBook", Market.DOUBLE_CHANCE, "Home FC or Draw", 1.42, "double_chance"),
+        _detail_snap("SoftBook", Market.DOUBLE_CHANCE, "Home FC or Away FC", 1.36, "double_chance"),
+        _detail_snap("SoftBook", Market.DOUBLE_CHANCE, "Draw or Away FC", 1.60, "double_chance"),
+    ]
+    fair = event_fair_probs(group_market_prices(snaps), DevigMethod.POWER)
+
+    for market, detail, n_outcomes in (
+        (Market.H2H, None, 3),
+        (Market.TOTALS, "over_under_2_5", 2),
+        (Market.TOTALS, "over_under_3_5", 2),
+        (Market.SPREADS, "european_handicap_-1", 3),
+    ):
+        anchor_book, by_sel = fair[("evt-1", market, detail)]
+        assert anchor_book == "Pinnacle"
+        assert len(by_sel) == n_outcomes
+        assert sum(by_sel.values()) == pytest.approx(1.0)
+    # symmetric 2.5-line book devigs to exactly 0.5 within its OWN line
+    assert fair[("evt-1", Market.TOTALS, "over_under_2_5")][1]["Over 2.5"] == pytest.approx(0.5)
+
+    h2h_fair = fair[("evt-1", Market.H2H, None)][1]
+    dc_anchor, dc_fair = fair[("evt-1", Market.DOUBLE_CHANCE, "double_chance")]
+    assert dc_anchor == "Pinnacle"  # inherited from the 1X2 anchor
+    assert dc_fair["Home FC or Draw"] == pytest.approx(h2h_fair["Home FC"] + h2h_fair["Draw"])
+    assert dc_fair["Home FC or Away FC"] == pytest.approx(h2h_fair["Home FC"] + h2h_fair["Away FC"])
+    assert dc_fair["Draw or Away FC"] == pytest.approx(h2h_fair["Draw"] + h2h_fair["Away FC"])
+    # overlapping legs by design: DC fair sums to 2.0, not 1.0
+    assert sum(dc_fair.values()) == pytest.approx(2.0)

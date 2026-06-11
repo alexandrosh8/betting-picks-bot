@@ -6,9 +6,10 @@ then insert the pick. Picks are deduped by their natural key
 re-poll of the same market state never duplicates rows.
 """
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
@@ -17,16 +18,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.ingestion.base import EventTeams
+from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
 from app.storage.models import (
     Event,
     League,
     ModelVersion,
+    OddsSnapshot,
     Pick,
     ResultTracking,
     Sport,
     Team,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 async def _get_or_create_sport(session: AsyncSession, key: str, name: str) -> int:
@@ -148,6 +154,9 @@ async def latest_picks_with_events(session: AsyncSession, limit: int = 50) -> li
             "recommended_stake_amount": str(p.recommended_stake_amount),
             "reason_summary": p.reason_summary,
             "status": p.status,
+            # "premium" = alerted tier; "volume" = CLV-evidence shadow tier
+            # (default view on the dashboard shows premium only).
+            "tier": p.tier,
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
@@ -183,29 +192,9 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
     return changed
 
 
-async def performance_report(session: AsyncSession) -> dict[str, Any]:
-    """ROI + stake-weighted log-CLV over all settled picks (phase 4 report).
-
-    Staking/weighting uses the platform's recommended stake — the same
-    sizing the backtests report — while pnl/roi per pick already reflect
-    the user's actual stake when they logged one. Decimals serialize as
-    strings; undefined ratios are None.
-    """
-    rows = (
-        await session.execute(
-            select(
-                ResultTracking.outcome,
-                ResultTracking.pnl,
-                Pick.recommended_stake_amount,
-                Pick.clv_log,
-                Pick.beat_close,
-            ).join(Pick, ResultTracking.pick_id == Pick.id)
-        )
-    ).all()
-    n_pending = await session.scalar(
-        select(func.count()).select_from(Pick).where(Pick.status == "alerted")
-    )
-
+def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
+    """Aggregate (outcome, pnl, stake, clv_log, beat_close) rows into the
+    report fields. Decimals serialize as strings; undefined ratios are None."""
     counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
     total_pnl = Decimal("0")
@@ -223,16 +212,59 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         if beat_close is not None:
             beat_known += 1
             beat_true += int(beat_close)
-
     return {
         "n_settled": len(rows),
         **counts,
-        "n_pending": int(n_pending or 0),
         "total_staked": str(total_staked),
         "total_pnl": str(total_pnl),
         "roi": _ratio(total_pnl, total_staked),
         "stake_weighted_clv_log": _ratio(clv_weighted, clv_stake),
         "beat_close_rate": _ratio(Decimal(beat_true), Decimal(beat_known)),
+    }
+
+
+async def performance_report(session: AsyncSession) -> dict[str, Any]:
+    """ROI + stake-weighted log-CLV over settled picks (phase 4 report).
+
+    Headline numbers are PREMIUM-scoped ("tier_scope" says so): the volume
+    tier is an informational shadow — letting its many small edges into the
+    headline would mask the alerted strategy's real performance. The same
+    aggregates over the volume tier ride along under "volume" (accumulating
+    that tier's CLV/ROI evidence IS its purpose).
+
+    Staking/weighting uses the platform's recommended stake — the same
+    sizing the backtests report — while pnl/roi per pick already reflect
+    the user's actual stake when they logged one.
+    """
+    rows = (
+        await session.execute(
+            select(
+                ResultTracking.outcome,
+                ResultTracking.pnl,
+                Pick.recommended_stake_amount,
+                Pick.clv_log,
+                Pick.beat_close,
+                Pick.tier,
+            ).join(Pick, ResultTracking.pick_id == Pick.id)
+        )
+    ).all()
+    pending_by_tier: dict[str, int] = {
+        tier: int(n)
+        for tier, n in (
+            await session.execute(
+                select(Pick.tier, func.count()).where(Pick.status == "alerted").group_by(Pick.tier)
+            )
+        ).all()
+    }
+
+    premium = _aggregate_settled([tuple(r)[:5] for r in rows if r[5] == "premium"])
+    volume = _aggregate_settled([tuple(r)[:5] for r in rows if r[5] == "volume"])
+    volume["n_pending"] = pending_by_tier.get("volume", 0)
+    return {
+        **premium,
+        "n_pending": pending_by_tier.get("premium", 0),
+        "tier_scope": "premium",
+        "volume": volume,
     }
 
 
@@ -243,15 +275,150 @@ def _ratio(numerator: Decimal, denominator: Decimal) -> str | None:
     return format((numerator / denominator).normalize(), "f")
 
 
+# asyncpg runs prepared statements: keep each INSERT comfortably under
+# Postgres's 32767 bind-parameter limit (8 params/row -> 4000 params/chunk).
+_SNAPSHOT_INSERT_CHUNK = 500
+
+
+def snapshot_market_key(snapshot: OddsSnapshotIn) -> str:
+    """The `market` string stored in odds_snapshots: the provider submarket
+    key ("asian_handicap_-1_5") when present, else the Market enum value.
+    Distinct lines MUST stay distinct observations or downstream devig pools
+    a fake multi-leg book. Clamped to the column's 32 chars (the longest
+    configured key, asian_handicap_games_-10_5_games, is exactly 32)."""
+    return (snapshot.market_detail or str(snapshot.market))[:32]
+
+
+async def persist_odds_snapshots(
+    session_factory: "async_sessionmaker",
+    snapshots: Sequence[OddsSnapshotIn],
+    teams_by_event: Mapping[str, EventTeams],
+    sport: str,
+    default_league: str,
+) -> int:
+    """Append price observations into odds_snapshots (the backtest /
+    line-movement / CLV dataset). Returns the number of NEW rows written.
+
+    Entity resolution reuses the SAME get-or-create helpers persist_pick
+    uses — one resolution per event, never a second resolution path — so
+    snapshots and picks land on the same events rows. Events missing from
+    teams_by_event are skipped (unresolvable this cycle; the caller retries
+    next cycle). Re-observations dedupe on uq_odds_snapshot_observation
+    (event, bookmaker, market, selection, captured_at) via ON CONFLICT DO
+    NOTHING. Odds cross the boundary Decimal-via-string; captured_at is the
+    provider-reported observation time, never now().
+    """
+    by_event: dict[str, list[OddsSnapshotIn]] = {}
+    for snapshot in snapshots:
+        if snapshot.event_id in teams_by_event:
+            by_event.setdefault(snapshot.event_id, []).append(snapshot)
+    if not by_event:
+        return 0
+
+    written = 0
+    async with session_factory() as session:
+        sport_id = await _get_or_create_sport(session, sport, sport.title())
+        rows: list[dict[str, Any]] = []
+        for external_ref, event_snapshots in by_event.items():
+            teams = teams_by_event[external_ref]
+            league_id = await _get_or_create_league(
+                session, sport_id, teams.league or default_league
+            )
+            home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
+            away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
+            event_id = await _get_or_create_event(
+                session,
+                sport_id,
+                league_id,
+                home_id,
+                away_id,
+                external_ref,
+                starts_at=teams.starts_at,
+            )
+            for snapshot in event_snapshots:
+                rows.append(
+                    {
+                        "event_id": event_id,
+                        "bookmaker": snapshot.bookmaker,
+                        "market": snapshot_market_key(snapshot),
+                        "selection": snapshot.selection,
+                        "decimal_odds": Decimal(str(snapshot.decimal_odds)),
+                        "liquidity": (
+                            Decimal(str(snapshot.liquidity))
+                            if snapshot.liquidity is not None
+                            else None
+                        ),
+                        "captured_at": snapshot.captured_at,
+                        "ingested_at": snapshot.ingested_at,
+                    }
+                )
+        for start in range(0, len(rows), _SNAPSHOT_INSERT_CHUNK):
+            chunk = rows[start : start + _SNAPSHOT_INSERT_CHUNK]
+            stmt = (
+                pg_insert(OddsSnapshot)
+                .values(chunk)
+                .on_conflict_do_nothing(constraint="uq_odds_snapshot_observation")
+                .returning(OddsSnapshot.id)
+            )
+            written += len((await session.execute(stmt)).scalars().all())
+        await session.commit()
+    return written
+
+
+PickPersistOutcome = Literal["inserted", "upgraded", "duplicate"]
+
+
+async def _supersede_older_versions(
+    session: AsyncSession,
+    event_id: int,
+    market: str,
+    selection: str,
+    model_version_id: int,
+    tier: str,
+) -> None:
+    """A strategy-version bump re-emits the same opportunity under the new
+    version; older OPEN rows for the same (event, market, selection) are
+    duplicates on the dashboard — supersede them, keep history. Tier rule:
+    a PREMIUM pick supersedes any older open row, but a VOLUME pick may only
+    supersede other volume rows — an open premium pick must never be
+    displaced by the shadow tier."""
+    conditions = [
+        Pick.event_id == event_id,
+        Pick.market == market,
+        Pick.selection == selection,
+        Pick.model_version_id != model_version_id,
+        Pick.status == "alerted",
+    ]
+    if tier != "premium":
+        conditions.append(Pick.tier != "premium")
+    await session.execute(sa_update(Pick).where(*conditions).values(status="superseded"))
+
+
 async def persist_pick(
     session: AsyncSession,
     pick: PickOut,
     teams: EventTeams,
     model_name: str,
     model_version: str,
-) -> bool:
-    """Resolve entities and insert the pick. Returns True if a new row was
-    written, False if it already existed (dedupe)."""
+) -> PickPersistOutcome:
+    """Resolve entities and insert the pick (tier comes from pick.tier).
+
+    Returns:
+    - "inserted": a new row was written.
+    - "upgraded": the natural key existed as an OPEN volume row and this
+      pick clears the premium threshold — the row is promoted in place
+      (tier, market numbers, created_at). The caller treats this like a new
+      premium pick: dispatch the alert, keep the exposure grant.
+    - "duplicate": the key already exists and nothing changed. Covers BOTH
+      the same-tier re-detection and the deliberate premium-shield: a key
+      already held by a premium row is never touched by a volume candidate
+      (the unique key collides across tiers BY DESIGN — one market
+      opportunity is one row, whose tier may only ratchet upward).
+
+    `status` stays "alerted" for both tiers: it is the lifecycle column
+    (open -> settled/superseded/void) shared by revalidation and settlement;
+    `tier` alone scopes alerting, exposure, and reporting.
+    """
     sport_id = await _get_or_create_sport(session, pick.sport, pick.sport.title())
     league_id = await _get_or_create_league(session, sport_id, pick.league)
     home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
@@ -289,6 +456,7 @@ async def persist_pick(
             stake_breakdown=pick.stake_breakdown.model_dump(),
             reason_summary=pick.reason_summary,
             status="alerted",
+            tier=pick.tier,
             created_at=datetime.now(tz=UTC),
         )
         .on_conflict_do_nothing(constraint="uq_picks_event_market_selection_model")
@@ -297,18 +465,56 @@ async def persist_pick(
     result = await session.execute(stmt)
     inserted = result.scalar_one_or_none()
     if inserted is not None:
-        # A strategy-version bump re-emits the same opportunity under the new
-        # version; older OPEN rows for the same (event, market, selection)
-        # are duplicates on the dashboard — supersede them, keep history.
-        await session.execute(
-            sa_update(Pick)
-            .where(
-                Pick.event_id == event_id,
-                Pick.market == str(pick.market),
-                Pick.selection == pick.selection,
-                Pick.model_version_id != model_version_id,
-                Pick.status == "alerted",
-            )
-            .values(status="superseded")
+        await _supersede_older_versions(
+            session, event_id, str(pick.market), pick.selection, model_version_id, pick.tier
         )
-    return inserted is not None
+        return "inserted"
+
+    existing = await session.scalar(
+        select(Pick).where(
+            Pick.event_id == event_id,
+            Pick.market == str(pick.market),
+            Pick.selection == pick.selection,
+            Pick.model_version_id == model_version_id,
+        )
+    )
+    if (
+        pick.tier == "premium"
+        and existing is not None
+        and existing.tier == "volume"
+        and existing.status == "alerted"
+    ):
+        # volume -> premium UPGRADE: the shadow pick's edge now clears the
+        # alert threshold. Promote the row in place with the premium
+        # detection's market numbers (the alert must quote the row).
+        existing.tier = "premium"
+        existing.bookmaker = pick.bookmaker
+        existing.decimal_odds = Decimal(str(pick.decimal_odds))
+        existing.model_probability = Decimal(str(pick.model_probability))
+        existing.fair_probability = Decimal(str(pick.fair_probability))
+        existing.edge = Decimal(str(pick.edge))
+        existing.ev = Decimal(str(pick.ev))
+        existing.confidence = Decimal(str(pick.confidence))
+        existing.recommended_stake_fraction = Decimal(str(pick.recommended_stake_fraction))
+        existing.recommended_stake_amount = pick.recommended_stake_amount
+        existing.stake_breakdown = pick.stake_breakdown.model_dump()
+        existing.reason_summary = pick.reason_summary
+        # created_at advances to the upgrade moment: it is when the pick
+        # became an actionable premium alert AND when its exposure was
+        # reserved — seed_exposure_ledger (premium-scoped, created_at within
+        # today) must re-find this reservation after a restart.
+        existing.created_at = datetime.now(tz=UTC)
+        # Revalidation verdicts priced the OLD odds — reset; the next poll
+        # cycle re-prices the promoted row from scratch.
+        existing.closing_fair_probability = None
+        existing.clv_log = None
+        existing.beat_close = None
+        existing.current_odds = None
+        existing.current_edge = None
+        existing.revalidated_at = None
+        await session.flush()
+        await _supersede_older_versions(
+            session, event_id, str(pick.market), pick.selection, model_version_id, "premium"
+        )
+        return "upgraded"
+    return "duplicate"

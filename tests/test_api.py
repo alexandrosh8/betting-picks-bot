@@ -104,6 +104,28 @@ def test_dashboard_fetches_are_timeout_guarded() -> None:
     assert "UNRESPONSIVE" in text
 
 
+def test_dashboard_has_tier_filter_and_premium_scoped_cards() -> None:
+    """Two-tier UI contract: a tier filter (default PREMIUM) consistent with
+    the existing view toggles; volume rows marked by a muted VOL badge that
+    reuses the status badge slot (no new column — the 1280px no-scroll
+    layout must hold); every summary card explicitly labelled premium."""
+    text = TestClient(make_app()).get("/").text
+    assert 'id="f-tier"' in text
+    assert '<option value="premium" selected>' in text  # premium is default
+    assert "ALL TIERS" in text
+    # the muted VOL badge + its honest tooltip
+    assert 'isVolume ? "vol" : "open"' in text
+    assert "volume (shadow) tier" in text
+    # summary cards say they are premium-scoped
+    assert "Open picks (premium, verified)" in text
+    assert "Avg live edge (premium open)" in text
+    assert "Settled (premium, all time)" in text
+    assert "P&amp;L / ROI (premium settled)" in text
+    assert "Stake-wtd CLV (premium settled)" in text
+    # textContent discipline still holds with the new badge path
+    assert "innerHTML" not in text
+
+
 def test_result_payload_validation_rejects_bad_outcome() -> None:
     client = TestClient(make_app())
     response = client.post(

@@ -8,9 +8,25 @@ from typing import Any
 
 import pytest
 
+from app.config import Settings
 from app.ingestion.base import EventDirectory
-from app.ingestion.oddsportal import OddsPortalLoader
+from app.ingestion.oddsportal import (
+    OddsPortalLoader,
+    _line_from_key,
+    _market_for_key,
+    _selections,
+)
 from app.schemas.base import Market
+
+# The exact config-default market lists (class defaults — no .env read):
+# every key must validate at loader construction and map to the expected
+# canonical market + outcome layout. Config drift breaks here, loudly.
+CONFIGURED_FOOTBALL_KEYS = tuple(
+    Settings.model_fields["oddsportal_football_markets"].default.split(",")
+)
+CONFIGURED_BASKETBALL_KEYS = tuple(
+    Settings.model_fields["oddsportal_basketball_markets"].default.split(",")
+)
 
 MATCH = {
     "home_team": "Alpha FC",
@@ -404,3 +420,113 @@ async def test_fetch_match_odds_no_matching_links_skips_scrape() -> None:
         days_ahead=1,
     )
     assert await loader.fetch_match_odds("soccer", ["https://x/basketball/y/"]) == []
+
+
+def _expected_market_and_outcomes(key: str) -> tuple[Market, int]:
+    """Doctrine layout per market family: 2-way vs 3-way full outcome sets."""
+    exact = {
+        "1x2": (Market.H2H, 3),
+        "home_away": (Market.H2H, 2),
+        "btts": (Market.BTTS, 2),
+        "dnb": (Market.DNB, 2),
+        "double_chance": (Market.DOUBLE_CHANCE, 3),
+    }
+    if key in exact:
+        return exact[key]
+    if key.startswith("over_under_"):
+        return Market.TOTALS, 2
+    if key.startswith("european_handicap_"):
+        return Market.SPREADS, 3
+    if key.startswith("asian_handicap_"):
+        return Market.SPREADS, 2
+    raise AssertionError(f"unexpected configured key: {key}")
+
+
+@pytest.mark.parametrize("key", CONFIGURED_FOOTBALL_KEYS + CONFIGURED_BASKETBALL_KEYS)
+def test_every_configured_default_market_key_validates_and_maps(key: str) -> None:
+    # (b) passes loader validation at construction...
+    OddsPortalLoader(directory=EventDirectory(), leagues_by_sport_key={}, markets=(key,))
+    # ...with the expected canonical market and outcome layout.
+    expected_market, n_outcomes = _expected_market_and_outcomes(key)
+    assert _market_for_key(key) is expected_market
+    selections = _selections(key, "Alpha", "Beta")
+    assert len(selections) == n_outcomes
+    assert len({label for label, _ in selections}) == n_outcomes
+    assert len({sel for _, sel in selections}) == n_outcomes
+    if key.startswith(("over_under_", "asian_handicap_", "european_handicap_")):
+        line = _line_from_key(key)
+        assert line is not None
+        # Every line-bearing selection embeds its line, so distinct lines of
+        # one family can never collide in (event, market, selection) keys
+        # (picks dedupe/supersede/revalidation all key on selection).
+        assert all(f"{abs(line):g}" in sel for _, sel in selections)
+    if key.startswith("asian_handicap"):
+        line = _line_from_key(key)
+        assert line is not None
+        assert abs(line % 1.0) == 0.5  # half-line: no push outcome
+
+
+def test_configured_basketball_games_suffix_lines_parse() -> None:
+    # The basketball AH key format carries a _games SUFFIX too — the line
+    # parser must strip both ends.
+    assert _line_from_key("asian_handicap_games_-10_5_games") == -10.5
+    assert _line_from_key("asian_handicap_games_+1_5_games") == 1.5
+    assert _line_from_key("over_under_games_245_5") == 245.5
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        "asian_handicap_-2",  # integer line, football
+        "asian_handicap_+1_25",  # quarter line, football
+        "asian_handicap_0",  # zero line (pure push-shape)
+        "asian_handicap_games_-7_games",  # integer line, basketball suffix format
+        "asian_handicap_games_+2_25_games",  # quarter line, basketball suffix format
+    ],
+)
+def test_push_bearing_handicap_lines_rejected_in_both_key_formats(bad_key: str) -> None:
+    # Same gate as test_push_bearing_handicap_lines_rejected, extended over
+    # the expanded config families incl. the basketball _games-suffix format.
+    with pytest.raises(ValueError, match="half line"):
+        OddsPortalLoader(
+            directory=EventDirectory(),
+            leagues_by_sport_key={},
+            markets=(bad_key,),
+        )
+
+
+async def test_basketball_totals_and_handicap_games_markets_parse() -> None:
+    match = {
+        "home_team": "Test Hawks",
+        "away_team": "Test Bulls",
+        "match_date": "2026-06-12 01:00:00 UTC",
+        "league_name": "NBA",
+        "match_link": "https://www.oddsportal.com/basketball/usa/nba/hawks-bulls/",
+        "scraped_date": "2026-06-10T12:00:00Z",
+        "over_under_games_220_5_market": [
+            {"odds_over": "1.90", "odds_under": "1.92", "bookmaker_name": "BookieOne"},
+        ],
+        "asian_handicap_games_-7_5_games_market": [
+            {"handicap_team_1": "1.88", "handicap_team_2": "1.94", "bookmaker_name": "BookieOne"},
+        ],
+    }
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        return SimpleNamespace(success=[match], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"basketball": ("basketball", ["nba"])},
+        markets_by_sport_key={
+            "basketball": ("over_under_games_220_5", "asian_handicap_games_-7_5_games"),
+        },
+        scrape_fn=fake_scrape,
+    )
+    snapshots = await loader.fetch_odds("basketball")
+    triples = {(s.market, s.selection, s.market_detail) for s in snapshots}
+    assert triples == {
+        (Market.TOTALS, "Over 220.5", "over_under_games_220_5"),
+        (Market.TOTALS, "Under 220.5", "over_under_games_220_5"),
+        (Market.SPREADS, "Test Hawks -7.5", "asian_handicap_games_-7_5_games"),
+        (Market.SPREADS, "Test Bulls +7.5", "asian_handicap_games_-7_5_games"),
+    }

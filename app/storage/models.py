@@ -219,6 +219,13 @@ class Pick(Base):
     stake_breakdown: Mapped[dict[str, Any] | None]
     reason_summary: Mapped[str] = mapped_column(Text, server_default="")
     status: Mapped[str] = mapped_column(String(32), server_default="pending")
+    # Two-tier picks: 'premium' (edge >= VALUE_MIN_EDGE — alerted, reserves
+    # daily exposure) or 'volume' (VALUE_VOLUME_MIN_EDGE <= edge < premium —
+    # informational shadow tier: persisted + CLV-revalidated only, never
+    # alerted, never consumes the exposure cap). `status` stays the lifecycle
+    # (alerted/settled/superseded...) for BOTH tiers, so revalidation and
+    # settlement treat them identically; tier scopes alerts/exposure/reports.
+    tier: Mapped[str] = mapped_column(String(16), server_default="premium")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # --- CLV (filled at/after market close) ---------------------------------
     closing_odds: Mapped[Decimal | None] = mapped_column(ODDS)

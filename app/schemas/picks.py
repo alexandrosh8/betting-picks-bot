@@ -38,6 +38,9 @@ class PickOut(InternalModel):
     odds_age_seconds: float = Field(ge=0.0)
     liquidity: float | None = None
     reason_summary: str
+    # "premium" (edge >= VALUE_MIN_EDGE: alerted + exposure-reserved) or
+    # "volume" (shadow tier: persisted + CLV-tracked only, never alerted).
+    tier: str = "premium"
     created_at: datetime
     risk_warning: str = "Betting involves risk. Nothing here is guaranteed profit."
     manual_betting_reminder: str = MANUAL_BETTING_REMINDER

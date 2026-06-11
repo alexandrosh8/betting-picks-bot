@@ -46,7 +46,7 @@ async def factory():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
-def make_pick(event_id: str, stake_fraction: float, marker: str) -> PickOut:
+def make_pick(event_id: str, stake_fraction: float, marker: str, tier: str = "premium") -> PickOut:
     return PickOut(
         pick_id=f"p-{marker}",
         sport="soccer",
@@ -70,6 +70,7 @@ def make_pick(event_id: str, stake_fraction: float, marker: str) -> PickOut:
         odds_age_seconds=30.0,
         liquidity=None,
         reason_summary=marker,
+        tier=tier,
         created_at=NOW,
     )
 
@@ -80,11 +81,12 @@ async def _persist_with_created_at(
     stake_fraction: float,
     marker: str,
     created_at: datetime,
+    tier: str = "premium",
 ) -> None:
     async with factory() as session:
         await persist_pick(
             session,
-            make_pick(event_id, stake_fraction, marker),
+            make_pick(event_id, stake_fraction, marker, tier=tier),
             EventTeams(home="Home FC", away="Away FC"),
             "value-sharp-vs-soft",
             "v-seeding-test",
@@ -115,6 +117,27 @@ async def test_seeding_counts_only_todays_picks(factory) -> None:  # type: ignor
     await seed_exposure_ledger(ledger, factory)
     # today's two picks count; yesterday's 0.04 must NOT leak into today
     assert ledger.used(today_utc) == pytest.approx(baseline + 0.03, abs=1e-9)
+
+
+async def test_seeding_excludes_volume_tier(factory) -> None:  # type: ignore[no-untyped-def]
+    # Volume picks never reserved exposure (their stake fields are
+    # informational); counting them on restart would shrink the cap the
+    # premium tier is entitled to for the rest of the day.
+    today_utc = NOW.date()
+    baseline_ledger = DailyExposureLedger(max_daily_fraction=1.0)
+    await seed_exposure_ledger(baseline_ledger, factory)
+    baseline = baseline_ledger.used(today_utc)
+
+    now = datetime.now(tz=UTC)
+    await _persist_with_created_at(
+        factory, "evt-seed-volume", 0.02, "seeding-volume", now, tier="volume"
+    )
+    await _persist_with_created_at(factory, "evt-seed-premium-3", 0.01, "seeding-premium-3", now)
+
+    ledger = DailyExposureLedger(max_daily_fraction=1.0)
+    await seed_exposure_ledger(ledger, factory)
+    # only the premium 0.01 counts; the volume 0.02 must not leak in
+    assert ledger.used(today_utc) == pytest.approx(baseline + 0.01, abs=1e-9)
 
 
 async def test_seeding_is_idempotent_preload_not_accumulate(factory) -> None:  # type: ignore[no-untyped-def]

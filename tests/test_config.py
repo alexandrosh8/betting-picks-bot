@@ -110,3 +110,20 @@ def test_value_strategy_defaults_are_the_train_chosen_optimum() -> None:
     assert s.value_min_edge == 0.03
     assert s.value_min_odds == 1.60  # user policy: no picks below 1.60
     assert DevigMethod(s.value_devig) is DevigMethod.DIFFERENTIAL_MARGIN
+
+
+def test_volume_tier_floor_default_is_validated_v2_threshold() -> None:
+    # v2 holdout n=379, CLV +0.019 — the volume (shadow) tier's evidence base.
+    assert make_settings().value_volume_min_edge == 0.015
+
+
+def test_volume_floor_above_premium_is_fatal() -> None:
+    # The volume tier extends BELOW the premium threshold; inverting the
+    # ordering would alert on unvalidated edges — refuse to start.
+    with pytest.raises(ValidationError, match="VALUE_VOLUME_MIN_EDGE"):
+        make_settings(value_volume_min_edge=0.05, value_min_edge=0.03)
+
+
+def test_equal_tier_floors_disable_volume_cleanly() -> None:
+    s = make_settings(value_volume_min_edge=0.03, value_min_edge=0.03)
+    assert s.value_volume_min_edge == s.value_min_edge  # valid: tier off

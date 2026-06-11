@@ -9,14 +9,14 @@ import logging
 import uuid
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from app.backtesting import clv as _clv  # noqa: F401  (settlement uses this module)
 from app.edge.gates import GatePolicy, PickCandidate, evaluate
-from app.ingestion.base import EventDirectory, OddsLoader
+from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.models.base import ProbabilityModel
 from app.notifications.base import build_pick_alert
 from app.notifications.dispatcher import AlertDispatcher
@@ -38,12 +38,42 @@ logger = logging.getLogger(__name__)
 # showing day-old picks" must be visible. In-memory; repopulated each cycle.
 LAST_POLL: dict[str, dict[str, Any]] = {}
 
+# --- change-only odds-snapshot persistence ----------------------------------
+# Last odds written to odds_snapshots per (event_ref, bookmaker, line-
+# qualified market, selection) -> (decimal_odds, last_seen UTC). Process-
+# local by design: after a restart the cache is cold and ONE extra
+# (unchanged) row per live key is written — accepted, documented in
+# docs/db-schema.md. Bounded: when it exceeds ODDS_SEEN_MAX entries, keys
+# not seen for ODDS_SEEN_TTL are swept, then oldest-seen down to the cap.
+ODDS_SEEN_TTL = timedelta(days=3)
+ODDS_SEEN_MAX = 100_000
+
+OddsSeenCache = dict[tuple[str, str, str, str], tuple[float, datetime]]
+
+
+def _sweep_odds_seen(cache: OddsSeenCache, now: datetime, max_size: int = ODDS_SEEN_MAX) -> None:
+    """Bound the last-seen cache: a no-op under max_size; above it, evict
+    TTL-stale entries first, then oldest-seen until back at the cap. An
+    evicted live key just re-writes one unchanged row — same cost as a
+    restart, so eviction is always safe, never lossy."""
+    if len(cache) <= max_size:
+        return
+    cutoff = now - ODDS_SEEN_TTL
+    for key in [k for k, (_, seen) in cache.items() if seen < cutoff]:
+        del cache[key]
+    overflow = len(cache) - max_size
+    if overflow > 0:
+        for key, _ in sorted(cache.items(), key=lambda kv: kv[1][1])[:overflow]:
+            del cache[key]
+
 
 def _record_poll(
     sport_key: str,
     snapshots: Sequence[OddsSnapshotIn],
     picks: int,
     matches_found: int | None,
+    snapshots_persisted: int | None = None,
+    volume_picks: int = 0,
 ) -> None:
     per_market: dict[str, int] = {}
     for snap in snapshots:
@@ -52,12 +82,19 @@ def _record_poll(
     LAST_POLL[sport_key] = {
         "finished_at": datetime.now(tz=UTC).isoformat(),
         "snapshots": len(snapshots),
+        # PREMIUM picks only — the alerted tier the operator acts on. The
+        # shadow tier rides separately in volume_picks so it can never
+        # inflate the headline cycle count.
         "picks": picks,
+        "volume_picks": volume_picks,
         # None = the loader does not report listing counts (e.g. odds_api).
         "matches_found": matches_found,
         # Per-market counts: a selector break craters ONE market's count
         # while cycles keep completing — the dashboard can show which.
         "per_market": per_market,
+        # NEW odds rows appended to odds_snapshots this cycle (change-only).
+        # None = persistence is off (no DB) or this cycle's write failed.
+        "snapshots_persisted": snapshots_persisted,
         # Listings parsed but ZERO odds rows: selector/DOM break or anti-bot
         # wall. finished_at alone would look healthy — flag it explicitly.
         "degraded": bool(matches_found) and not snapshots,
@@ -92,9 +129,78 @@ class PipelineDeps:
     session_factory: "async_sessionmaker | None" = None  # set => persist picks to DB
     model_name: str = "model"
     model_version: str = "0"
-    # value-strategy thresholds (run_value_pipeline)
+    # value-strategy thresholds (run_value_pipeline). value_min_edge gates
+    # the PREMIUM tier (alert + exposure); value_volume_min_edge gates the
+    # VOLUME shadow tier (persist + CLV-revalidate only). Equal values
+    # disable the volume tier — the defaults keep it off unless the
+    # composition root (Settings) opens a gap between them.
     value_min_edge: float = 0.015
+    value_volume_min_edge: float = 0.015
     value_min_odds: float = 1.30
+    # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
+    # i.e. per process: both sport keys share it (event refs are distinct).
+    odds_seen: OddsSeenCache = field(default_factory=dict)
+
+
+async def _persist_snapshots(
+    deps: "PipelineDeps",
+    snapshots: Sequence[OddsSnapshotIn],
+    sport: str,
+    default_league: str,
+    now: datetime,
+) -> int | None:
+    """Change-only append of this cycle's odds into odds_snapshots — the
+    dataset for backtests, line-movement features, and CLV verification.
+
+    Returns NEW rows written; None when persistence is unavailable (no DB /
+    no directory) or this cycle's write failed — recorded verbatim in
+    LAST_POLL. Raw append-only would explode (5-20k observations per back-
+    to-back cycle), so rows whose odds equal the last-seen cache are
+    skipped. The cache is updated ONLY after a successful write: a failed
+    batch must be retried next cycle, not silently dropped. Failure here
+    never breaks pick generation.
+    """
+    if deps.session_factory is None or deps.directory is None:
+        return None
+    to_write: list[OddsSnapshotIn] = []
+    seen_updates: OddsSeenCache = {}
+    teams_by_event: dict[str, EventTeams] = {}
+    for snap in snapshots:
+        teams = teams_by_event.get(snap.event_id) or deps.directory.lookup(snap.event_id)
+        if teams is None:
+            continue  # unresolvable this cycle; do NOT cache — retry later
+        teams_by_event[snap.event_id] = teams
+        key = (
+            snap.event_id,
+            snap.bookmaker,
+            snap.market_detail or str(snap.market),  # line-qualified market
+            snap.selection,
+        )
+        last = seen_updates.get(key) or deps.odds_seen.get(key)
+        if last is not None and last[0] == snap.decimal_odds:
+            seen_updates[key] = (snap.decimal_odds, now)  # refresh recency only
+            continue
+        to_write.append(snap)
+        seen_updates[key] = (snap.decimal_odds, now)
+
+    from app.storage import repositories
+
+    try:
+        written = 0
+        if to_write:
+            written = await repositories.persist_odds_snapshots(
+                deps.session_factory, to_write, teams_by_event, sport, default_league
+            )
+    except Exception as exc:  # snapshot history must never break picking
+        logger.warning(
+            "odds snapshot persistence failed (%d rows): %s",
+            len(to_write),
+            type(exc).__name__,
+        )
+        return None
+    deps.odds_seen.update(seen_updates)
+    _sweep_odds_seen(deps.odds_seen, now)
+    return written
 
 
 async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
@@ -108,6 +214,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
         _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
         return []
 
+    persisted = await _persist_snapshots(deps, snapshots, deps.sport, deps.league or sport_key, now)
     fair = _fair_probabilities(snapshots, deps.devig_method)
     picks: list[PickOut] = []
 
@@ -178,11 +285,14 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                     f"model {prediction.probability:.3f} vs fair {fair_p:.3f} "
                     f"({deps.devig_method}) at {snap.bookmaker}"
                 ),
+                # The model strategy has NO volume tier: the volume-tier
+                # validation evidence (v2 holdout n=379, CLV +0.019) is
+                # value-strategy-specific; every model pick is full-behavior.
+                tier="premium",
                 created_at=now,
             )
-            if await _maybe_persist(deps, pick, snap.event_id):
-                picks.append(pick)
-            else:
+            outcome = await _maybe_persist(deps, pick, snap.event_id)
+            if outcome == "duplicate":
                 # Confirmed DB duplicate (the picks unique key ignores odds):
                 # hand the exposure grant back — a re-detection is not new
                 # exposure — but STILL dispatch. The alert dedupe key includes
@@ -193,10 +303,18 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 # alert whose dispatch failed is retried by this very
                 # re-dispatch on the next cycle.
                 deps.ledger.release(now.date(), granted)
+            else:  # inserted / upgraded / unpersisted (uncertainty = "new")
+                picks.append(pick)
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
-    _record_poll(sport_key, snapshots, len(picks), _loader_matches_found(deps.loader, sport_key))
+    _record_poll(
+        sport_key,
+        snapshots,
+        len(picks),
+        _loader_matches_found(deps.loader, sport_key),
+        snapshots_persisted=persisted,
+    )
     return picks
 
 
@@ -224,31 +342,53 @@ async def _refresh_kickoffs(deps: "PipelineDeps", event_ids: set[str]) -> None:
         logger.error("kickoff refresh failed: %s", type(exc).__name__)
 
 
-async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> bool:
+def pick_tier(edge: float, premium_min_edge: float, volume_min_edge: float) -> str | None:
+    """Tier for a candidate edge — pure boundary logic, tested directly.
+
+    'premium' when edge >= premium_min_edge (alert + exposure reservation);
+    'volume' when volume_min_edge <= edge < premium_min_edge (informational
+    shadow tier); None below both floors. Floors are INCLUSIVE, matching the
+    backtests' >= gates (edge exactly 0.03 is a premium pick). Equal floors
+    disable the volume tier: no edge satisfies >= x and < x at once.
+    """
+    if edge >= premium_min_edge:
+        return "premium"
+    if edge >= volume_min_edge:
+        return "volume"
+    return None
+
+
+PersistOutcome = Literal["inserted", "upgraded", "duplicate", "unpersisted"]
+
+
+async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> PersistOutcome:
     """Persist the pick to the DB when a session factory + directory are set.
 
-    Returns False only on a CONFIRMED dedupe (the pick already exists) so
-    the caller can hand back its exposure grant and skip re-alerting. Every
-    other path — persistence unavailable or failed — returns True: treating
-    uncertainty as "new" keeps the cap conservative and the alert flowing.
+    Passes through repositories.persist_pick's outcome ("inserted" /
+    "upgraded" / "duplicate"); "unpersisted" means persistence was
+    unavailable (no DB/directory/teams) or this write failed. PREMIUM
+    callers treat "unpersisted" like "inserted" — treating uncertainty as
+    "new" keeps the cap conservative and the alert flowing. VOLUME callers
+    drop "unpersisted" picks instead: a shadow pick that never reaches the
+    DB can accumulate no CLV evidence, which is its only purpose.
     """
     if deps.session_factory is None or deps.directory is None:
-        return True
+        return "unpersisted"
     teams = deps.directory.lookup(event_id)
     if teams is None:
-        return True
+        return "unpersisted"
     from app.storage import repositories
 
     try:
         async with deps.session_factory() as session:
-            is_new = await repositories.persist_pick(
+            outcome: PersistOutcome = await repositories.persist_pick(
                 session, pick, teams, deps.model_name, deps.model_version
             )
             await session.commit()
-        return is_new
+        return outcome
     except Exception as exc:  # persistence must never break alerting
         logger.error("pick persistence failed for %s: %s", pick.pick_id, type(exc).__name__)
-        return True
+        return "unpersisted"
 
 
 async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]:
@@ -271,8 +411,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     grouped = group_market_prices(snapshots)
     fair = event_fair_probs(grouped, deps.devig_method)
     await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
+    persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
 
     picks: list[PickOut] = []
+    n_volume = 0
+    # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
+    # min() guards a deps-level inversion (Settings already validates the
+    # ordering at startup) so a bad override can widen nothing.
+    scan_min_edge = min(deps.value_volume_min_edge, deps.value_min_edge)
     for (event_id, market, detail), (prices, captured) in grouped.items():
         anchored = fair.get((event_id, market, detail))
         if anchored is None:
@@ -282,7 +428,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             prices,
             fair_by_sel,
             anchor_book,
-            min_edge=deps.value_min_edge,
+            min_edge=scan_min_edge,
             min_odds=deps.value_min_odds,
         )
         for v in value_bets:
@@ -290,14 +436,24 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             age = max((now - cap).total_seconds(), 0.0) if cap else 0.0
             if age > deps.gate_policy.max_odds_age_seconds:
                 continue
+            tier = pick_tier(v.edge, deps.value_min_edge, deps.value_volume_min_edge)
+            if tier is None:
+                continue  # below both floors (unreachable via scan_min_edge)
             # Stake from the sharp fair prob at the EFFECTIVE (net) price.
             breakdown = recommended_stake(
                 v.sharp_fair_prob, v.best_odds_effective, deps.stake_policy
             )
-            granted = deps.ledger.reserve(now.date(), breakdown.final)
-            if granted <= 0.0:
-                logger.info("daily exposure cap reached; skipping %s", v.selection)
-                continue
+            if tier == "premium":
+                granted = deps.ledger.reserve(now.date(), breakdown.final)
+                if granted <= 0.0:
+                    logger.info("daily exposure cap reached; skipping %s", v.selection)
+                    continue
+            else:
+                # VOLUME tier: the stake breakdown is computed (what WOULD
+                # be recommended) but the daily exposure ledger is NEVER
+                # touched — the informational shadow tier must not consume
+                # the cap premium picks need.
+                granted = breakdown.final
             # Named sharp anchors are backtested; consensus anchors are the
             # fallback path with weaker evidence — reflected in confidence.
             confidence = 0.7 if v.sharp_book == CONSENSUS_ANCHOR else 0.9
@@ -345,11 +501,24 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         else ""
                     )
                 ),
+                tier=tier,
                 created_at=now,
             )
-            if await _maybe_persist(deps, pick, event_id):
-                picks.append(pick)
-            else:
+            outcome = await _maybe_persist(deps, pick, event_id)
+            if tier == "volume":
+                # Shadow tier: NEVER alerted, NEVER on the exposure ledger.
+                # Its picks ride the same event pages as premium ones, so
+                # the CLV revalidation below re-prices them for free — that
+                # accumulating live evidence is the tier's entire purpose.
+                # "duplicate" covers both a volume re-detection and a key
+                # already held by a PREMIUM row (which must never be touched
+                # by the shadow tier); "unpersisted" volume picks are
+                # dropped — without a DB row there is no evidence to gather.
+                if outcome == "inserted":
+                    picks.append(pick)
+                    n_volume += 1
+                continue
+            if outcome == "duplicate":
                 # Confirmed DB duplicate (the picks unique key ignores odds):
                 # hand the exposure grant back — a re-detection is not new
                 # exposure — but STILL dispatch. The alert dedupe key includes
@@ -360,6 +529,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 # alert whose dispatch failed is retried by this very
                 # re-dispatch on the next cycle.
                 deps.ledger.release(now.date(), granted)
+            else:
+                # "inserted", "unpersisted" (uncertainty = "new"), or
+                # "upgraded" — a volume row just cleared the premium
+                # threshold: THIS is its alert moment, and the reservation
+                # made above stays (the shadow row never held one).
+                picks.append(pick)
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +
@@ -381,8 +556,21 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         except Exception as exc:  # revalidation must never break picking
             logger.error("open-pick revalidation failed: %s", type(exc).__name__)
 
-    logger.info("value pipeline cycle for %s: %d picks", sport_key, len(picks))
-    _record_poll(sport_key, snapshots, len(picks), _loader_matches_found(deps.loader, sport_key))
+    n_premium = len(picks) - n_volume
+    logger.info(
+        "value pipeline cycle for %s: %d premium picks, %d volume (shadow)",
+        sport_key,
+        n_premium,
+        n_volume,
+    )
+    _record_poll(
+        sport_key,
+        snapshots,
+        n_premium,
+        _loader_matches_found(deps.loader, sport_key),
+        snapshots_persisted=persisted,
+        volume_picks=n_volume,
+    )
     return picks
 
 
@@ -445,13 +633,20 @@ def _fair_probabilities(
     snapshots: Sequence[OddsSnapshotIn],
     method: DevigMethod,
 ) -> dict[tuple[str, str, str, str], float]:
-    """Devig each (event, bookmaker, market) book into fair probabilities."""
-    books: dict[tuple[str, str, str], list[OddsSnapshotIn]] = defaultdict(list)
+    """Devig each (event, bookmaker, market, line) book into fair probabilities.
+
+    `market_detail` is part of the grouping key: distinct lines of one Market
+    (over_under_2_5 vs over_under_3_5) are separate books — pooling them
+    devigs a fake 4-leg market and corrupts every fair probability (the same
+    rule group_market_prices enforces for the value pipeline). The returned
+    key stays (event, bookmaker, market, selection): line-bearing selections
+    ("Over 3.5") keep lines distinct after flattening."""
+    books: dict[tuple[str, str, str, str | None], list[OddsSnapshotIn]] = defaultdict(list)
     for snap in snapshots:
-        books[(snap.event_id, snap.bookmaker, snap.market)].append(snap)
+        books[(snap.event_id, snap.bookmaker, snap.market, snap.market_detail)].append(snap)
 
     fair: dict[tuple[str, str, str, str], float] = {}
-    for (event_id, bookmaker, market), legs in books.items():
+    for (event_id, bookmaker, market, _detail), legs in books.items():
         if len(legs) < 2:
             continue  # cannot devig a one-sided book
         probs = devig([leg.decimal_odds for leg in legs], method=method)

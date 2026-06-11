@@ -65,7 +65,12 @@ async def latest_picks(
 async def performance(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, Any]:
-    """ROI + stake-weighted log-CLV over settled picks (phase 4 report)."""
+    """ROI + stake-weighted log-CLV over settled picks (phase 4 report).
+
+    Headline fields are PREMIUM-tier scoped ("tier_scope": "premium"); the
+    volume shadow tier's aggregates ride under "volume" so its many small
+    edges can never distort the alerted strategy's numbers.
+    """
     return await performance_report(session)
 
 

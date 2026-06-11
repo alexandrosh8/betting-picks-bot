@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     # VALUE_MIN_EDGE=0.015 (v2 holdout n=379, CLV +0.019).
     pick_strategy: str = "value"
     value_min_edge: float = 0.03
+    # Volume tier (informational shadow tier): candidates whose edge clears
+    # this floor but NOT value_min_edge are persisted with tier='volume' —
+    # no alert, no daily-exposure reservation — purely to accumulate live
+    # CLV evidence at scale. Validation: v2 holdout n=379, CLV +0.019
+    # (premium tier above: v4 holdout n=61, ROI +21.1%, CLV +0.106).
+    # Must stay <= value_min_edge; setting it EQUAL disables the volume
+    # tier cleanly (no edge can be >= volume and < premium at once).
+    value_volume_min_edge: float = Field(default=0.015, ge=0.0)
     # User policy: never pick odds below 1.60. The backtest validated at
     # >= 1.30; a higher floor only narrows to a subset of validated picks.
     value_min_odds: float = 1.60
@@ -83,17 +91,49 @@ class Settings(BaseSettings):
     oddsportal_football_leagues: str = "england-premier-league"  # csv of slugs
     # Devig-sound markets only: full mutually-exclusive outcome sets. Asian
     # handicaps are HALF-LINES only (integer/quarter lines carry pushes and
-    # are rejected by the loader); European handicap is 3-way. 1x2+ou25 are
-    # backtest-validated; the rest use the identical mechanism on thinner
-    # evidence. Every extra market adds scrape time per match.
+    # are rejected by the loader); European handicap is 3-way and devig-sound
+    # at any integer line. 1x2+ou25 are backtest-validated; the rest use the
+    # identical mechanism on thinner evidence. Every extra market adds one
+    # scrape tab per match — each line below is a deliberate liquidity call.
+    #
+    # This default is every devig-sound market FAMILY oddsharvester 0.3.0
+    # supports, with lines trimmed to the liquid band: football OU 0.5 and
+    # 5.5+ plus EH ±3/±4 are dead-liquidity tabs that only add scrape time
+    # and gap-noise. FULL upstream-supported sets for future tuning
+    # (.venv/.../oddsharvester/utils/sport_market_constants.py is the
+    # documentation of record):
+    #   OU (FootballOverUnderMarket): 0_5..8_5 in quarter steps — only the
+    #     half-lines (_5) are devig-sound; integer/quarter lines push.
+    #   AH (FootballAsianHandicapMarket): -4..+2 in quarter steps — only
+    #     half-lines (-3_5..+1_5) are devig-sound here.
+    #   EH (FootballEuropeanHandicapMarket): -4..-1, +1..+4 (all integer,
+    #     all 3-way devig-sound).
     oddsportal_football_markets: str = (
-        "1x2,over_under_2_5,btts,dnb,double_chance,asian_handicap_-1_5,european_handicap_-1"
+        "1x2,btts,double_chance,dnb,"
+        "over_under_1_5,over_under_2_5,over_under_3_5,over_under_4_5,"
+        "asian_handicap_-3_5,asian_handicap_-2_5,asian_handicap_-1_5,"
+        "asian_handicap_-0_5,asian_handicap_+0_5,asian_handicap_+1_5,"
+        "european_handicap_-2,european_handicap_-1,european_handicap_+1,european_handicap_+2"
     )
     # Basketball (club competitions only — OddsHarvester maps no national-team
     # events like EuroBasket). Empty leagues = basketball polling off.
-    # Totals lines are per-game; configure a band around current league totals.
+    # Totals/AH lines are per-game; the band covers modern NBA/Euroleague
+    # totals (200.5-245.5) and spreads (±10.5). FULL upstream sets are
+    # 161 OU tabs (BasketballOverUnderMarket: 100_5..260_5, every half
+    # point) and 52 AH tabs (BasketballAsianHandicapMarket: -25_5..+25_5,
+    # all half-lines) — scraping them all only adds cycle time on tabs
+    # OddsPortal rarely prices.
     oddsportal_basketball_markets: str = (
-        "home_away,over_under_games_215_5,over_under_games_220_5,over_under_games_225_5"
+        "home_away,"
+        "over_under_games_200_5,over_under_games_205_5,over_under_games_210_5,"
+        "over_under_games_215_5,over_under_games_220_5,over_under_games_225_5,"
+        "over_under_games_230_5,over_under_games_235_5,over_under_games_240_5,"
+        "over_under_games_245_5,"
+        "asian_handicap_games_-10_5_games,asian_handicap_games_-7_5_games,"
+        "asian_handicap_games_-5_5_games,asian_handicap_games_-3_5_games,"
+        "asian_handicap_games_-1_5_games,asian_handicap_games_+1_5_games,"
+        "asian_handicap_games_+3_5_games,asian_handicap_games_+5_5_games,"
+        "asian_handicap_games_+7_5_games,asian_handicap_games_+10_5_games"
     )
     oddsportal_basketball_leagues: str = "nba,euroleague"
     # Dated scraping: each cycle covers today..today+N (UTC) instead of a
@@ -141,6 +181,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SAFETY VIOLATION: PICKS_ONLY, MANUAL_BETTING_ONLY and "
                 "READ_ONLY_MARKET_DATA must stay true (ADR-0002)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_tier_ordering(self) -> "Settings":
+        # The volume tier is a SUBSET extension below the premium threshold;
+        # an inverted ordering would silently alert on unvalidated edges.
+        if self.value_volume_min_edge > self.value_min_edge:
+            raise ValueError(
+                "VALUE_VOLUME_MIN_EDGE must be <= VALUE_MIN_EDGE "
+                "(set them equal to disable the volume tier)."
             )
         return self
 

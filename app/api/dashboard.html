@@ -532,34 +532,36 @@
     <!-- unmissable full-width banner — ONLY when /picks itself fails -->
     <div class="banner" id="offline-banner" style="display: none"></div>
 
+    <!-- summary cards are PREMIUM-tier scoped (captions say so): the volume
+         shadow tier must never distort the headline numbers -->
     <div class="cards">
       <div class="card" id="card-open" data-flag="STALE">
         <div class="v" id="c-open">—</div>
-        <div class="k" id="c-open-k">Open picks (verified)</div>
+        <div class="k" id="c-open-k">Open picks (premium, verified)</div>
       </div>
       <div class="card" id="card-edge" data-flag="STALE">
         <div class="v" id="c-edge">—</div>
-        <div class="k">Avg live edge (open)</div>
+        <div class="k">Avg live edge (premium open)</div>
       </div>
       <div class="card" id="card-clv" data-flag="STALE">
         <div class="v" id="c-clv">—</div>
-        <div class="k" id="c-clv-k">Beat close</div>
+        <div class="k" id="c-clv-k">Beat close (premium)</div>
       </div>
       <div class="card" id="card-settled" data-flag="STALE">
         <div class="v" id="c-settled">—</div>
-        <div class="k">Settled (all time)</div>
+        <div class="k">Settled (premium, all time)</div>
       </div>
       <div class="card" id="card-record" data-flag="STALE">
         <div class="v" id="c-record">—</div>
-        <div class="k">Record W-L-P/V</div>
+        <div class="k">Record W-L-P/V (premium)</div>
       </div>
       <div class="card" id="card-pnl" data-flag="STALE">
         <div class="v" id="c-pnl">—</div>
-        <div class="k">P&amp;L / ROI (settled)</div>
+        <div class="k">P&amp;L / ROI (premium settled)</div>
       </div>
       <div class="card" id="card-swclv" data-flag="STALE">
         <div class="v" id="c-swclv">—</div>
-        <div class="k">Stake-wtd CLV (settled)</div>
+        <div class="k">Stake-wtd CLV (premium settled)</div>
       </div>
     </div>
 
@@ -569,6 +571,13 @@
         <option value="alerted" selected>OPEN (VERIFIED)</option>
         <option value="alerted-all">OPEN (INCL. UNVERIFIED)</option>
         <option value="settled">SETTLED</option>
+      </select>
+      <!-- tier filter: PREMIUM is the alerted, exposure-capped tier and the
+           default view; VOLUME is the muted CLV-evidence shadow tier -->
+      <select id="f-tier" aria-label="Filter picks by tier">
+        <option value="premium" selected>PREMIUM</option>
+        <option value="volume">VOLUME</option>
+        <option value="">ALL TIERS</option>
       </select>
       <input
         type="search"
@@ -763,8 +772,14 @@
         tbody.appendChild(tr);
       }
 
+      // Rows persisted before the tier column existed have no tier field
+      // only if served by an older API — treat missing as premium (the
+      // DB backfills the same way).
+      const tierOf = (p) => p.tier || "premium";
+
       function render() {
         const status = $("f-status").value;
+        const tier = $("f-tier").value;
         const q = $("f-search").value.trim().toLowerCase();
         const rows = PICKS.filter(
           (p) =>
@@ -773,6 +788,7 @@
                 ? p.status === "alerted"
                 : p.status === status)) &&
             (status !== "alerted" || isVerified(p)) &&
+            (!tier || tierOf(p) === tier) &&
             (!q ||
               [
                 p.event,
@@ -781,6 +797,7 @@
                 p.league,
                 p.market,
                 MARKETS[p.market] || "", // searchable by the DISPLAYED label too
+                tierOf(p), // "premium" / "volume" are searchable words
               ]
                 .join(" ")
                 .toLowerCase()
@@ -979,13 +996,22 @@
                   ? "provisional CLV frozen when this pick was superseded by a newer strategy version — never finalized against the close"
                   : "closing-line value: pick price vs the de-vigged closing fair price";
           }
-          const statusCell = td(
-            tr,
-            badge(
-              p.status === "alerted" ? "open" : p.status,
-              p.status === "alerted" ? "b-info" : "b-neutral",
-            ),
+          // Tier marking reuses the SAME status badge slot — no extra
+          // column, no extra width ("vol" is narrower than "open", so the
+          // 1280px no-scroll layout is untouched): an open volume row shows
+          // a muted VOL badge instead of "open"; non-open volume rows keep
+          // their status badge and carry the tier in the tooltip.
+          const isVolume = tierOf(p) === "volume";
+          const statusBadge = badge(
+            p.status === "alerted" ? (isVolume ? "vol" : "open") : p.status,
+            p.status === "alerted" && !isVolume ? "b-info" : "b-neutral",
           );
+          if (isVolume)
+            statusBadge.title =
+              "volume (shadow) tier — persisted for CLV evidence only: " +
+              "no alert was sent, no daily exposure reserved, stake figures " +
+              "are what WOULD have been recommended";
+          const statusCell = td(tr, statusBadge);
           // Manual settle: past-kickoff open picks (auto-settlement covers
           // football; NBA/euroleague have no free results feed). TBD
           // kickoffs (starts_at null) must not invite settling an
@@ -1115,13 +1141,18 @@
         // Cards derived from /picks are scoped to the latest-200 window the
         // endpoint serves — captions must say so once the table can exceed
         // it. (#c-settled is owned by summarizePerf: the all-time DB count.)
-        const open = PICKS.filter((p) => p.status === "alerted");
+        // PREMIUM tier only: the volume shadow tier is deliberately kept
+        // out of every headline number (its picks are never alerted and
+        // exist purely as CLV evidence) — each caption says "premium".
+        const premium = PICKS.filter((p) => tierOf(p) === "premium");
+        const open = premium.filter((p) => p.status === "alerted");
         const verified = open.filter(isVerified);
-        // Match the default OPEN (VERIFIED) view; surface the rest in the
-        // caption instead of silently disagreeing with the table below.
+        // Match the default OPEN (VERIFIED) + PREMIUM view; surface the
+        // rest in the caption instead of silently disagreeing with the
+        // table below.
         $("c-open").textContent = String(verified.length);
         $("c-open-k").textContent =
-          "Open picks (verified)" +
+          "Open picks (premium, verified)" +
           (open.length > verified.length
             ? " · " + (open.length - verified.length) + " unverified"
             : "");
@@ -1140,20 +1171,23 @@
         // superseded rows keep the provisional CLV frozen when they were
         // replaced (those never get a true closing number) — the card
         // tooltip says so instead of implying everything is judged at close.
-        const withClv = PICKS.filter((p) => p.clv_log !== null);
+        const withClv = premium.filter((p) => p.clv_log !== null);
         $("c-clv").textContent = withClv.length
           ? withClv.filter((p) => p.beat_close).length + " / " + withClv.length
           : "—";
         const pending = open.filter((p) => p.clv_log === null).length;
         $("c-clv-k").textContent =
-          "Beat close (last " +
-          PICKS.length +
+          "Beat close (premium, last " +
+          premium.length +
           ")" +
           (pending ? " · " + pending + " pending" : "");
         $("card-clv").title =
           "Window = the latest " +
+          premium.length +
+          " PREMIUM picks among the " +
           PICKS.length +
-          " picks served by /picks. Mixed maturity: settled rows = final " +
+          " served by /picks (the volume shadow tier is excluded from " +
+          "every headline card). Mixed maturity: settled rows = final " +
           "closing CLV; open rows = live provisional CLV (re-priced every " +
           "cycle); superseded rows = provisional CLV frozen at the moment a " +
           "newer strategy version replaced them (never finalized). " +
@@ -1277,6 +1311,13 @@
           const marketLines = Object.keys(perMarket)
             .sort()
             .map((k) => "  " + k + ": " + perMarket[k]);
+          // change-only history: rows appended to odds_snapshots this
+          // cycle (price moves only). null = persistence off or failed.
+          const persisted =
+            info.snapshots_persisted === null ||
+            info.snapshots_persisted === undefined
+              ? null
+              : Number(info.snapshots_persisted);
           const tipBase =
             sport +
             " — last cycle " +
@@ -1287,7 +1328,13 @@
             (matches !== null ? " from " + matches + " listed matches" : "") +
             ", " +
             Number(info.picks || 0) +
-            " picks" +
+            " premium picks" +
+            (info.volume_picks
+              ? " (+" + Number(info.volume_picks) + " volume shadow)"
+              : "") +
+            (persisted !== null
+              ? ", " + persisted + " odds changes stored"
+              : ", odds history NOT stored (DB off or write failed)") +
             (marketLines.length
               ? "\nper market:\n" + marketLines.join("\n")
               : "");
@@ -1534,6 +1581,7 @@
       }
 
       $("f-status").addEventListener("change", render);
+      $("f-tier").addEventListener("change", render);
       $("f-search").addEventListener("input", render);
       $("refresh").addEventListener("click", load);
       load();

@@ -9,6 +9,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ingestion.base import EventTeams
@@ -24,7 +25,12 @@ from app.storage.repositories import (
 DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
 
 
-def make_pick(event_id: str = "evt-persist-test") -> PickOut:
+def make_pick(
+    event_id: str = "evt-persist-test",
+    tier: str = "premium",
+    decimal_odds: float = 2.10,
+    edge: float = 0.05,
+) -> PickOut:
     return PickOut(
         pick_id="p-1",
         sport="soccer",
@@ -34,10 +40,10 @@ def make_pick(event_id: str = "evt-persist-test") -> PickOut:
         market=Market.H2H,
         selection="Alpha FC",
         bookmaker="testbook",
-        decimal_odds=2.10,
+        decimal_odds=decimal_odds,
         model_probability=0.55,
         fair_probability=0.50,
-        edge=0.05,
+        edge=edge,
         ev=0.155,
         confidence=0.70,
         recommended_stake_fraction=0.02,
@@ -46,6 +52,7 @@ def make_pick(event_id: str = "evt-persist-test") -> PickOut:
         odds_age_seconds=30.0,
         liquidity=None,
         reason_summary="persistence test",
+        tier=tier,
         created_at=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
     )
 
@@ -73,7 +80,7 @@ async def test_persist_pick_inserts_then_dedupes(session) -> None:  # type: igno
     teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
 
     inserted = await persist_pick(session, make_pick(), teams, "dixon-coles", "test-1")
-    assert inserted is True
+    assert inserted == "inserted"
 
     count = await session.scalar(
         select(func.count()).select_from(Pick).where(Pick.bookmaker == "testbook")
@@ -82,7 +89,7 @@ async def test_persist_pick_inserts_then_dedupes(session) -> None:  # type: igno
 
     # Same natural key -> deduped (no second row)
     again = await persist_pick(session, make_pick(), teams, "dixon-coles", "test-1")
-    assert again is False
+    assert again == "duplicate"
     count2 = await session.scalar(
         select(func.count()).select_from(Pick).where(Pick.bookmaker == "testbook")
     )
@@ -120,6 +127,159 @@ async def test_version_bump_supersedes_older_open_pick(session) -> None:  # type
         .all()
     )
     assert rows == ["superseded", "alerted"]
+
+
+async def test_volume_pick_persists_with_tier_and_serializes_it(session) -> None:  # type: ignore[no-untyped-def]
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    outcome = await persist_pick(
+        session,
+        make_pick("evt-tier-vol", tier="volume", edge=0.02),
+        teams,
+        "value-sharp-vs-soft",
+        "tier-t1",
+    )
+    assert outcome == "inserted"
+    row = await session.scalar(select(Pick).where(Pick.bookmaker == "testbook"))
+    assert row is not None
+    assert row.tier == "volume"
+    assert row.status == "alerted"  # lifecycle is shared; tier scopes behavior
+
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["bookmaker"] == "testbook"]
+    assert ours and ours[0]["tier"] == "volume"  # API exposes the tier
+
+
+async def test_premium_key_is_shielded_from_volume_redetection(session) -> None:  # type: ignore[no-untyped-def]
+    # The unique key (event, market, selection, model) collides across tiers
+    # BY DESIGN; tier may only ratchet upward. A premium row must never be
+    # downgraded or touched by a later volume candidate.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    assert (
+        await persist_pick(
+            session, make_pick("evt-tier-shield"), teams, "value-sharp-vs-soft", "tier-t2"
+        )
+        == "inserted"
+    )
+    outcome = await persist_pick(
+        session,
+        make_pick("evt-tier-shield", tier="volume", decimal_odds=2.40, edge=0.02),
+        teams,
+        "value-sharp-vs-soft",
+        "tier-t2",
+    )
+    assert outcome == "duplicate"
+    row = await session.scalar(select(Pick).where(Pick.bookmaker == "testbook"))
+    assert row is not None
+    assert row.tier == "premium"  # untouched
+    assert row.decimal_odds == Decimal("2.1000")  # original market numbers kept
+
+
+async def test_volume_to_premium_upgrade_promotes_row_in_place(session) -> None:  # type: ignore[no-untyped-def]
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    assert (
+        await persist_pick(
+            session,
+            make_pick("evt-tier-upgrade", tier="volume", decimal_odds=2.10, edge=0.02),
+            teams,
+            "value-sharp-vs-soft",
+            "tier-t3",
+        )
+        == "inserted"
+    )
+    before = await session.scalar(select(Pick).where(Pick.bookmaker == "testbook"))
+    assert before is not None
+    created_before = before.created_at
+
+    outcome = await persist_pick(
+        session,
+        make_pick("evt-tier-upgrade", tier="premium", decimal_odds=2.30, edge=0.05),
+        teams,
+        "value-sharp-vs-soft",
+        "tier-t3",
+    )
+    assert outcome == "upgraded"
+    rows = (await session.execute(select(Pick).where(Pick.bookmaker == "testbook"))).scalars().all()
+    assert len(rows) == 1  # promoted IN PLACE — never a second row
+    row = rows[0]
+    assert row.tier == "premium"
+    assert row.status == "alerted"
+    assert row.decimal_odds == Decimal("2.3000")  # the alert quotes the row
+    assert row.edge == Decimal("0.050000")
+    # created_at advances to the upgrade moment (exposure-seeding invariant)
+    assert row.created_at > created_before
+    # stale revalidation verdicts (priced on the old odds) are reset
+    assert row.clv_log is None
+    assert row.current_odds is None
+    assert row.revalidated_at is None
+
+
+async def test_settled_volume_row_is_not_upgraded(session) -> None:  # type: ignore[no-untyped-def]
+    # Once the lifecycle moved past "alerted" the market moment is gone —
+    # a late premium detection on the same key is a plain duplicate.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session,
+        make_pick("evt-tier-settled", tier="volume", edge=0.02),
+        teams,
+        "value-sharp-vs-soft",
+        "tier-t4",
+    )
+    await session.execute(
+        sa_update(Pick).where(Pick.bookmaker == "testbook").values(status="settled")
+    )
+    outcome = await persist_pick(
+        session,
+        make_pick("evt-tier-settled", tier="premium", edge=0.05),
+        teams,
+        "value-sharp-vs-soft",
+        "tier-t4",
+    )
+    assert outcome == "duplicate"
+    row = await session.scalar(select(Pick).where(Pick.bookmaker == "testbook"))
+    assert row is not None
+    assert row.tier == "volume"
+    assert row.status == "settled"
+
+
+async def test_volume_insert_never_supersedes_open_premium(session) -> None:  # type: ignore[no-untyped-def]
+    # Cross-version supersede respects tier: a NEW volume row (new strategy
+    # version) must not flip an older OPEN premium row to 'superseded' —
+    # while a premium insert supersedes any older open row, volume included.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(session, make_pick("evt-tier-sup"), teams, "value-sharp-vs-soft", "v-old")
+    assert (
+        await persist_pick(
+            session,
+            make_pick("evt-tier-sup", tier="volume", edge=0.02),
+            teams,
+            "value-sharp-vs-soft",
+            "v-new",
+        )
+        == "inserted"
+    )
+    statuses = dict(
+        (
+            await session.execute(
+                select(Pick.tier, Pick.status).where(Pick.bookmaker == "testbook")
+            )
+        ).all()
+    )
+    assert statuses == {"premium": "alerted", "volume": "alerted"}  # premium survives
+
+    # ...and the reverse: a premium insert under yet another version
+    # supersedes BOTH older open rows (premium and volume).
+    assert (
+        await persist_pick(
+            session, make_pick("evt-tier-sup"), teams, "value-sharp-vs-soft", "v-newest"
+        )
+        == "inserted"
+    )
+    rows = (
+        await session.execute(
+            select(Pick.status).where(Pick.bookmaker == "testbook").order_by(Pick.id)
+        )
+    ).scalars()
+    assert sorted(rows) == ["alerted", "superseded", "superseded"]
 
 
 async def test_refresh_event_kickoffs_upgrades_placeholder(session) -> None:  # type: ignore[no-untyped-def]

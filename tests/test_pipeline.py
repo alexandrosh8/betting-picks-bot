@@ -139,7 +139,7 @@ def patch_persist_dedupe_after_first(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
         calls["n"] += 1
-        return calls["n"] == 1
+        return "inserted" if calls["n"] == 1 else "duplicate"
 
     monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
 
@@ -229,3 +229,56 @@ async def test_pipeline_no_model_predictions_no_picks() -> None:
     picks = await run_pick_pipeline(deps, "soccer_epl")
     assert picks == []
     assert sink.sent == []
+
+
+def _line_snap(detail: str, selection: str, odds: float) -> OddsSnapshotIn:
+    return OddsSnapshotIn(
+        event_id="evt-1",
+        bookmaker="bookie",
+        market=Market.TOTALS,
+        selection=selection,
+        decimal_odds=odds,
+        captured_at=NOW - timedelta(seconds=30),
+        ingested_at=NOW,
+        market_detail=detail,
+    )
+
+
+def test_fair_probabilities_devig_each_line_separately() -> None:
+    """Two totals lines at ONE book are TWO 2-leg markets, never one 4-leg
+    book — mixing lines corrupts devig (the value pipeline already groups by
+    market_detail; the model pipeline must apply the same rule)."""
+    from app.pipeline import _fair_probabilities
+
+    snapshots = [
+        _line_snap("over_under_2_5", "Over 2.5", 2.0),
+        _line_snap("over_under_2_5", "Under 2.5", 2.0),
+        _line_snap("over_under_3_5", "Over 3.5", 2.60),
+        _line_snap("over_under_3_5", "Under 3.5", 1.55),
+    ]
+    fair = _fair_probabilities(snapshots, DevigMethod.MULTIPLICATIVE)
+
+    # 2.0/2.0 devigs to exactly 0.5 within its OWN line; pooled with the
+    # 3.5-line legs it would come out ~0.246.
+    assert fair[("evt-1", "bookie", Market.TOTALS, "Over 2.5")] == pytest.approx(0.5)
+    assert fair[("evt-1", "bookie", Market.TOTALS, "Under 2.5")] == pytest.approx(0.5)
+    line_35 = [
+        fair[("evt-1", "bookie", Market.TOTALS, "Over 3.5")],
+        fair[("evt-1", "bookie", Market.TOTALS, "Under 3.5")],
+    ]
+    assert sum(line_35) == pytest.approx(1.0)
+
+
+def test_fair_probabilities_single_leg_line_is_skipped() -> None:
+    """A line with only one priced side cannot be devigged — per-line
+    grouping must not let another line's legs make it look complete."""
+    from app.pipeline import _fair_probabilities
+
+    snapshots = [
+        _line_snap("over_under_2_5", "Over 2.5", 2.0),
+        _line_snap("over_under_2_5", "Under 2.5", 2.0),
+        _line_snap("over_under_3_5", "Over 3.5", 2.60),  # Under 3.5 missing
+    ]
+    fair = _fair_probabilities(snapshots, DevigMethod.MULTIPLICATIVE)
+    assert ("evt-1", "bookie", Market.TOTALS, "Over 3.5") not in fair
+    assert fair[("evt-1", "bookie", Market.TOTALS, "Over 2.5")] == pytest.approx(0.5)

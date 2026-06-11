@@ -346,6 +346,7 @@
       odds ≥ 1.60 · times: Cyprus (Asia/Nicosia)
     </div>
 
+    <div class="banner" id="liveness-banner" style="display: none"></div>
     <div class="banner" id="upstream-banner" style="display: none"></div>
 
     <div class="cards">
@@ -538,7 +539,21 @@
           td(tr, m);
 
           td(tr, MARKETS[p.market] || p.market);
-          td(tr, p.selection, "sel");
+          const selCell = document.createElement("div");
+          const selName = document.createElement("span");
+          selName.className = "sel";
+          selName.textContent = p.selection;
+          const pickedAgo = document.createElement("small");
+          pickedAgo.style.display = "block";
+          pickedAgo.style.color = "var(--faint)";
+          const ageH = (Date.now() - new Date(p.created_at)) / 3.6e6;
+          pickedAgo.textContent =
+            "picked " +
+            (ageH < 1 ? Math.round(ageH * 60) + "m" : Math.round(ageH) + "h") +
+            " ago — verify price";
+          if (ageH > 6) pickedAgo.style.color = "var(--amber)";
+          selCell.append(selName, pickedAgo);
+          td(tr, selCell);
           td(tr, p.bookmaker);
           td(tr, Number(p.decimal_odds).toFixed(2), "odds");
           td(tr, pct(p.model_probability));
@@ -655,6 +670,31 @@
         }
       }
 
+      function summarizeLiveness(health) {
+        const el = $("liveness-banner");
+        const polls = health && health.polls ? health.polls : {};
+        const stamps = Object.values(polls)
+          .map((p) => new Date(p.finished_at).getTime())
+          .filter((t) => !isNaN(t));
+        const newest = stamps.length ? Math.max(...stamps) : null;
+        const ageMin = newest === null ? null : (Date.now() - newest) / 60000;
+        // A healthy engine completes a cycle well within 45 min even with
+        // many leagues; otherwise the picks below may be stale.
+        if (ageMin !== null && ageMin < 45) {
+          el.style.display = "none";
+          return;
+        }
+        el.style.display = "";
+        el.textContent =
+          ageMin === null
+            ? "⚠ no odds poll has completed since the app started — " +
+              "picks below may be stale (first multi-league cycle takes a while; " +
+              "if this persists, check that the app/scheduler is running)"
+            : "⚠ last odds poll finished " +
+              Math.round(ageMin) +
+              " min ago — picks below may be stale; check the app/scheduler";
+      }
+
       function summarizeUpstream(health) {
         const el = $("upstream-banner");
         const updates =
@@ -708,7 +748,9 @@
           PICKS = await res.json();
           summarize();
           summarizePerf(perfRes.ok ? await perfRes.json() : null);
-          summarizeUpstream(healthRes.ok ? await healthRes.json() : null);
+          const health = healthRes.ok ? await healthRes.json() : null;
+          summarizeUpstream(health);
+          summarizeLiveness(health);
           render();
           $("stamp").textContent =
             "updated " +

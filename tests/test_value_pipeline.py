@@ -87,6 +87,19 @@ def make_deps(sink: RecordingSink, loader: FakeLoader) -> PipelineDeps:
     )
 
 
+async def test_value_pipeline_records_poll_liveness() -> None:
+    # The dashboard/health must be able to tell "engine alive" from "engine
+    # dead showing day-old picks" — every cycle records itself.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    await run_value_pipeline(make_deps(sink, FakeLoader(market_snapshots())), "soccer")
+    poll = LAST_POLL["soccer"]
+    assert poll["finished_at"] is not None
+    assert poll["snapshots"] > 0
+    assert poll["picks"] == 1
+
+
 async def test_value_pipeline_produces_pick_and_alert() -> None:
     sink = RecordingSink()
     picks = await run_value_pipeline(make_deps(sink, FakeLoader(market_snapshots())), "soccer")

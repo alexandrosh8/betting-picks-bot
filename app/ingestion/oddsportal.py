@@ -12,7 +12,7 @@ profile keep working; install with `uv sync --extra backfill`.
 
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.ingestion.base import EventDirectory, EventTeams
@@ -94,8 +94,36 @@ def _validate_markets(markets: Sequence[str]) -> None:
             raise ValueError(f"cannot parse handicap line from: {m}")
 
 
+# Leagues OddsPortal carries but OddsHarvester 0.3.0's registry omits —
+# standard URL pattern, each verified live (HTTP 200) on 2026-06-11.
+# (turkey-super-lig and greece-super-league ARE upstream keys already.)
+_EXTRA_LEAGUES: dict[str, dict[str, str]] = {
+    "football": {
+        "netherlands-eredivisie": "https://www.oddsportal.com/football/netherlands/eredivisie",
+        "belgium-jupiler-pro-league": (
+            "https://www.oddsportal.com/football/belgium/jupiler-pro-league"
+        ),
+    }
+}
+
+
+def register_extra_leagues() -> None:
+    """Extend OddsHarvester's league registry in-place (idempotent).
+
+    setdefault means upstream wins the moment a release adds these keys.
+    """
+    from oddsharvester.utils.sport_league_constants import SPORTS_LEAGUES_URLS_MAPPING
+
+    for sport_name, extras in _EXTRA_LEAGUES.items():
+        for sport, leagues in SPORTS_LEAGUES_URLS_MAPPING.items():
+            if str(getattr(sport, "value", sport)) == sport_name:
+                for slug, url in extras.items():
+                    leagues.setdefault(slug, url)
+
+
 async def _default_scrape(**kwargs: Any) -> Any:
     """Call OddsHarvester's run_scraper as-is (lazy import)."""
+    register_extra_leagues()
     from oddsharvester.core.scraper_app import run_scraper
     from oddsharvester.utils.command_enum import CommandEnum
 
@@ -115,13 +143,17 @@ class OddsPortalLoader:
         max_pages: int = 1,
         date: str | None = None,
         markets_by_sport_key: dict[str, Sequence[str]] | None = None,
+        days_ahead: int | None = None,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
         overrides `markets` per sport key (football and basketball use
         different OddsHarvester market keys). `date` is an optional YYYYMMDD
-        filter; None (default) scrapes the general upcoming page, which is
-        what carries live pre-match odds."""
+        filter; None (default) scrapes the general upcoming page.
+        `days_ahead` switches to dated scrapes computed at FETCH time:
+        one pass per UTC date from today through today+days_ahead — cycles
+        then cover exactly the actionable games instead of a league's whole
+        future fixture list (far-future matches are skipped by design)."""
         self._markets_by_sport = {k: tuple(v) for k, v in (markets_by_sport_key or {}).items()}
         for market_list in (tuple(markets), *self._markets_by_sport.values()):
             _validate_markets(market_list)
@@ -132,6 +164,7 @@ class OddsPortalLoader:
         self._headless = headless
         self._max_pages = max_pages
         self._date = date
+        self._days_ahead = days_ahead
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
@@ -142,19 +175,44 @@ class OddsPortalLoader:
             return []
         sport, leagues = self._config[sport_key]
         now = datetime.now(tz=UTC)
-        result = await self._scrape(
-            sport=sport,
-            date=self._date,
-            leagues=leagues,
-            markets=list(self._markets_for(sport_key)),
-            headless=self._headless,
-            max_pages=self._max_pages,
-            # CRITICAL: oddsportal embeds timestamps shifted to the BROWSER's
-            # timezone; without this, kickoffs/capture times inherit the host
-            # offset (observed +3h on a Cyprus-time Mac) while labeled UTC.
-            browser_timezone_id="UTC",
-        )
-        matches = getattr(result, "success", None) or []
+        if self._days_ahead is not None:
+            # Dated pages (UTC, matching browser_timezone_id below): today
+            # through today+N — only the actionable slate, computed per fetch.
+            dates: list[str | None] = [
+                (now + timedelta(days=offset)).strftime("%Y%m%d")
+                for offset in range(self._days_ahead + 1)
+            ]
+        else:
+            dates = [self._date]
+
+        matches: list[dict[str, Any]] = []
+        seen_links: set[str] = set()
+        for scrape_date in dates:
+            result = await self._scrape(
+                sport=sport,
+                date=scrape_date,
+                leagues=leagues,
+                markets=list(self._markets_for(sport_key)),
+                headless=self._headless,
+                max_pages=self._max_pages,
+                # CRITICAL: oddsportal embeds timestamps shifted to the
+                # BROWSER's timezone; without this, kickoffs/capture times
+                # inherit the host offset (observed +3h on a Cyprus-time Mac)
+                # while labeled UTC. Also keeps dated pages aligned to the
+                # UTC dates computed above (upstream gotcha doc §10).
+                browser_timezone_id="UTC",
+            )
+            for match in getattr(result, "success", None) or []:
+                home = str(match.get("home_team") or "").strip()
+                away = str(match.get("away_team") or "").strip()
+                link = str(
+                    match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}"
+                )
+                if link in seen_links:
+                    continue  # same fixture listed on adjacent date pages
+                seen_links.add(link)
+                matches.append(match)
+
         snapshots: list[OddsSnapshotIn] = []
         for match in matches:
             snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))

@@ -110,12 +110,15 @@ def test_league_score_sources_maps_european_seasons() -> None:
 
 
 def test_league_score_sources_use_oddsharvester_registry_keys() -> None:
-    # Map keys must be REAL OddsHarvester league keys, or live config slugs
-    # never match and auto-settlement silently skips the league.
+    # Map keys must be REAL OddsHarvester league keys (incl. our registered
+    # extensions), or live config slugs never match and auto-settlement
+    # silently skips the league.
     from oddsharvester.utils.sport_league_constants import SPORTS_LEAGUES_URLS_MAPPING
 
+    from app.ingestion.oddsportal import register_extra_leagues
     from app.settlement.results import _SLUG_SOURCES
 
+    register_extra_leagues()  # production does this before any scrape
     football_keys = set()
     for sport, leagues in SPORTS_LEAGUES_URLS_MAPPING.items():
         if str(getattr(sport, "value", sport)) == "football":
@@ -123,8 +126,16 @@ def test_league_score_sources_use_oddsharvester_registry_keys() -> None:
     unknown = set(_SLUG_SOURCES) - football_keys
     assert not unknown, f"slug map keys missing from OddsHarvester registry: {unknown}"
     # the user's target leagues all resolve to a results source
-    targets = ["argentina-liga-profesional", "mexico-liga-mx", "brazil-serie-a"]
-    assert len(league_score_sources(targets)) == 3
+    targets = [
+        "argentina-liga-profesional",
+        "mexico-liga-mx",
+        "brazil-serie-a",
+        "netherlands-eredivisie",
+        "belgium-jupiler-pro-league",
+        "turkey-super-lig",
+        "greece-super-league",
+    ]
+    assert len(league_score_sources(targets)) == len(targets)
 
 
 NEW_LEAGUE_CSV = (

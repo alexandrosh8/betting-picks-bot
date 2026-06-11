@@ -73,6 +73,12 @@ _SLUG_SOURCES: dict[str, ScoreSource] = {
     "spain-laliga2": ScoreSource(kind="season", code="SP2"),
     "france-ligue-1": ScoreSource(kind="season", code="F1"),
     "liga-portugal": ScoreSource(kind="season", code="P1"),
+    # Registered by app/ingestion/oddsportal.py::register_extra_leagues
+    # (OddsPortal carries them; OddsHarvester 0.3.0's registry omits them).
+    "netherlands-eredivisie": ScoreSource(kind="season", code="N1"),
+    "belgium-jupiler-pro-league": ScoreSource(kind="season", code="B1"),
+    "turkey-super-lig": ScoreSource(kind="season", code="T1"),
+    "greece-super-league": ScoreSource(kind="season", code="G1"),
 }
 
 

@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.backtesting import clv as _clv  # noqa: F401  (settlement uses this module)
 from app.edge.gates import GatePolicy, PickCandidate, evaluate
@@ -32,6 +32,19 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Liveness registry, surfaced by GET /health and the dashboard banner: the
+# difference between "engine alive, no new value found" and "engine dead,
+# showing day-old picks" must be visible. In-memory; repopulated each cycle.
+LAST_POLL: dict[str, dict[str, Any]] = {}
+
+
+def _record_poll(sport_key: str, snapshots: int, picks: int) -> None:
+    LAST_POLL[sport_key] = {
+        "finished_at": datetime.now(tz=UTC).isoformat(),
+        "snapshots": snapshots,
+        "picks": picks,
+    }
 
 
 @dataclass
@@ -63,6 +76,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     now = datetime.now(tz=UTC)
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
+        _record_poll(sport_key, 0, 0)
         return []
 
     fair = _fair_probabilities(snapshots, deps.devig_method)
@@ -142,6 +156,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
+    _record_poll(sport_key, len(snapshots), len(picks))
     return picks
 
 
@@ -200,6 +215,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     now = datetime.now(tz=UTC)
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
+        _record_poll(sport_key, 0, 0)
         return []
 
     grouped = group_market_prices(snapshots)
@@ -286,6 +302,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     logger.info("value pipeline cycle for %s: %d picks", sport_key, len(picks))
+    _record_poll(sport_key, len(snapshots), len(picks))
     return picks
 
 

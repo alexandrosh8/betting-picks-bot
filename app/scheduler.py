@@ -125,7 +125,8 @@ def build_scheduler(
             directory=directory,
             leagues_by_sport_key=config,
             markets_by_sport_key=markets_by,
-            # date=None -> general upcoming page (carries live pre-match odds)
+            # dated scrapes (today..today+N UTC) — the actionable slate only
+            days_ahead=settings.oddsportal_days_ahead,
         )
         league_label = settings.oddsportal_football_leagues
 

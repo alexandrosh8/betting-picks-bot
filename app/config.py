@@ -90,6 +90,10 @@ class Settings(BaseSettings):
         "home_away,over_under_games_215_5,over_under_games_220_5,over_under_games_225_5"
     )
     oddsportal_basketball_leagues: str = "nba,euroleague"
+    # Dated scraping: each cycle covers today..today+N (UTC) instead of a
+    # league's whole upcoming list — far-future fixtures are skipped and
+    # cycle time tracks the actionable slate. Unset = legacy upcoming page.
+    oddsportal_days_ahead: int | None = 1
     footballdata_league_codes: str = "E0"  # csv, European mmz4281 divisions
     footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
     # Optional: train on a "new leagues" country code (e.g. BRA) instead of the

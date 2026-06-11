@@ -225,3 +225,50 @@ async def test_basketball_home_away_parses_as_two_way_h2h() -> None:
     teams = directory.lookup(str(match["match_link"]))
     assert teams is not None
     assert teams.starts_at is not None  # kickoff parsed from match_date
+
+
+async def test_days_ahead_scrapes_dated_pages_and_dedupes() -> None:
+    # days_ahead=1 -> one scrape per date (today, tomorrow, UTC) so cycles
+    # cover exactly the actionable games; the same match appearing on both
+    # date pages must not double its snapshots.
+    from datetime import UTC, datetime, timedelta
+
+    dates_called: list[Any] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        dates_called.append(kwargs.get("date"))
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    directory = EventDirectory()
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["testland"])},
+        scrape_fn=fake_scrape,
+        days_ahead=1,
+    )
+    snapshots = await loader.fetch_odds("soccer")
+
+    now = datetime.now(tz=UTC)
+    assert dates_called == [
+        now.strftime("%Y%m%d"),
+        (now + timedelta(days=1)).strftime("%Y%m%d"),
+    ]
+    single = make_loader(EventDirectory(), [MATCH])
+    baseline = await single.fetch_odds("soccer")
+    assert len(snapshots) == len(baseline)  # deduped by match_link
+
+
+async def test_days_ahead_none_keeps_general_upcoming_page() -> None:
+    dates_called: list[Any] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        dates_called.append(kwargs.get("date"))
+        return SimpleNamespace(success=[], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland"])},
+        scrape_fn=fake_scrape,
+    )
+    await loader.fetch_odds("soccer")
+    assert dates_called == [None]

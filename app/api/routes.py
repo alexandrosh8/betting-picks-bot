@@ -39,8 +39,14 @@ async def dashboard() -> str:
 @router.get("/health")
 async def health() -> dict[str, Any]:
     from app.maintenance.upstream_watch import LAST_CHECK
+    from app.pipeline import LAST_POLL
 
-    return {"status": "ok", "mode": "picks-only", "upstream": LAST_CHECK}
+    return {
+        "status": "ok",
+        "mode": "picks-only",
+        "upstream": LAST_CHECK,
+        "polls": LAST_POLL,
+    }
 
 
 @router.get("/picks")

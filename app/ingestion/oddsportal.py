@@ -121,9 +121,193 @@ def register_extra_leagues() -> None:
                     leagues.setdefault(slug, url)
 
 
+# ---------------------------------------------------------------------------
+# oddsharvester 0.3.0 quirk patches — applied in place at runtime (same
+# pattern as register_extra_leagues; a fork would have to track upstream for
+# two ~20-line methods). Root causes from live poll logs, 2026-06-11:
+#
+# 1. OddsPortal keeps the OneTrust consent dialog in the DOM (hidden) after
+#    dismissal. The generic tab selectors (li[class*='tab'], nav li) match
+#    its ot-* nodes, so wait_for_selector burns its full timeout waiting for
+#    hidden elements; worse, the 'More'-button substring search ("more" in
+#    text) clicked the consent dialog — its blurb contains "more relevant".
+# 2. NavigationManager.wait_for_market_switch checks only the FIRST element
+#    matching stale `.active` selectors, so verification never passes on the
+#    current DOM: one warning per market per match page plus 3 x 3s of dead
+#    waiting — minutes of wasted wall-clock per cycle.
+# 3. Exchange rows (back/lay layout) are structurally short of the parser's
+#    fixed column count; skipping them is by design, not a WARNING-worthy
+#    defect — the multi-book consensus proceeds without the exchange price.
+
+_MORE_BUTTON_TEXT_MAX_LEN = 20
+
+
+def _is_real_more_button(text: str | None) -> bool:
+    """True only for a short, literal 'More'-style tab label — never the
+    OneTrust consent blurb, whose text also contains the substring 'more'."""
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or len(stripped) > _MORE_BUTTON_TEXT_MAX_LEN:
+        return False
+    return "more" in stripped.lower() or "..." in stripped
+
+
+def _patched_tab_selectors(selectors: list[str]) -> list[str]:
+    """Exclude OneTrust (ot-*) nodes from the generic tab selectors."""
+    exclusion = ":not([class*='ot-'])"
+    return [sel + exclusion if sel in ("li[class*='tab']", "nav li") else sel for sel in selectors]
+
+
+async def _patched_wait_for_market_switch(
+    self: Any, page: Any, market_name: str, max_attempts: int = 3
+) -> bool:
+    """Drop-in for NavigationManager.wait_for_market_switch: scan ALL
+    active-tab candidates, then fall back to a page-content check — the same
+    confirmation MarketTabNavigator._verify_tab_is_active already accepts."""
+    from oddsharvester.utils.constants import MARKET_SWITCH_WAIT_TIME_MS
+
+    self.logger.info("Waiting for market switch to complete for: %s", market_name)
+    needle = market_name.lower()
+    for attempt in range(max_attempts):
+        try:
+            await page.wait_for_timeout(MARKET_SWITCH_WAIT_TIME_MS)
+            for element in await page.query_selector_all("li.active, li[class*='active'], .active"):
+                text = await element.text_content()
+                if text and needle in text.lower():
+                    self.logger.info("Market switch confirmed: %s is active", market_name)
+                    return True
+            if needle in (await page.content()).lower():
+                self.logger.info("Market switch confirmed via page content: %s", market_name)
+                return True
+        except Exception as exc:
+            self.logger.debug(
+                "market switch verification attempt %d failed: %s",
+                attempt + 1,
+                type(exc).__name__,
+            )
+    self.logger.warning("Market switch verification failed after %d attempts", max_attempts)
+    return False
+
+
+async def _patched_wait_and_click(
+    self: Any,
+    page: Any,
+    selector: str,
+    text: str | None = None,
+    timeout: float | None = None,
+) -> bool:
+    """Drop-in for MarketTabNavigator._wait_and_click: a selector missing its
+    window is the EXPECTED path mid fallback-chain — log at debug and let
+    navigate_to_tab report the real failure once the chain is exhausted."""
+    if timeout is None:
+        from oddsharvester.utils.constants import DEFAULT_MARKET_TIMEOUT_MS
+
+        timeout = DEFAULT_MARKET_TIMEOUT_MS
+    try:
+        await page.wait_for_selector(selector=selector, timeout=timeout)
+        if text:
+            return bool(await self._click_by_text(page=page, selector=selector, text=text))
+        element = await page.query_selector(selector)
+        if element is None:
+            return False
+        await element.click()
+        return True
+    except Exception as exc:
+        self.logger.debug("selector %r not clickable in time: %s", selector, type(exc).__name__)
+        return False
+
+
+async def _patched_click_more_if_market_hidden(
+    self: Any, page: Any, market_tab_name: str, timeout: int | None = None
+) -> bool:
+    """Drop-in for MarketTabNavigator._click_more_if_market_hidden: only
+    VISIBLE elements whose text is a short literal 'More' qualify, and only
+    visible dropdown entries are clicked."""
+    del timeout  # signature compatibility; candidates are queried directly
+    from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
+    from oddsharvester.utils.constants import DROPDOWN_WAIT_MS
+
+    try:
+        more_clicked = False
+        for selector in OddsPortalSelectors.MORE_BUTTON_SELECTORS:
+            for element in await page.query_selector_all(selector):
+                try:
+                    if not await element.is_visible():
+                        continue
+                    if not _is_real_more_button(await element.text_content()):
+                        continue
+                    await element.click()
+                    more_clicked = True
+                    break
+                except Exception as exc:  # candidate vanished mid-iteration
+                    self.logger.debug(
+                        "'More' candidate from %r failed: %s", selector, type(exc).__name__
+                    )
+            if more_clicked:
+                break
+        if not more_clicked:
+            self.logger.info("No visible 'More' tab button found")
+            return False
+
+        await page.wait_for_timeout(DROPDOWN_WAIT_MS)
+        needle = market_tab_name.lower()
+        for selector in OddsPortalSelectors.get_dropdown_selectors_for_market(market_tab_name):
+            for element in await page.query_selector_all(selector):
+                try:
+                    if not await element.is_visible():
+                        continue
+                    text = await element.text_content()
+                    if text and needle in text.lower():
+                        self.logger.info("Found '%s' in dropdown. Clicking...", market_tab_name)
+                        await element.click()
+                        return True
+                except Exception as exc:
+                    self.logger.debug(
+                        "dropdown candidate from %r failed: %s", selector, type(exc).__name__
+                    )
+        return False
+    except Exception as exc:
+        self.logger.debug("'More' dropdown navigation failed: %s", type(exc).__name__)
+        return False
+
+
+class _ExchangeIncompleteOddsFilter(logging.Filter):
+    """Drop the parser's incomplete-odds warning for exchange books only;
+    other bookmakers' incomplete rows stay visible."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not ("Incomplete odds data for bookmaker" in msg and "exchange" in msg.lower())
+
+
+_EXCHANGE_NOISE_FILTER = _ExchangeIncompleteOddsFilter()
+_upstream_patched = False
+
+
+def _patch_upstream_quirks() -> None:
+    """Apply the quirk fixes in place (idempotent; lazy oddsharvester import)."""
+    global _upstream_patched
+    if _upstream_patched:
+        return
+    from oddsharvester.core.browser.market_navigation import MarketTabNavigator
+    from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
+    from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
+
+    OddsPortalSelectors.MARKET_TAB_SELECTORS = _patched_tab_selectors(
+        OddsPortalSelectors.MARKET_TAB_SELECTORS
+    )
+    NavigationManager.wait_for_market_switch = _patched_wait_for_market_switch
+    MarketTabNavigator._wait_and_click = _patched_wait_and_click
+    MarketTabNavigator._click_more_if_market_hidden = _patched_click_more_if_market_hidden
+    logging.getLogger("OddsParser").addFilter(_EXCHANGE_NOISE_FILTER)
+    _upstream_patched = True
+
+
 async def _default_scrape(**kwargs: Any) -> Any:
     """Call OddsHarvester's run_scraper as-is (lazy import)."""
     register_extra_leagues()
+    _patch_upstream_quirks()
     from oddsharvester.core.scraper_app import run_scraper
     from oddsharvester.utils.command_enum import CommandEnum
 

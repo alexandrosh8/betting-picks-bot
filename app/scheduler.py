@@ -53,6 +53,23 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SECONDS = 300  # fallback; settings.poll_interval_seconds wins
 
 
+class _PollSkipNoiseFilter(logging.Filter):
+    """Drop apscheduler's max-instances skip warning for poll_odds ONLY.
+
+    The short interval + max_instances=1 + coalesce is the documented
+    continuous-polling design (see the poll_odds registration): while a
+    20-40 min scrape cycle runs, every interval slot is skipped by design.
+    Skips of any other job remain visible.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not ("poll_odds" in msg and "maximum number of running instances reached" in msg)
+
+
+_POLL_SKIP_FILTER = _PollSkipNoiseFilter()
+
+
 def _dispatcher(
     settings: Settings, http_client: httpx.AsyncClient, redis: Redis
 ) -> AlertDispatcher:
@@ -213,6 +230,10 @@ def build_scheduler(
             # (coalesced to one run) instead of skipping to the next slot.
             misfire_grace_time=None,
         )
+        # A cycle outlasting the interval is the design (continuous polling),
+        # so the per-slot skip warnings are noise; addFilter is idempotent
+        # for the same instance.
+        logging.getLogger("apscheduler.scheduler").addFilter(_POLL_SKIP_FILTER)
 
         # CLV true-up + current-odds revalidation now run INSIDE every poll
         # cycle on the cycle's own snapshots (app/pipeline.py) — a separate

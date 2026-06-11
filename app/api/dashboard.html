@@ -490,7 +490,9 @@
 
       // An open pick is "verified" when its odds were re-checked recently;
       // stale alerts are REMOVED from the default view (filter shows them).
-      const VERIFIED_WITHIN_MS = 15 * 60 * 1000;
+      // Window must cover a FULL poll cycle (leagues=all scrapes run 19-38
+      // min), else picks flicker out of the default view between cycles.
+      const VERIFIED_WITHIN_MS = 45 * 60 * 1000;
       function isVerified(p) {
         if (p.status !== "alerted") return true; // settled rows keep history
         if (!p.revalidated_at) return false;
@@ -521,7 +523,7 @@
           td(
             tr,
             $("f-status").value === "alerted"
-              ? "No VERIFIED open picks right now. Picks appear here once the current poll cycle re-checks their odds (a few minutes); older unverified ones are under OPEN (INCL. UNVERIFIED)."
+              ? "No VERIFIED open picks right now. Picks appear here once the current poll cycle re-checks their odds (one full cycle, up to ~20 min); older unverified ones are under OPEN (INCL. UNVERIFIED)."
               : "No picks match. New picks appear when a book beats the sharp fair price — check back after the next poll cycle.",
             "empty",
           ).colSpan = 12;

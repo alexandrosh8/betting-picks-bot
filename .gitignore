@@ -38,3 +38,4 @@ logs/
 
 # Claude Code local-only settings (machine-specific)
 .claude/settings.local.json
+.playwright-mcp/

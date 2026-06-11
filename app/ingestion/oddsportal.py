@@ -157,6 +157,16 @@ class OddsPortalLoader:
         self._markets_by_sport = {k: tuple(v) for k, v in (markets_by_sport_key or {}).items()}
         for market_list in (tuple(markets), *self._markets_by_sport.values()):
             _validate_markets(market_list)
+        # leagues=["all"] -> league-less scrape of oddsportal's dated daily
+        # page (every league that day). That URL needs a date, so "all"
+        # requires dated scraping. Cycle time scales with the day's full
+        # fixture list x markets — busy weekends take a while.
+        if days_ahead is None and date is None:
+            for _sport, league_list in leagues_by_sport_key.values():
+                if league_list == ["all"]:
+                    raise ValueError(
+                        "leagues=['all'] needs dated scraping — set days_ahead (or date)"
+                    )
         self._directory = directory
         self._config = dict(leagues_by_sport_key)
         self._markets = tuple(markets)
@@ -174,6 +184,9 @@ class OddsPortalLoader:
             logger.warning("no oddsportal league config for sport key %s", sport_key)
             return []
         sport, leagues = self._config[sport_key]
+        # ["all"] -> league-less scrape: the dated daily page already lists
+        # every league's games for that day.
+        scrape_leagues: list[str] | None = None if leagues == ["all"] else leagues
         now = datetime.now(tz=UTC)
         if self._days_ahead is not None:
             # Dated pages (UTC, matching browser_timezone_id below): today
@@ -191,7 +204,7 @@ class OddsPortalLoader:
             result = await self._scrape(
                 sport=sport,
                 date=scrape_date,
-                leagues=leagues,
+                leagues=scrape_leagues,
                 markets=list(self._markets_for(sport_key)),
                 headless=self._headless,
                 max_pages=self._max_pages,

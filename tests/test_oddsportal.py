@@ -272,3 +272,35 @@ async def test_days_ahead_none_keeps_general_upcoming_page() -> None:
     )
     await loader.fetch_odds("soccer")
     assert dates_called == [None]
+
+
+async def test_all_leagues_sentinel_scrapes_daily_page_without_league_filter() -> None:
+    # leagues=["all"] -> league-less dated scrape: oddsportal's daily
+    # matches page covers EVERY league that day (user: no league filter).
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["all"])},
+        scrape_fn=fake_scrape,
+        days_ahead=1,
+    )
+    snapshots = await loader.fetch_odds("soccer")
+    assert len(calls) == 2  # today + tomorrow
+    assert all(c["leagues"] is None for c in calls)
+    assert all(c["date"] is not None for c in calls)
+    assert snapshots  # MATCH converted normally
+
+
+def test_all_leagues_requires_dated_scraping() -> None:
+    # The league-less daily URL needs a date; without days_ahead/date the
+    # config is a footgun and must fail at construction.
+    with pytest.raises(ValueError):
+        OddsPortalLoader(
+            directory=EventDirectory(),
+            leagues_by_sport_key={"soccer": ("football", ["all"])},
+        )

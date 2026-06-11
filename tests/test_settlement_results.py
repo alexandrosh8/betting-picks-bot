@@ -187,3 +187,13 @@ async def test_load_scores_survives_a_failing_source() -> None:
             on_or_after=date(2026, 6, 1),
         )
     assert {s.home_team for s in scores} == {"Flamengo", "Santos"}
+
+
+def test_league_score_sources_all_expands_to_every_source() -> None:
+    # leagues="all" (league-less daily scraping) -> settlement must load
+    # every free results source it knows, not zero.
+    from app.settlement.results import _SLUG_SOURCES
+
+    sources = league_score_sources(["all"])
+    assert INTERNATIONAL in sources
+    assert len(sources) == len({s for s in _SLUG_SOURCES.values()})

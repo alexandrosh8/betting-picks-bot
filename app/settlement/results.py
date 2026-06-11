@@ -160,9 +160,18 @@ def scores_from_international(matches: Iterable[InternationalMatch]) -> list[Fin
 
 
 def league_score_sources(slugs: Iterable[str]) -> list[ScoreSource]:
-    """Map configured OddsPortal slugs to results sources (deduped, ordered)."""
+    """Map configured OddsPortal slugs to results sources (deduped, ordered).
+
+    The "all" sentinel (league-less daily scraping) expands to every known
+    source — leagues without one still settle manually via the dashboard.
+    """
     sources: list[ScoreSource] = []
     for slug in slugs:
+        if slug == "all":
+            for known in _SLUG_SOURCES.values():
+                if known not in sources:
+                    sources.append(known)
+            continue
         source = _SLUG_SOURCES.get(slug)
         if source is None:
             logger.info("league %r has no free results source; manual settlement only", slug)

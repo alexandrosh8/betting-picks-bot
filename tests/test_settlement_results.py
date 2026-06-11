@@ -109,6 +109,24 @@ def test_league_score_sources_maps_european_seasons() -> None:
     assert sources == [ScoreSource(kind="season", code="E0")]
 
 
+def test_league_score_sources_use_oddsharvester_registry_keys() -> None:
+    # Map keys must be REAL OddsHarvester league keys, or live config slugs
+    # never match and auto-settlement silently skips the league.
+    from oddsharvester.utils.sport_league_constants import SPORTS_LEAGUES_URLS_MAPPING
+
+    from app.settlement.results import _SLUG_SOURCES
+
+    football_keys = set()
+    for sport, leagues in SPORTS_LEAGUES_URLS_MAPPING.items():
+        if str(getattr(sport, "value", sport)) == "football":
+            football_keys = set(leagues)
+    unknown = set(_SLUG_SOURCES) - football_keys
+    assert not unknown, f"slug map keys missing from OddsHarvester registry: {unknown}"
+    # the user's target leagues all resolve to a results source
+    targets = ["argentina-liga-profesional", "mexico-liga-mx", "brazil-serie-a"]
+    assert len(league_score_sources(targets)) == 3
+
+
 NEW_LEAGUE_CSV = (
     "Country,League,Date,Home,Away,HG,AG,Res,PSCH,PSCD,PSCA\n"
     "Brazil,Serie A,08/06/2026,Flamengo,Palmeiras,2,0,H,1.95,3.4,4.1\n"

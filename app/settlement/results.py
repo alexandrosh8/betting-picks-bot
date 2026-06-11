@@ -51,28 +51,28 @@ class ScoreSource:
 
 INTERNATIONAL = ScoreSource(kind="international")
 
-# OddsPortal league slug -> results source. Slugs absent here (e.g. nba,
-# euroleague) have no free results feed — those picks settle manually via
-# the dashboard/API.
+# OddsPortal league slug -> results source. KEYS MUST BE OddsHarvester
+# league keys (oddsharvester.utils.sport_league_constants, verified against
+# 0.3.0 on 2026-06-11) — the config slugs and this map share that registry.
+# Slugs absent here (e.g. nba, euroleague, champions-league) have no free
+# results feed — those picks settle manually via the dashboard/API.
 _SLUG_SOURCES: dict[str, ScoreSource] = {
     "world-cup": INTERNATIONAL,
     "brazil-serie-a": ScoreSource(kind="new_league", code="BRA"),
-    "argentina-primera-division": ScoreSource(kind="new_league", code="ARG"),
-    "usa-mls": ScoreSource(kind="new_league", code="USA"),
+    "argentina-liga-profesional": ScoreSource(kind="new_league", code="ARG"),
     "mexico-liga-mx": ScoreSource(kind="new_league", code="MEX"),
-    "japan-j-league": ScoreSource(kind="new_league", code="JPN"),
     "england-premier-league": ScoreSource(kind="season", code="E0"),
     "england-championship": ScoreSource(kind="season", code="E1"),
     "scotland-premiership": ScoreSource(kind="season", code="SC0"),
+    "scotland-championship": ScoreSource(kind="season", code="SC1"),
     "germany-bundesliga": ScoreSource(kind="season", code="D1"),
+    "germany-bundesliga-2": ScoreSource(kind="season", code="D2"),
     "italy-serie-a": ScoreSource(kind="season", code="I1"),
+    "italy-serie-b": ScoreSource(kind="season", code="I2"),
     "spain-laliga": ScoreSource(kind="season", code="SP1"),
+    "spain-laliga2": ScoreSource(kind="season", code="SP2"),
     "france-ligue-1": ScoreSource(kind="season", code="F1"),
-    "netherlands-eredivisie": ScoreSource(kind="season", code="N1"),
-    "belgium-jupiler-pro-league": ScoreSource(kind="season", code="B1"),
-    "portugal-liga-portugal": ScoreSource(kind="season", code="P1"),
-    "turkey-super-lig": ScoreSource(kind="season", code="T1"),
-    "greece-super-league": ScoreSource(kind="season", code="G1"),
+    "liga-portugal": ScoreSource(kind="season", code="P1"),
 }
 
 

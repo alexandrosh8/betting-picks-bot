@@ -1,5 +1,24 @@
 # Decisions Log
 
+- 2026-06-11 — **League coverage + only-ML diagnosis**. "Only world-cup
+  picks" root causes: config had 2 football leagues; Euro big-5 OFF-SEASON
+  until mid-Aug, euroleague until Oct, Brazil/Argentina/Mexico pause during
+  WC2026, NBA=Finals only — seasonality, not bugs. .env now carries 9
+  football slugs (registry-verified; Argentina is argentina-liga-profesional;
+  OddsHarvester has NO MLS/Netherlands/Belgium/Turkey/Greece/EuroBasket).
+  Settlement \_SLUG_SOURCES corrected to real registry keys + regression test
+  pinning every key to the installed registry. "Only ML picks": OddsPortal
+  market-tab scraping is DOM-flaky upstream (selector timeouts; secondary
+  markets intermittently empty while 1x2 succeeds) — loader now logs
+  per-market snapshot counts + missing markets each cycle. MAX_ODDS_AGE
+  300→1800s (multi-league cycle takes 10-20 min; picks evaluated after the
+  full fetch — 300s discarded early-scraped matches). **NBA repos** (docs/
+  research/nba-repo-evaluations.md): kyleskom = reference-only (NO license,
+  same-day leakage, closing OU as feature, accuracy-only); NBA-Betting/
+  NBA_Betting = mine-for-parts (MIT, archived) — point-in-time nba_api
+  snapshot fetcher + merge_asof(+1day) join + model-cutoff rule for phase 5;
+  successor NBA-Betting/NBA_AI not yet inspected.
+
 - 2026-06-10 (evening) — **Upstream check + backtest re-verify + quarter-AH
   bridge**. Upstream: penaltyblog 1.11.0 and oddsharvester 0.3.0 are BOTH the
   latest releases (verified PyPI+GitHub 2026-06-10) — no upgrade exists;

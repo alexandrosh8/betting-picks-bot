@@ -158,8 +158,22 @@ class OddsPortalLoader:
         snapshots: list[OddsSnapshotIn] = []
         for match in matches:
             snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))
+        # Per-market counts make scrape gaps visible: OddsPortal market-tab
+        # navigation is DOM-fragile upstream, so secondary markets (btts/dnb/
+        # AH/EH) intermittently come back empty while 1x2 succeeds — that is
+        # why picks can skew to h2h. Gaps are expected; never bypass anti-bot.
+        per_market: dict[str, int] = {}
+        for snap in snapshots:
+            key = snap.market_detail or str(snap.market)
+            per_market[key] = per_market.get(key, 0) + 1
+        missing = [m for m in self._markets_for(sport_key) if m not in per_market]
         logger.info(
-            "oddsportal %s: %d matches -> %d snapshots", sport_key, len(matches), len(snapshots)
+            "oddsportal %s: %d matches -> %d snapshots %s%s",
+            sport_key,
+            len(matches),
+            len(snapshots),
+            per_market,
+            f" | markets with NO odds: {missing}" if missing and matches else "",
         )
         return snapshots
 

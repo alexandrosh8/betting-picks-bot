@@ -79,6 +79,27 @@ async def test_match_converts_to_snapshots_and_registers_teams() -> None:
     assert teams.away == "Beta United"
 
 
+async def test_pacing_knobs_reach_scraper() -> None:
+    # Upstream-sanctioned pacing config (concurrency/request_delay) must be
+    # forwarded to OddsHarvester — silent defaults made cycle time untunable.
+    async def fake_scrape(**kwargs: Any) -> Any:
+        fake_scrape.calls.append(kwargs)  # type: ignore[attr-defined]
+        return SimpleNamespace(success=[], failed=[], partial=[])
+
+    fake_scrape.calls = []  # type: ignore[attr-defined]
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=fake_scrape,
+        concurrency_tasks=5,
+        request_delay=0.8,
+    )
+    await loader.fetch_odds("soccer")
+    (call,) = fake_scrape.calls  # type: ignore[attr-defined]
+    assert call["concurrency_tasks"] == 5
+    assert call["request_delay"] == 0.8
+
+
 async def test_unknown_sport_key_returns_empty() -> None:
     loader = make_loader(EventDirectory(), [MATCH])
     assert await loader.fetch_odds("basketball_nba") == []

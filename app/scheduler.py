@@ -127,6 +127,8 @@ def build_scheduler(
             markets_by_sport_key=markets_by,
             # dated scrapes (today..today+N UTC) — the actionable slate only
             days_ahead=settings.oddsportal_days_ahead,
+            concurrency_tasks=settings.oddsportal_concurrency,
+            request_delay=settings.oddsportal_request_delay,
         )
         league_label = settings.oddsportal_football_leagues
 

@@ -144,6 +144,8 @@ class OddsPortalLoader:
         date: str | None = None,
         markets_by_sport_key: dict[str, Sequence[str]] | None = None,
         days_ahead: int | None = None,
+        concurrency_tasks: int = 3,
+        request_delay: float = 1.0,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -175,6 +177,10 @@ class OddsPortalLoader:
         self._max_pages = max_pages
         self._date = date
         self._days_ahead = days_ahead
+        # Upstream-sanctioned pacing knobs (README: "adjust responsibly").
+        # These tune OddsHarvester's OWN scheduler — never anti-bot bypass.
+        self._concurrency_tasks = concurrency_tasks
+        self._request_delay = request_delay
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
@@ -214,6 +220,8 @@ class OddsPortalLoader:
                 # while labeled UTC. Also keeps dated pages aligned to the
                 # UTC dates computed above (upstream gotcha doc §10).
                 browser_timezone_id="UTC",
+                concurrency_tasks=self._concurrency_tasks,
+                request_delay=self._request_delay,
             )
             for match in getattr(result, "success", None) or []:
                 home = str(match.get("home_team") or "").strip()
@@ -273,6 +281,8 @@ class OddsPortalLoader:
             markets=list(self._markets_for(sport_key)),
             headless=self._headless,
             browser_timezone_id="UTC",  # see fetch_odds — host tz leaks otherwise
+            concurrency_tasks=self._concurrency_tasks,
+            request_delay=self._request_delay,
         )
         snapshots: list[OddsSnapshotIn] = []
         for match in getattr(result, "success", None) or []:

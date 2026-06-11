@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     # league's whole upcoming list — far-future fixtures are skipped and
     # cycle time tracks the actionable slate. Unset = legacy upcoming page.
     oddsportal_days_ahead: int | None = 1
+    # OddsHarvester's own pacing knobs (README: "adjust responsibly").
+    # Concurrency = parallel match pages; request_delay = seconds between
+    # requests (+ jitter upstream). Tuning these is sanctioned configuration
+    # — anti-bot bypassing remains forbidden everywhere.
+    oddsportal_concurrency: int = 3
+    oddsportal_request_delay: float = 1.0
     # Seconds between poll cycles. With max_instances=1 + coalesce, a value
     # below the cycle duration just runs cycles back-to-back — effective
     # freshness is one cycle length; the scrape itself is the floor.

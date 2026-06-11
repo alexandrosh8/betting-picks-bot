@@ -66,3 +66,31 @@ def test_release_negative_raises() -> None:
     ledger = DailyExposureLedger(max_daily_fraction=0.05)
     with pytest.raises(ValueError):
         ledger.release(DAY, -0.01)
+
+
+def test_preload_sets_used_and_caps_further_reservations() -> None:
+    # Restart regression: today's persisted exposure must count against the
+    # cap from the first cycle after a restart, not restart at zero.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05)
+    ledger.preload(DAY, 0.03)
+    assert ledger.used(DAY) == pytest.approx(0.03)
+    assert ledger.remaining(DAY) == pytest.approx(0.02)
+    assert ledger.reserve(DAY, 0.04) == pytest.approx(0.02)  # clipped at cap
+
+
+def test_preload_overwrites_rather_than_accumulates() -> None:
+    # SETS the day's used amount: a re-seed must be idempotent.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05)
+    ledger.preload(DAY, 0.03)
+    ledger.preload(DAY, 0.03)
+    assert ledger.used(DAY) == pytest.approx(0.03)
+    ledger.preload(DAY, 0.01)
+    assert ledger.used(DAY) == pytest.approx(0.01)
+
+
+def test_preload_other_days_untouched_and_negative_raises() -> None:
+    ledger = DailyExposureLedger(max_daily_fraction=0.05)
+    ledger.preload(DAY, 0.02)
+    assert ledger.used(OTHER_DAY) == pytest.approx(0.0)
+    with pytest.raises(ValueError):
+        ledger.preload(DAY, -0.01)

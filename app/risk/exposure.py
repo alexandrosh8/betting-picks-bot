@@ -28,6 +28,18 @@ class DailyExposureLedger:
             self._used[day] = self.used(day) + granted
         return granted
 
+    def preload(self, day: date, fraction: float) -> None:
+        """SET the day's used exposure (idempotent; overwrites, never adds).
+
+        Called at the composition root on startup with the sum of stake
+        fractions already recommended today (persisted picks) — the ledger
+        is in-memory, so without this a mid-day restart would forget the
+        morning's exposure and double the day's recommendable total.
+        """
+        if fraction < 0.0:
+            raise ValueError(f"preloaded fraction must be >= 0, got {fraction}")
+        self._used[day] = fraction
+
     def release(self, day: date, fraction: float) -> None:
         """Hand back an unused grant (e.g. the pick was a DB duplicate).
 

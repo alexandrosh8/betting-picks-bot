@@ -60,6 +60,44 @@ def test_odds_api_key_rotation_drops_empties() -> None:
     assert s.odds_api_keys() == ("test-key-one", "test-key-three")
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("oddsportal_concurrency", 0),  # Semaphore(0) upstream = silent hang
+        ("oddsportal_concurrency", 6),  # responsible-pacing ceiling
+        ("oddsportal_concurrency", -1),
+        ("oddsportal_request_delay", 0.4),  # below responsible floor
+        ("oddsportal_request_delay", -1.0),
+        ("poll_interval_seconds", 29),
+        ("poll_interval_seconds", 0),
+    ],
+)
+def test_out_of_range_pacing_knobs_fail_at_startup(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("oddsportal_concurrency", 1),
+        ("oddsportal_concurrency", 5),
+        ("oddsportal_request_delay", 0.5),
+        ("oddsportal_request_delay", 3.0),
+        ("poll_interval_seconds", 30),
+        ("poll_interval_seconds", 300),
+    ],
+)
+def test_in_range_pacing_knobs_pass(field: str, value: float) -> None:
+    assert getattr(make_settings(**{field: value}), field) == value
+
+
+def test_out_of_range_pacing_knob_via_env_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODDSPORTAL_CONCURRENCY", "0")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
 def test_value_strategy_defaults_are_the_train_chosen_optimum() -> None:
     # v4: chosen on TRAIN seasons only over 7 devig methods with the 1.60
     # odds floor, confirmed one-shot on holdout — docs/backtesting/

@@ -13,7 +13,7 @@ orchestrator touches only this module.
 import asyncio
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -50,21 +50,28 @@ from app.risk.exposure import DailyExposureLedger
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL_SECONDS = 300  # fallback; settings.poll_interval_seconds wins
-
 
 class _PollSkipNoiseFilter(logging.Filter):
-    """Drop apscheduler's max-instances skip warning for poll_odds ONLY.
+    """Downgrade apscheduler's max-instances skip warning for poll_odds ONLY.
 
     The short interval + max_instances=1 + coalesce is the documented
     continuous-polling design (see the poll_odds registration): while a
     20-40 min scrape cycle runs, every interval slot is skipped by design.
-    Skips of any other job remain visible.
+    Downgraded to INFO (not dropped) — the skip is the only scheduler-side
+    evidence of a HUNG poll cycle. Skips of any other job remain warnings.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        return not ("poll_odds" in msg and "maximum number of running instances reached" in msg)
+        if "poll_odds" in msg and "maximum number of running instances reached" in msg:
+            record.levelno = logging.INFO
+            record.levelname = "INFO"
+            # The logger's level gate already passed at WARNING before filters
+            # ran; without re-checking, the downgraded line would still emit
+            # under LOG_LEVEL=WARNING. Honour the effective level for the NEW
+            # severity: emit at INFO, suppress at WARNING+.
+            return logging.getLogger(record.name).isEnabledFor(record.levelno)
+        return True
 
 
 _POLL_SKIP_FILTER = _PollSkipNoiseFilter()
@@ -78,7 +85,10 @@ def _dispatcher(
             TelegramSink(settings.telegram_bot_token, settings.telegram_chat_id, http_client),
             WebhookSink(settings.webhook_url, http_client),
         ],
-        store=RedisIdempotencyStore(redis),
+        # TTL governs how long an UNCHANGED market state stays quiet (a price
+        # move mints a new dedupe key and alerts immediately) — default 7d so
+        # still-open same-odds picks do not re-alert daily.
+        store=RedisIdempotencyStore(redis, ttl_seconds=settings.alert_dedupe_ttl_seconds),
     )
 
 
@@ -111,11 +121,48 @@ async def fetch_football_history(
     return rows
 
 
+async def seed_exposure_ledger(
+    ledger: DailyExposureLedger,
+    session_factory: "async_sessionmaker",
+) -> None:
+    """Preload today's already-recommended exposure from persisted picks.
+
+    The ledger is in-memory and rebuilt on every process start; without this
+    a mid-day restart resets used(today) to ~0 (re-detections reserve then
+    release as DB duplicates) and DOUBLES the day's recommendable exposure.
+    ALL statuses count — each pick consumed budget when it was recommended
+    today, whatever happened to it since.
+    """
+    from sqlalchemy import func, select
+
+    from app.storage.models import Pick
+
+    now = datetime.now(tz=UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    async with session_factory() as session:
+        total = await session.scalar(
+            select(func.coalesce(func.sum(Pick.recommended_stake_fraction), 0)).where(
+                Pick.created_at >= day_start,
+                Pick.created_at < day_end,
+            )
+        )
+    used = float(total or 0)
+    ledger.preload(now.date(), used)
+    if used > 0.0:
+        logger.info(
+            "exposure ledger seeded for %s: %.4f of bankroll already recommended today",
+            now.date().isoformat(),
+            used,
+        )
+
+
 def build_scheduler(
     settings: Settings,
     http_client: httpx.AsyncClient,
     redis: Redis,
     session_factory: "async_sessionmaker | None" = None,
+    ledger: DailyExposureLedger | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -200,7 +247,11 @@ def build_scheduler(
             dispatcher=_dispatcher(settings, http_client, redis),
             gate_policy=gate_policy(settings),
             stake_policy=stake_policy(settings),
-            ledger=DailyExposureLedger(max_daily_fraction=settings.max_daily_exposure_percent),
+            # seeded at the composition root (app/main.py lifespan) so a
+            # restart cannot forget today's already-recommended exposure
+            ledger=ledger
+            if ledger is not None
+            else DailyExposureLedger(max_daily_fraction=settings.max_daily_exposure_percent),
             bankroll=Decimal(str(settings.bankroll_base)),
             league=league_label,
             directory=directory,

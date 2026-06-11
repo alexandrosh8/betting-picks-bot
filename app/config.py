@@ -7,7 +7,7 @@ error. There is no code anywhere that reads these flags to enable anything.
 
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.edge.gates import GatePolicy
@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     webhook_url: str = ""
+    # How long an UNCHANGED market state stays suppressed by the alert
+    # idempotency store. Open picks routinely live for days (taken up to
+    # weeks before kickoff); a 24h TTL re-alerted every still-open same-odds
+    # pick daily. A price move mints a new dedupe key (it includes
+    # decimal_odds) and alerts immediately regardless of this TTL.
+    alert_dedupe_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=60)
 
     # --- Pick strategy --------------------------------------------------------
     # "value" = sharp-vs-soft line shopping (BACKTESTED, positive holdout CLV —
@@ -94,19 +100,23 @@ class Settings(BaseSettings):
     # league's whole upcoming list — far-future fixtures are skipped and
     # cycle time tracks the actionable slate. Unset = legacy upcoming page.
     oddsportal_days_ahead: int | None = 1
-    # OddsHarvester's own pacing knobs (README: "adjust responsibly").
+    # OddsHarvester's own pacing knobs (upstream README Disclaimer: "Use
+    # responsibly and ensure compliance with their terms of service").
     # Concurrency = parallel match pages; request_delay = seconds between
     # requests (+ jitter upstream). Tuning these is sanctioned configuration
-    # — anti-bot bypassing remains forbidden everywhere.
-    oddsportal_concurrency: int = 3
-    oddsportal_request_delay: float = 1.0
+    # — anti-bot bypassing remains forbidden everywhere. Bounds fail fast at
+    # startup: concurrency 0 becomes Semaphore(0) upstream (silent hang);
+    # >5 or sub-0.5s delays exceed responsible pacing for a free source.
+    oddsportal_concurrency: int = Field(default=3, ge=1, le=5)
+    oddsportal_request_delay: float = Field(default=1.0, ge=0.5)
     # Browser locale, paired with the loader's forced UTC timezone for a
     # coherent human fingerprint (UTC = London -> en-GB).
     oddsportal_locale: str = "en-GB"
     # Seconds between poll cycles. With max_instances=1 + coalesce, a value
     # below the cycle duration just runs cycles back-to-back — effective
-    # freshness is one cycle length; the scrape itself is the floor.
-    poll_interval_seconds: int = 300
+    # freshness is one cycle length; the scrape itself is the floor. The
+    # >=30s floor blocks hammering-by-typo on a free scraped source.
+    poll_interval_seconds: int = Field(default=300, ge=30)
     footballdata_league_codes: str = "E0"  # csv, European mmz4281 divisions
     footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
     # Optional: train on a "new leagues" country code (e.g. BRA) instead of the

@@ -2,11 +2,18 @@
 
 The 60s poll interval + max_instances=1 + coalesce is the documented
 continuous-polling design: a 20-40 min scrape cycle makes apscheduler skip
-every overlapping slot, which is expected — not WARNING-worthy. Skips of any
-OTHER job must stay visible.
+every overlapping slot, which is expected — not WARNING-worthy. The skip is
+the ONLY scheduler-side evidence of a hung poll cycle, so it is DOWNGRADED
+to INFO — and must then honour the logger's effective level: the WARNING
+gate already passed before the filter ran, so without a re-check the
+"downgraded" line still emits under LOG_LEVEL=WARNING. Skips of any OTHER
+job stay warnings.
 """
 
 import logging
+from collections.abc import Iterator
+
+import pytest
 
 from app.scheduler import _PollSkipNoiseFilter
 
@@ -21,16 +28,48 @@ def _rec(msg: str) -> logging.LogRecord:
     return logging.LogRecord("apscheduler.scheduler", logging.WARNING, __file__, 0, msg, None, None)
 
 
-def test_drops_poll_odds_max_instances_skip() -> None:
-    assert not _PollSkipNoiseFilter().filter(_rec(_SKIP_MSG))
+@pytest.fixture
+def scheduler_logger() -> Iterator[logging.Logger]:
+    logger = logging.getLogger("apscheduler.scheduler")
+    original = logger.level
+    try:
+        yield logger
+    finally:
+        logger.setLevel(original)
 
 
-def test_keeps_other_job_skips_and_other_warnings() -> None:
+def test_downgrades_poll_odds_skip_to_info_and_emits_at_info_level(
+    scheduler_logger: logging.Logger,
+) -> None:
+    scheduler_logger.setLevel(logging.INFO)  # LOG_LEVEL=INFO
+    record = _rec(_SKIP_MSG)
+    assert _PollSkipNoiseFilter().filter(record)  # kept, not dropped
+    assert record.levelno == logging.INFO
+    assert record.levelname == "INFO"
+
+
+def test_downgraded_skip_suppressed_under_warning_level(
+    scheduler_logger: logging.Logger,
+) -> None:
+    # Level-leak regression: the WARNING gate passed BEFORE the filter ran;
+    # the record downgraded to INFO must NOT slip out under LOG_LEVEL=WARNING.
+    scheduler_logger.setLevel(logging.WARNING)
+    record = _rec(_SKIP_MSG)
+    assert not _PollSkipNoiseFilter().filter(record)
+    assert record.levelno == logging.INFO  # downgrade applied, emission denied
+
+
+def test_keeps_other_job_skips_and_other_warnings_at_warning(
+    scheduler_logger: logging.Logger,
+) -> None:
+    scheduler_logger.setLevel(logging.WARNING)
     f = _PollSkipNoiseFilter()
-    assert f.filter(
-        _rec(
-            'Execution of job "settle_results" skipped: '
-            "maximum number of running instances reached (1)"
-        )
+    other_skip = _rec(
+        'Execution of job "settle_results" skipped: maximum number of running instances reached (1)'
     )
-    assert f.filter(_rec("Run time of job poll_odds was missed by 0:00:05"))
+    assert f.filter(other_skip)
+    assert other_skip.levelno == logging.WARNING
+
+    missed = _rec("Run time of job poll_odds was missed by 0:00:05")
+    assert f.filter(missed)
+    assert missed.levelno == logging.WARNING

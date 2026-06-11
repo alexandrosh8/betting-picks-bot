@@ -383,7 +383,8 @@
     <div class="controls">
       <select id="f-status">
         <option value="">ALL STATUSES</option>
-        <option value="alerted" selected>OPEN (ALERTED)</option>
+        <option value="alerted" selected>OPEN (VERIFIED)</option>
+        <option value="alerted-all">OPEN (INCL. UNVERIFIED)</option>
         <option value="settled">SETTLED</option>
       </select>
       <input
@@ -487,12 +488,25 @@
         return c;
       }
 
+      // An open pick is "verified" when its odds were re-checked recently;
+      // stale alerts are REMOVED from the default view (filter shows them).
+      const VERIFIED_WITHIN_MS = 15 * 60 * 1000;
+      function isVerified(p) {
+        if (p.status !== "alerted") return true; // settled rows keep history
+        if (!p.revalidated_at) return false;
+        return Date.now() - new Date(p.revalidated_at) < VERIFIED_WITHIN_MS;
+      }
+
       function render() {
         const status = $("f-status").value;
         const q = $("f-search").value.trim().toLowerCase();
         const rows = PICKS.filter(
           (p) =>
-            (!status || p.status === status) &&
+            (!status ||
+              (status === "alerted-all"
+                ? p.status === "alerted"
+                : p.status === status)) &&
+            (status !== "alerted" || isVerified(p)) &&
             (!q ||
               [p.event, p.selection, p.bookmaker, p.league, p.market]
                 .join(" ")
@@ -506,7 +520,9 @@
           const tr = document.createElement("tr");
           td(
             tr,
-            "No picks match. New picks appear when a book beats the sharp fair price — check back after the next poll cycle.",
+            $("f-status").value === "alerted"
+              ? "No VERIFIED open picks right now. Picks appear here once the current poll cycle re-checks their odds (a few minutes); older unverified ones are under OPEN (INCL. UNVERIFIED)."
+              : "No picks match. New picks appear when a book beats the sharp fair price — check back after the next poll cycle.",
             "empty",
           ).colSpan = 12;
           tbody.appendChild(tr);

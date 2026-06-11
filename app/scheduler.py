@@ -50,7 +50,7 @@ from app.risk.exposure import DailyExposureLedger
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL_SECONDS = 300  # credit/scrape-frugal default
+POLL_INTERVAL_SECONDS = 300  # fallback; settings.poll_interval_seconds wins
 
 
 def _dispatcher(
@@ -202,7 +202,7 @@ def build_scheduler(
 
         scheduler.add_job(
             poll_odds,
-            IntervalTrigger(seconds=POLL_INTERVAL_SECONDS),
+            IntervalTrigger(seconds=settings.poll_interval_seconds),
             id="poll_odds",
             max_instances=1,
             coalesce=True,

@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     # league's whole upcoming list — far-future fixtures are skipped and
     # cycle time tracks the actionable slate. Unset = legacy upcoming page.
     oddsportal_days_ahead: int | None = 1
+    # Seconds between poll cycles. With max_instances=1 + coalesce, a value
+    # below the cycle duration just runs cycles back-to-back — effective
+    # freshness is one cycle length; the scrape itself is the floor.
+    poll_interval_seconds: int = 300
     footballdata_league_codes: str = "E0"  # csv, European mmz4281 divisions
     footballdata_seasons: str = "2425,2526"  # csv, football-data 4-digit seasons
     # Optional: train on a "new leagues" country code (e.g. BRA) instead of the

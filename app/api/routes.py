@@ -38,6 +38,7 @@ async def dashboard() -> str:
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
+    from app.config import get_settings
     from app.maintenance.upstream_watch import LAST_CHECK
     from app.pipeline import LAST_POLL
 
@@ -46,6 +47,9 @@ async def health() -> dict[str, Any]:
         "mode": "picks-only",
         "upstream": LAST_CHECK,
         "polls": LAST_POLL,
+        # The dashboard derives its "verified within" window from the actual
+        # poll cadence (max(45min, 3 * interval)) instead of hardcoding it.
+        "poll_interval_seconds": get_settings().poll_interval_seconds,
     }
 
 

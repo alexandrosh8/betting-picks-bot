@@ -139,3 +139,31 @@ async def test_true_up_ignores_unmatched_events(factory) -> None:  # type: ignor
     loader = FakeLoader(closing_snapshots("a-DIFFERENT-event"))
     updated = await true_up_clv(loader, factory, ["soccer"])
     assert updated == 0
+
+
+async def test_true_up_revalidates_current_odds_and_edge(factory) -> None:  # type: ignore[no-untyped-def]
+    # Every refresh must answer "is this pick still worth betting NOW?":
+    # current price at the pick's own book + edge vs the fresh fair prob.
+    event_id = "evt-revalidate"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    loader = FakeLoader(closing_snapshots(event_id))
+    assert await true_up_clv(loader, factory, ["soccer"]) == 1
+
+    async with factory() as session:
+        pick = await session.scalar(select(Pick).where(Pick.reason_summary == "clv true-up test"))
+        assert pick is not None
+        # SoftBook (the pick's book) quotes Home FC at 2.30 in the fresh scrape
+        assert pick.current_odds == Decimal("2.3000")
+        assert pick.revalidated_at is not None
+        assert pick.current_edge is not None
+        fair = float(pick.closing_fair_probability)
+        assert float(pick.current_edge) == pytest.approx(fair - 1.0 / 2.30, abs=1e-4)

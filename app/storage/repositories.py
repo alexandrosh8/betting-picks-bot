@@ -149,6 +149,9 @@ async def latest_picks_with_events(session: AsyncSession, limit: int = 50) -> li
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
+            "current_odds": str(p.current_odds) if p.current_odds is not None else None,
+            "current_edge": str(p.current_edge) if p.current_edge is not None else None,
+            "revalidated_at": p.revalidated_at.isoformat() if p.revalidated_at else None,
         }
         for p, home_name, away_name, league_name, starts_at in rows.all()
     ]

@@ -221,6 +221,10 @@ class Pick(Base):
     closing_fair_probability: Mapped[Decimal | None] = mapped_column(PROB)
     clv_log: Mapped[Decimal | None] = mapped_column(METRIC)
     beat_close: Mapped[bool | None] = mapped_column(Boolean)
+    # --- live revalidation (refreshed every poll while the pick is open) ----
+    current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
+    current_edge: Mapped[Decimal | None] = mapped_column(METRIC)
+    revalidated_at: Mapped[datetime | None]
 
 
 class ManualBetLog(Base):

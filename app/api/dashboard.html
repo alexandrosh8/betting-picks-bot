@@ -555,7 +555,38 @@
           selCell.append(selName, pickedAgo);
           td(tr, selCell);
           td(tr, p.bookmaker);
-          td(tr, Number(p.decimal_odds).toFixed(2), "odds");
+          const oddsCell = document.createElement("div");
+          const orig = document.createElement("span");
+          orig.className = "odds";
+          orig.textContent = Number(p.decimal_odds).toFixed(2);
+          oddsCell.appendChild(orig);
+          // Live revalidation: current price + "still worth it?" verdict,
+          // refreshed every poll while the pick is open.
+          if (p.status === "alerted" && p.current_odds !== null) {
+            const nowLine = document.createElement("small");
+            nowLine.style.display = "block";
+            const curEdge =
+              p.current_edge === null ? null : Number(p.current_edge);
+            let verdict = "";
+            let color = "var(--faint)";
+            if (curEdge !== null) {
+              if (curEdge >= 0.03) {
+                verdict = " still value +" + (curEdge * 100).toFixed(1) + "%";
+                color = "var(--green)";
+              } else if (curEdge > 0) {
+                verdict = " thin +" + (curEdge * 100).toFixed(1) + "%";
+                color = "var(--amber)";
+              } else {
+                verdict = " edge gone " + (curEdge * 100).toFixed(1) + "%";
+                color = "var(--red)";
+              }
+            }
+            nowLine.style.color = color;
+            nowLine.textContent =
+              "now " + Number(p.current_odds).toFixed(2) + verdict;
+            oddsCell.appendChild(nowLine);
+          }
+          td(tr, oddsCell);
           td(tr, pct(p.model_probability));
 
           const e = Number(p.edge);

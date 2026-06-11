@@ -211,25 +211,9 @@ def build_scheduler(
             misfire_grace_time=None,
         )
 
-        if session_factory is not None:
-            captured_keys = sport_keys
-
-            async def clv_trueup_job() -> None:
-                from app.clv_trueup import true_up_clv
-
-                try:
-                    await true_up_clv(loader, session_factory, captured_keys, value_devig)
-                except Exception as exc:
-                    logger.error("clv true-up failed: %s", type(exc).__name__)
-
-            scheduler.add_job(
-                clv_trueup_job,
-                IntervalTrigger(minutes=30),
-                id="clv_trueup",
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=None,  # run on wake, don't skip
-            )
+        # CLV true-up + current-odds revalidation now run INSIDE every poll
+        # cycle on the cycle's own snapshots (app/pipeline.py) — a separate
+        # 30-min fetch job would just double the scraping load.
 
     async def settle_results() -> None:
         # Phase 4: free results sources -> outcome mapping -> result_tracking.

@@ -10,6 +10,7 @@ The oddsharvester import is lazy so the default (extras-free) install and CI
 profile keep working; install with `uv sync --extra backfill`.
 """
 
+import importlib.metadata
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -350,10 +351,25 @@ _EXCHANGE_NOISE_FILTER = _ExchangeIncompleteOddsFilter()
 _SCRAPE_GAP_FILTER = _ScrapeGapDowngradeFilter()
 _upstream_patched = False
 
+# The ONLY oddsharvester version the six runtime patches below were verified
+# against (pyproject pins it exactly). A version bump must re-verify every
+# patch target — see .claude/memory/pitfalls.md.
+_PATCHED_UPSTREAM_VERSION = "0.3.0"
+
 
 def _patch_upstream_quirks() -> None:
     """Apply the quirk fixes in place (idempotent; lazy oddsharvester import)."""
     global _upstream_patched
+    # LOUD version guard, checked BEFORE the idempotency early-return: the
+    # patches replace private upstream internals, so running them against any
+    # other release risks silently corrupted scraping.
+    installed = importlib.metadata.version("oddsharvester")
+    if installed != _PATCHED_UPSTREAM_VERSION:
+        raise RuntimeError(
+            f"oddsharvester {installed} != {_PATCHED_UPSTREAM_VERSION}: runtime patches "
+            f"target {_PATCHED_UPSTREAM_VERSION} internals — re-verify each patch against "
+            "the new version (see .claude/memory/pitfalls.md), then update this guard"
+        )
     if _upstream_patched:
         return
     from oddsharvester.core.browser.market_navigation import MarketTabNavigator
@@ -434,10 +450,15 @@ class OddsPortalLoader:
         self._markets = tuple(markets)
         self._scrape = scrape_fn or _default_scrape
         self._headless = headless
+        # max_pages is HISTORIC-only upstream: run_scraper forwards it to the
+        # historic scraper alone and silently ignores it for UPCOMING_MATCHES
+        # (the only command this loader issues) — a no-op kept for the kwarg
+        # contract with scripts/ callers, not a working pagination knob.
         self._max_pages = max_pages
         self._date = date
         self._days_ahead = days_ahead
-        # Upstream-sanctioned pacing knobs (README: "adjust responsibly").
+        # Upstream-sanctioned pacing knobs (upstream README Disclaimer: "Use
+        # responsibly and ensure compliance with their terms of service").
         # These tune OddsHarvester's OWN scheduler — never anti-bot bypass.
         self._concurrency_tasks = concurrency_tasks
         self._request_delay = request_delay
@@ -448,6 +469,11 @@ class OddsPortalLoader:
         # jitters delays, and runs a webdriver-hiding init script — we add the
         # missing locale, never anything that DEFEATS bot detection.
         self._locale = locale
+        # Liveness contract read by app/pipeline._record_poll: listing count
+        # of the last fetch_odds per sport key. "Matches listed but zero odds
+        # parsed" is the selector-break/anti-bot signature — the pipeline
+        # surfaces it as a degraded poll on /health.
+        self.last_fetch_matches: dict[str, int] = {}
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
@@ -480,7 +506,7 @@ class OddsPortalLoader:
                 leagues=scrape_leagues,
                 markets=list(self._markets_for(sport_key)),
                 headless=self._headless,
-                max_pages=self._max_pages,
+                max_pages=self._max_pages,  # historic-only upstream; no-op here
                 # CRITICAL: oddsportal embeds timestamps shifted to the
                 # BROWSER's timezone; without this, kickoffs/capture times
                 # inherit the host offset (observed +3h on a Cyprus-time Mac)
@@ -505,6 +531,7 @@ class OddsPortalLoader:
         snapshots: list[OddsSnapshotIn] = []
         for match in matches:
             snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))
+        self.last_fetch_matches[sport_key] = len(matches)
         # Per-market counts make scrape gaps visible: OddsPortal market-tab
         # navigation is DOM-fragile upstream, so secondary markets (btts/dnb/
         # AH/EH) intermittently come back empty while 1x2 succeeds — that is
@@ -522,6 +549,18 @@ class OddsPortalLoader:
             per_market,
             f" | markets with NO odds: {missing}" if missing and matches else "",
         )
+        if matches and not snapshots:
+            # A gap in SOME markets is expected; matches listed with EVERY
+            # market empty is not — that is a selector/DOM break or an
+            # anti-bot wall (0 rows + 0 parse errors -> suspect anti-bot,
+            # upstream gotcha doc §6). Cycles still complete, so without
+            # this WARNING a broken scraper looks healthy.
+            logger.warning(
+                "oddsportal %s: %d matches found but 0 odds snapshots parsed — "
+                "selector/DOM break or anti-bot wall; check /health polls payload",
+                sport_key,
+                len(matches),
+            )
         return snapshots
 
     def sport_segment(self, sport_key: str) -> str | None:

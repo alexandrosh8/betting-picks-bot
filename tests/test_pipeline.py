@@ -5,7 +5,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.edge.gates import GatePolicy
+from app.ingestion.base import EventDirectory, EventTeams
 from app.models.base import PredictedProbability
 from app.notifications.base import Alert
 from app.notifications.dedupe import InMemoryIdempotencyStore
@@ -109,6 +112,106 @@ async def test_pipeline_rerun_suppresses_duplicate_alert() -> None:
     assert len(first) == 1
     assert len(second) == 1
     assert len(sink.sent) == 1
+
+
+class FakeSessionFactory:
+    """Minimal async-contextmanager session for the persistence seam."""
+
+    def __call__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aenter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+        return False
+
+    async def commit(self) -> None:
+        return None
+
+
+def patch_persist_dedupe_after_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """persist_pick inserts on the FIRST call, dedupes every later call —
+    the DB unique key (event, market, selection, model) ignores odds."""
+    import app.storage.repositories as repos
+
+    calls = {"n": 0}
+
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return calls["n"] == 1
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+
+
+def make_persisting_deps(sink: RecordingSink) -> PipelineDeps:
+    deps = make_deps(sink)
+    directory = EventDirectory()
+    directory.register("evt-1", EventTeams(home="Over Town", away="Under City"))
+    deps.directory = directory
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+    return deps
+
+
+async def test_pick_pipeline_duplicate_releases_exposure_and_unchanged_odds_stay_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Port of the value-pipeline H1 regression to run_pick_pipeline: a DB
+    duplicate hands its exposure grant back (no daily-cap leak) but the alert
+    is still dispatched — unchanged odds are suppressed by the idempotency
+    store, so exactly one alert reaches the sink."""
+    patch_persist_dedupe_after_first(monkeypatch)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+
+    day = datetime.now(tz=UTC).date()
+    first = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(first) == 1
+    used_after_first = deps.ledger.used(day)
+    assert used_after_first > 0.0
+
+    second = await run_pick_pipeline(deps, "soccer_epl")
+    assert second == []  # duplicate is not a new pick this cycle
+    assert deps.ledger.used(day) == pytest.approx(used_after_first)  # grant returned
+    assert len(sink.sent) == 1  # idempotency (key includes odds) suppressed it
+
+
+async def test_pick_pipeline_duplicate_price_move_realerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A price move on a pick the DB already knows must re-alert (the alert
+    dedupe key includes decimal_odds by design) while the exposure grant for
+    the duplicate is still released."""
+    patch_persist_dedupe_after_first(monkeypatch)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+
+    day = datetime.now(tz=UTC).date()
+    first = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(first) == 1
+    assert len(sink.sent) == 1
+    used_after_first = deps.ledger.used(day)
+
+    # the book moves both totals prices 2.10 -> 2.20: same DB row, new state
+    deps.loader.snapshots = [  # type: ignore[attr-defined]
+        OddsSnapshotIn(
+            event_id="evt-1",
+            bookmaker="bookie",
+            market=Market.TOTALS,
+            selection=name,
+            decimal_odds=2.20,
+            captured_at=NOW - timedelta(seconds=30),
+            ingested_at=NOW,
+        )
+        for name in ("Over 2.5", "Under 2.5")
+    ]
+    second = await run_pick_pipeline(deps, "soccer_epl")
+    assert second == []  # still not a NEW pick
+    assert deps.ledger.used(day) == pytest.approx(used_after_first)  # grant returned
+    assert len(sink.sent) == 2  # price move re-alerted
+    assert "2.20" in sink.sent[1].title
 
 
 async def test_pipeline_no_model_predictions_no_picks() -> None:

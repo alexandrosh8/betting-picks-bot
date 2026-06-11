@@ -39,12 +39,41 @@ logger = logging.getLogger(__name__)
 LAST_POLL: dict[str, dict[str, Any]] = {}
 
 
-def _record_poll(sport_key: str, snapshots: int, picks: int) -> None:
+def _record_poll(
+    sport_key: str,
+    snapshots: Sequence[OddsSnapshotIn],
+    picks: int,
+    matches_found: int | None,
+) -> None:
+    per_market: dict[str, int] = {}
+    for snap in snapshots:
+        key = snap.market_detail or str(snap.market)
+        per_market[key] = per_market.get(key, 0) + 1
     LAST_POLL[sport_key] = {
         "finished_at": datetime.now(tz=UTC).isoformat(),
-        "snapshots": snapshots,
+        "snapshots": len(snapshots),
         "picks": picks,
+        # None = the loader does not report listing counts (e.g. odds_api).
+        "matches_found": matches_found,
+        # Per-market counts: a selector break craters ONE market's count
+        # while cycles keep completing — the dashboard can show which.
+        "per_market": per_market,
+        # Listings parsed but ZERO odds rows: selector/DOM break or anti-bot
+        # wall. finished_at alone would look healthy — flag it explicitly.
+        "degraded": bool(matches_found) and not snapshots,
     }
+
+
+def _loader_matches_found(loader: OddsLoader, sport_key: str) -> int | None:
+    """Listing count from the loader's last fetch, when it reports one
+    (OddsPortalLoader.last_fetch_matches). Duck-typed so OddsLoader stays a
+    minimal protocol and loaders without the attribute keep working."""
+    counts = getattr(loader, "last_fetch_matches", None)
+    if isinstance(counts, dict):
+        value = counts.get(sport_key)
+        if isinstance(value, int):
+            return value
+    return None
 
 
 @dataclass
@@ -76,7 +105,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     now = datetime.now(tz=UTC)
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
-        _record_poll(sport_key, 0, 0)
+        _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
         return []
 
     fair = _fair_probabilities(snapshots, deps.devig_method)
@@ -151,16 +180,23 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 ),
                 created_at=now,
             )
-            if not await _maybe_persist(deps, pick, snap.event_id):
-                # Already persisted by an earlier cycle: hand the exposure
-                # grant back and don't re-alert — nothing new happened.
+            if await _maybe_persist(deps, pick, snap.event_id):
+                picks.append(pick)
+            else:
+                # Confirmed DB duplicate (the picks unique key ignores odds):
+                # hand the exposure grant back — a re-detection is not new
+                # exposure — but STILL dispatch. The alert dedupe key includes
+                # decimal_odds (notifications/base.py), so an unchanged price
+                # stays quiet for the idempotency TTL (7d default) while a
+                # material price move re-alerts by design; and because the
+                # dispatcher releases the claim when no sink delivers, an
+                # alert whose dispatch failed is retried by this very
+                # re-dispatch on the next cycle.
                 deps.ledger.release(now.date(), granted)
-                continue
-            picks.append(pick)
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
-    _record_poll(sport_key, len(snapshots), len(picks))
+    _record_poll(sport_key, snapshots, len(picks), _loader_matches_found(deps.loader, sport_key))
     return picks
 
 
@@ -229,7 +265,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     now = datetime.now(tz=UTC)
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
-        _record_poll(sport_key, 0, 0)
+        _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
         return []
 
     grouped = group_market_prices(snapshots)
@@ -311,12 +347,19 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 ),
                 created_at=now,
             )
-            if not await _maybe_persist(deps, pick, event_id):
-                # Already persisted by an earlier cycle: hand the exposure
-                # grant back and don't re-alert — nothing new happened.
+            if await _maybe_persist(deps, pick, event_id):
+                picks.append(pick)
+            else:
+                # Confirmed DB duplicate (the picks unique key ignores odds):
+                # hand the exposure grant back — a re-detection is not new
+                # exposure — but STILL dispatch. The alert dedupe key includes
+                # decimal_odds (notifications/base.py), so an unchanged price
+                # stays quiet for the idempotency TTL (7d default) while a
+                # material price move re-alerts by design; and because the
+                # dispatcher releases the claim when no sink delivers, an
+                # alert whose dispatch failed is retried by this very
+                # re-dispatch on the next cycle.
                 deps.ledger.release(now.date(), granted)
-                continue
-            picks.append(pick)
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +
@@ -339,7 +382,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             logger.error("open-pick revalidation failed: %s", type(exc).__name__)
 
     logger.info("value pipeline cycle for %s: %d picks", sport_key, len(picks))
-    _record_poll(sport_key, len(snapshots), len(picks))
+    _record_poll(sport_key, snapshots, len(picks), _loader_matches_found(deps.loader, sport_key))
     return picks
 
 

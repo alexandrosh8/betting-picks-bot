@@ -6,7 +6,11 @@ from decimal import Decimal
 import fakeredis.aioredis
 
 from app.notifications.base import Alert, build_pick_alert
-from app.notifications.dedupe import InMemoryIdempotencyStore, RedisIdempotencyStore
+from app.notifications.dedupe import (
+    DEFAULT_TTL_SECONDS,
+    InMemoryIdempotencyStore,
+    RedisIdempotencyStore,
+)
 from app.notifications.dispatcher import AlertDispatcher
 from app.schemas.base import Market
 from app.schemas.picks import MANUAL_BETTING_REMINDER, PickOut, StakeBreakdownOut
@@ -89,12 +93,104 @@ async def test_sink_failure_does_not_raise_or_block_others() -> None:
     assert len(recording.sent) == 1
 
 
+class FlakySink:
+    """Raises on the first send, delivers afterwards — a transient outage."""
+
+    name = "flaky"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.sent: list[Alert] = []
+
+    async def send(self, alert: Alert) -> bool:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("transient outage")
+        self.sent.append(alert)
+        return True
+
+
+class UnconfiguredSink:
+    """Mirrors Telegram/Webhook sinks with no token/url: skips by design."""
+
+    name = "unconfigured"
+    configured = False
+
+    async def send(self, alert: Alert) -> bool:
+        return False
+
+
+async def test_failed_dispatch_releases_claim_so_next_cycle_retries() -> None:
+    # Claim-leak regression: claim succeeds, the send raises -> the key must
+    # be RELEASED, so the pipeline's next-cycle re-dispatch of the same
+    # market state retries instead of being suppressed forever.
+    sink = FlakySink()
+    dispatcher = AlertDispatcher([sink], InMemoryIdempotencyStore())
+    first = await dispatcher.dispatch(make_alert())
+    assert first.skipped_duplicate is False
+    assert first.sink_results == (("flaky", False),)
+
+    second = await dispatcher.dispatch(make_alert())  # next cycle, same key
+    assert second.skipped_duplicate is False  # claim was released
+    assert second.sink_results == (("flaky", True),)
+    assert len(sink.sent) == 1
+
+    third = await dispatcher.dispatch(make_alert())  # delivered -> claim sticks
+    assert third.skipped_duplicate is True
+    assert len(sink.sent) == 1
+
+
+async def test_partial_delivery_keeps_claim() -> None:
+    # One channel delivered: releasing would duplicate the alert to the
+    # healthy channel on the next cycle.
+    recording = RecordingSink()
+    dispatcher = AlertDispatcher([ExplodingSink(), recording], InMemoryIdempotencyStore())
+    await dispatcher.dispatch(make_alert())
+    second = await dispatcher.dispatch(make_alert())
+    assert second.skipped_duplicate is True
+    assert len(recording.sent) == 1
+
+
+async def test_unconfigured_sinks_do_not_release_claim() -> None:
+    # No-channel deployments: an unconfigured sink's False is a skip by
+    # design, not a delivery failure — without this, every alert would
+    # re-dispatch every cycle forever.
+    dispatcher = AlertDispatcher([UnconfiguredSink()], InMemoryIdempotencyStore())
+    first = await dispatcher.dispatch(make_alert())
+    assert first.skipped_duplicate is False
+    second = await dispatcher.dispatch(make_alert())
+    assert second.skipped_duplicate is True
+
+
 async def test_redis_idempotency_store_claims_once() -> None:
     redis = fakeredis.aioredis.FakeRedis()
     store = RedisIdempotencyStore(redis)
     assert await store.claim("key-1") is True
     assert await store.claim("key-1") is False
     assert await store.claim("key-2") is True
+
+
+async def test_redis_idempotency_store_release_reopens_key() -> None:
+    redis = fakeredis.aioredis.FakeRedis()
+    store = RedisIdempotencyStore(redis)
+    assert await store.claim("key-1") is True
+    await store.release("key-1")
+    assert await store.claim("key-1") is True  # claimable again after release
+
+
+async def test_redis_idempotency_ttl_keeps_unchanged_odds_quiet_for_seven_days() -> None:
+    # Unchanged odds on a still-open pick must NOT re-alert daily: the claim
+    # TTL is 7 days by default (a price move mints a new key regardless).
+    assert DEFAULT_TTL_SECONDS == 7 * 24 * 60 * 60
+    redis = fakeredis.aioredis.FakeRedis()
+    store = RedisIdempotencyStore(redis)
+    assert await store.claim("key-ttl") is True
+    assert await redis.ttl("alert:dedupe:key-ttl") == DEFAULT_TTL_SECONDS
+    assert await store.claim("key-ttl") is False  # quiet within the TTL
+
+    custom = RedisIdempotencyStore(redis, ttl_seconds=3600)
+    assert await custom.claim("key-custom") is True
+    assert await redis.ttl("alert:dedupe:key-custom") == 3600
 
 
 def test_pick_alert_contains_required_fields_and_reminder() -> None:

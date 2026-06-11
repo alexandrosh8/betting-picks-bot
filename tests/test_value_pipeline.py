@@ -43,10 +43,13 @@ def snap(book: str, sel: str, odds: float, age_s: float = 30.0) -> OddsSnapshotI
 
 class FakeLoader:
     def __init__(self, snapshots: list[OddsSnapshotIn]) -> None:
-        self._snapshots = snapshots
+        self.snapshots = snapshots
+        # Mirrors OddsPortalLoader's liveness contract read by _record_poll.
+        self.last_fetch_matches: dict[str, int] = {}
 
     async def fetch_odds(self, sport_key: str) -> Sequence[OddsSnapshotIn]:
-        return self._snapshots
+        self.last_fetch_matches[sport_key] = len({s.event_id for s in self.snapshots})
+        return self.snapshots
 
 
 class RecordingSink:
@@ -91,7 +94,9 @@ def make_deps(sink: RecordingSink, loader: FakeLoader) -> PipelineDeps:
 
 async def test_value_pipeline_records_poll_liveness() -> None:
     # The dashboard/health must be able to tell "engine alive" from "engine
-    # dead showing day-old picks" — every cycle records itself.
+    # dead showing day-old picks" — every cycle records itself, including
+    # per-market snapshot counts and the loader's listing count so a selector
+    # break (matches found, zero odds parsed) is visible, not silent.
     from app.pipeline import LAST_POLL
 
     sink = RecordingSink()
@@ -100,6 +105,45 @@ async def test_value_pipeline_records_poll_liveness() -> None:
     assert poll["finished_at"] is not None
     assert poll["snapshots"] > 0
     assert poll["picks"] == 1
+    assert poll["matches_found"] == 1
+    assert poll["per_market"] == {"h2h": 6}
+    assert poll["degraded"] is False
+
+
+async def test_poll_record_flags_degraded_on_matches_without_snapshots() -> None:
+    """Selector/DOM break (or anti-bot wall): listings parse, every odds row
+    is missed. Cycles still complete, so finished_at alone looks healthy —
+    the poll record must carry an explicit degraded flag for /health."""
+    from app.pipeline import LAST_POLL
+
+    class BrokenScrapeLoader(FakeLoader):
+        async def fetch_odds(self, sport_key: str) -> Sequence[OddsSnapshotIn]:
+            self.last_fetch_matches[sport_key] = 7  # listings parsed fine
+            return []  # ...but zero odds rows survived parsing
+
+    sink = RecordingSink()
+    await run_value_pipeline(make_deps(sink, BrokenScrapeLoader([])), "soccer")
+    poll = LAST_POLL["soccer"]
+    assert poll["matches_found"] == 7
+    assert poll["snapshots"] == 0
+    assert poll["per_market"] == {}
+    assert poll["degraded"] is True
+
+
+async def test_poll_record_without_listing_count_is_not_degraded() -> None:
+    # Loaders that don't report listing counts (odds_api, plain fakes) must
+    # not be flagged degraded on an empty day — unknown is not broken.
+    from app.pipeline import LAST_POLL
+
+    class CountlessLoader:
+        async def fetch_odds(self, sport_key: str) -> Sequence[OddsSnapshotIn]:
+            return []
+
+    sink = RecordingSink()
+    await run_value_pipeline(make_deps(sink, CountlessLoader()), "soccer")  # type: ignore[arg-type]
+    poll = LAST_POLL["soccer"]
+    assert poll["matches_found"] is None
+    assert poll["degraded"] is False
 
 
 async def test_value_pipeline_produces_pick_and_alert() -> None:
@@ -129,36 +173,46 @@ async def test_value_pipeline_rerun_dedupes_alert() -> None:
     assert len(sink.sent) == 1  # same market state -> one alert
 
 
-async def test_duplicate_pick_releases_exposure_and_skips_alert(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """H1 regression: a pick already persisted (DB dedupe) must hand its
-    daily-exposure grant back and not re-alert. With 60s polling, leaking
-    one grant per cycle exhausts the daily cap within minutes and blocks
-    every genuinely NEW pick for the rest of the UTC day."""
+class FakeSessionFactory:
+    """Minimal async-contextmanager session; revalidation calls against
+    it raise and are swallowed by the pipeline's try/except."""
+
+    def __call__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aenter__(self):  # type: ignore[no-untyped-def]
+        return self
+
+    async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
+        return False
+
+    async def commit(self) -> None:
+        return None
+
+
+def patch_persist_dedupe_after_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """persist_pick inserts on the FIRST call, dedupes every later call —
+    the DB unique key (event, market, selection, model) ignores odds."""
     import app.storage.repositories as repos
 
     calls = {"n": 0}
 
     async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
         calls["n"] += 1
-        return calls["n"] == 1  # first cycle inserts; later cycles dedupe
+        return calls["n"] == 1
 
     monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
 
-    class FakeSessionFactory:
-        """Minimal async-contextmanager session; revalidation calls against
-        it raise and are swallowed by the pipeline's try/except."""
 
-        def __call__(self):  # type: ignore[no-untyped-def]
-            return self
-
-        async def __aenter__(self):  # type: ignore[no-untyped-def]
-            return self
-
-        async def __aexit__(self, *exc):  # type: ignore[no-untyped-def]
-            return False
-
-        async def commit(self) -> None:
-            return None
+async def test_duplicate_pick_releases_exposure_and_unchanged_odds_stay_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H1 regression: a pick already persisted (DB dedupe) must hand its
+    daily-exposure grant back — leaking one grant per cycle exhausts the
+    daily cap within minutes. The alert is still DISPATCHED (so a failed
+    first delivery self-heals); with unchanged odds the idempotency store
+    suppresses it, so exactly one alert reaches the sink."""
+    patch_persist_dedupe_after_first(monkeypatch)
 
     sink = RecordingSink()
     deps = make_deps(sink, FakeLoader(market_snapshots()))
@@ -173,7 +227,42 @@ async def test_duplicate_pick_releases_exposure_and_skips_alert(monkeypatch) -> 
     second = await run_value_pipeline(deps, "soccer")
     assert second == []  # duplicate is not a new pick this cycle
     assert deps.ledger.used(day) == pytest.approx(used_after_first)  # grant returned
-    assert len(sink.sent) == 1  # no re-alert for an unchanged pick
+    assert len(sink.sent) == 1  # idempotency (key includes odds) suppressed it
+
+
+async def test_duplicate_pick_with_price_move_realerts_and_still_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alert dedupe key deliberately includes decimal_odds (notifications/
+    base.py): a material price move on a pick the DB already knows must
+    RE-ALERT — skipping dispatch on DB dedupe killed that design. Exposure is
+    still handed back: a re-priced duplicate is not new exposure."""
+    patch_persist_dedupe_after_first(monkeypatch)
+
+    sink = RecordingSink()
+    loader = FakeLoader(market_snapshots())
+    deps = make_deps(sink, loader)
+    deps.session_factory = FakeSessionFactory()  # type: ignore[assignment]
+
+    day = datetime.now(tz=UTC).date()
+    first = await run_value_pipeline(deps, "soccer")
+    assert len(first) == 1
+    assert len(sink.sent) == 1
+    used_after_first = deps.ledger.used(day)
+
+    # SoftBook moves its Home price 2.90 -> 2.95: same DB row (dedupe ignores
+    # odds), materially different market state.
+    loader.snapshots = [
+        snap("SoftBook", "Home FC", 2.95)
+        if s.bookmaker == "SoftBook" and s.selection == "Home FC"
+        else s
+        for s in market_snapshots()
+    ]
+    second = await run_value_pipeline(deps, "soccer")
+    assert second == []  # still not a NEW pick
+    assert deps.ledger.used(day) == pytest.approx(used_after_first)  # grant returned
+    assert len(sink.sent) == 2  # price move re-alerted
+    assert "2.95" in sink.sent[1].title
 
 
 async def test_value_pipeline_skips_stale_odds() -> None:

@@ -248,7 +248,7 @@ requires-dist = [
     { name = "lightgbm", marker = "extra == 'models'", specifier = ">=4.3" },
     { name = "nba-api", marker = "extra == 'nba'", specifier = ">=1.4" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "oddsharvester", marker = "extra == 'backfill'", specifier = ">=0.3" },
+    { name = "oddsharvester", marker = "extra == 'backfill'", specifier = "==0.3.0" },
     { name = "penaltyblog", marker = "extra == 'football'", specifier = ">=1.11" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },

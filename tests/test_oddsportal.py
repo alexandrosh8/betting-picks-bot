@@ -109,6 +109,42 @@ async def test_unknown_sport_key_returns_empty() -> None:
     assert await loader.fetch_odds("basketball_nba") == []
 
 
+async def test_zero_snapshots_with_matches_warns_and_records_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Matches listed but ZERO odds rows parsed = selector/DOM break or
+    anti-bot wall (0 rows + 0 parse errors -> suspect anti-bot). The cycle
+    still completes, so this must be LOUD (WARNING) and the listing count
+    must be recorded for the poll-liveness payload."""
+    import logging
+
+    bare = {k: v for k, v in MATCH.items() if not str(k).endswith("_market")}
+    loader = make_loader(EventDirectory(), [bare])
+    with caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal"):
+        snapshots = await loader.fetch_odds("soccer")
+    assert snapshots == []
+    assert loader.last_fetch_matches["soccer"] == 1
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("0 odds snapshots" in r.getMessage() for r in warnings)
+
+    # healthy fetch: counts recorded, NO warning
+    caplog.clear()
+    loader_ok = make_loader(EventDirectory(), [MATCH])
+    with caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal"):
+        assert await loader_ok.fetch_odds("soccer")
+    assert loader_ok.last_fetch_matches["soccer"] == 1
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    # zero matches (empty slate / listing-level block) is NOT this warning's
+    # job — the matches_found=0 liveness record covers it
+    caplog.clear()
+    loader_empty = make_loader(EventDirectory(), [])
+    with caplog.at_level(logging.INFO, logger="app.ingestion.oddsportal"):
+        assert await loader_empty.fetch_odds("soccer") == []
+    assert loader_empty.last_fetch_matches["soccer"] == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 async def test_malformed_entries_are_skipped() -> None:
     bad = dict(MATCH)
     bad["1x2_market"] = [

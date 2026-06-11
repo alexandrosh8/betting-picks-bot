@@ -10,19 +10,31 @@ Covers the 2026-06-11 live-log findings:
   warning is by-design noise for exchanges only.
 """
 
+import ast
+import importlib.util
+import inspect
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-pytest.importorskip("oddsharvester")
+pytest.importorskip(
+    "oddsharvester",
+    reason="oddsharvester not installed — run 'uv sync --extra backfill' to cover these patches",
+)
 
+from app.ingestion.base import EventDirectory  # noqa: E402
 from app.ingestion.oddsportal import (  # noqa: E402
+    OddsPortalLoader,
     _ExchangeIncompleteOddsFilter,
     _is_real_more_button,
     _patch_upstream_quirks,
+    _patched_click_more_if_market_hidden,
+    _patched_extract_bookmaker_name,
     _patched_tab_selectors,
+    _patched_wait_and_click,
     _patched_wait_for_market_switch,
 )
 
@@ -136,6 +148,232 @@ async def test_market_switch_fails_honestly_when_market_absent(
     assert not ok
     assert page.waits == 3  # honoured max_attempts
     assert any("verification failed" in r.message for r in caplog.records)
+
+
+# --- 'More' dropdown navigation (consent-click fix) -------------------------------
+
+
+class _ClickableElement:
+    def __init__(self, text: str | None, visible: bool = True) -> None:
+        self._text = text
+        self._visible = visible
+        self.clicks = 0
+
+    async def is_visible(self) -> bool:
+        return self._visible
+
+    async def text_content(self) -> str | None:
+        return self._text
+
+    async def click(self) -> None:
+        self.clicks += 1
+
+
+class _MoreDropdownPage:
+    """Duck-typed Page: MORE_BUTTON_SELECTORS queries return the tab-bar
+    candidates; every other selector returns the dropdown entries."""
+
+    def __init__(self, more: list[_ClickableElement], dropdown: list[_ClickableElement]) -> None:
+        self._more = more
+        self._dropdown = dropdown
+
+    async def wait_for_timeout(self, _ms: int) -> None:
+        return None
+
+    async def query_selector_all(self, selector: str) -> list[_ClickableElement]:
+        from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
+
+        if selector in OddsPortalSelectors.MORE_BUTTON_SELECTORS:
+            return self._more
+        return self._dropdown
+
+
+@pytest.mark.asyncio
+async def test_click_more_skips_consent_and_hidden_nodes() -> None:
+    """The headline consent-click fix: the visible OneTrust blob (its text
+    contains 'more') and hidden ot-* nodes must be SKIPPED; the real 'More'
+    tab is clicked, then only a VISIBLE dropdown entry."""
+    hidden_ot = _ClickableElement("More", visible=False)  # hidden consent leftover
+    consent = _ClickableElement(_CONSENT_BLOB, visible=True)
+    real_more = _ClickableElement("More", visible=True)
+    hidden_entry = _ClickableElement("Home/Away", visible=False)
+    real_entry = _ClickableElement("Home/Away", visible=True)
+    page = _MoreDropdownPage(
+        more=[hidden_ot, consent, real_more], dropdown=[hidden_entry, real_entry]
+    )
+    assert await _patched_click_more_if_market_hidden(_nav_self(), page, "Home/Away")
+    # a regression that clicks the hidden ot-* node or the consent dialog
+    # fails on the next two lines
+    assert hidden_ot.clicks == 0
+    assert consent.clicks == 0
+    assert real_more.clicks == 1
+    assert hidden_entry.clicks == 0
+    assert real_entry.clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_click_more_reports_absence_without_clicking() -> None:
+    # Only consent/hidden candidates on the page -> no 'More' to click; the
+    # dropdown must never be probed and nothing may be clicked.
+    consent = _ClickableElement(_CONSENT_BLOB)
+    hidden = _ClickableElement("More", visible=False)
+    entry = _ClickableElement("Home/Away")
+    page = _MoreDropdownPage(more=[consent, hidden], dropdown=[entry])
+    assert not await _patched_click_more_if_market_hidden(_nav_self(), page, "Home/Away")
+    assert consent.clicks == hidden.clicks == entry.clicks == 0
+
+
+# --- _wait_and_click (fallback-chain quietness) -------------------------------------
+
+
+class _WaitClickPage:
+    def __init__(self, element: _ClickableElement | None, timeout_expires: bool = False) -> None:
+        self._element = element
+        self._timeout_expires = timeout_expires
+
+    async def wait_for_selector(self, selector: str, timeout: float) -> None:
+        if self._timeout_expires:
+            raise TimeoutError(f"waiting for {selector}")  # playwright-timeout stand-in
+
+    async def query_selector(self, selector: str) -> _ClickableElement | None:
+        return self._element
+
+
+@pytest.mark.asyncio
+async def test_wait_and_click_clicks_present_element() -> None:
+    element = _ClickableElement("Over/Under")
+    assert await _patched_wait_and_click(_nav_self(), _WaitClickPage(element), "li.tab", timeout=5)
+    assert element.clicks == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_and_click_delegates_text_search_to_click_by_text() -> None:
+    seen: list[tuple[str, str]] = []
+
+    async def click_by_text(page: Any, selector: str, text: str) -> bool:
+        seen.append((selector, text))
+        return True
+
+    nav = SimpleNamespace(
+        logger=logging.getLogger("test.NavigationManager"), _click_by_text=click_by_text
+    )
+    page = _WaitClickPage(_ClickableElement("unused"))
+    assert await _patched_wait_and_click(nav, page, "li.tab", text="Over/Under", timeout=5)
+    assert seen == [("li.tab", "Over/Under")]
+
+
+@pytest.mark.asyncio
+async def test_wait_and_click_timeout_is_quiet_and_returns_false(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A selector missing its window mid fallback-chain is the EXPECTED path:
+    return False and log at DEBUG only (upstream logged ERROR per selector —
+    the warning storm). navigate_to_tab reports the real failure once."""
+    page = _WaitClickPage(None, timeout_expires=True)
+    with caplog.at_level(logging.DEBUG, logger="test.NavigationManager"):
+        ok = await _patched_wait_and_click(_nav_self(), page, "li.gone", timeout=5)
+    assert not ok
+    ours = [r for r in caplog.records if "li.gone" in r.getMessage()]
+    assert ours  # the miss is still visible at debug
+    assert all(r.levelno == logging.DEBUG for r in ours)
+
+
+@pytest.mark.asyncio
+async def test_wait_and_click_handles_vanished_element() -> None:
+    # selector appeared but the node vanished before query_selector — the
+    # upstream version crashes on None.click(); ours reports failure.
+    page = _WaitClickPage(None)
+    assert not await _patched_wait_and_click(_nav_self(), page, "li.tab", timeout=5)
+
+
+# --- upstream signature pinning -------------------------------------------------
+
+
+def _upstream_method_params(module_name: str, class_name: str, method_name: str) -> list[str]:
+    """Parameter names of an upstream method, read from the INSTALLED source
+    via AST — runtime patching replaces the live class attributes, so
+    inspecting the class would just reflect our own functions back."""
+    spec = importlib.util.find_spec(module_name)
+    assert spec is not None and spec.origin is not None
+    tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if (
+                    isinstance(item, ast.AsyncFunctionDef | ast.FunctionDef)
+                    and item.name == method_name
+                ):
+                    args = item.args
+                    return [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+    raise AssertionError(f"{class_name}.{method_name} not found in {module_name}")
+
+
+def test_patched_methods_match_upstream_parameter_names() -> None:
+    """A silent oddsharvester version bump that reshapes a patched method
+    must turn RED here, not corrupt scraping at runtime (in-repo memory
+    pitfall: re-verify runtime patches on any version bump)."""
+    cases: list[tuple[Any, str, str, str]] = [
+        (
+            _patched_wait_for_market_switch,
+            "oddsharvester.core.market_extraction.navigation_manager",
+            "NavigationManager",
+            "wait_for_market_switch",
+        ),
+        (
+            _patched_wait_and_click,
+            "oddsharvester.core.browser.market_navigation",
+            "MarketTabNavigator",
+            "_wait_and_click",
+        ),
+        (
+            _patched_click_more_if_market_hidden,
+            "oddsharvester.core.browser.market_navigation",
+            "MarketTabNavigator",
+            "_click_more_if_market_hidden",
+        ),
+        (
+            _patched_extract_bookmaker_name,
+            "oddsharvester.core.market_extraction.odds_parser",
+            "OddsParser",
+            "_extract_bookmaker_name",
+        ),
+    ]
+    for patched, module_name, class_name, method_name in cases:
+        ours = list(inspect.signature(patched).parameters)
+        upstream = _upstream_method_params(module_name, class_name, method_name)
+        assert ours == upstream, (
+            f"{class_name}.{method_name}: patched params {ours} != upstream {upstream}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_forwarded_run_scraper_kwargs_subset_of_signature() -> None:
+    """Every kwarg our loader forwards must exist on the INSTALLED
+    run_scraper — a version bump that renames or drops one turns red here
+    instead of failing at the first live scrape."""
+    from oddsharvester.core.scraper_app import run_scraper
+
+    recorded: list[dict[str, Any]] = []
+
+    async def recording_scrape(**kwargs: Any) -> Any:
+        recorded.append(kwargs)
+        return SimpleNamespace(success=[], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=recording_scrape,
+        days_ahead=0,
+    )
+    await loader.fetch_odds("soccer")
+    await loader.fetch_match_odds("soccer", ["https://www.oddsportal.com/football/a/b/"])
+    assert len(recorded) == 2  # both scrape paths exercised
+
+    params = set(inspect.signature(run_scraper).parameters)
+    forwarded = {name for call in recorded for name in call}
+    forwarded.add("command")  # added by _default_scrape itself
+    missing = forwarded - params
+    assert not missing, f"kwargs unknown to installed run_scraper: {sorted(missing)}"
 
 
 # --- patch application ----------------------------------------------------------
@@ -253,9 +491,23 @@ def test_scrape_gap_filter_downgrades_expected_misses_to_info() -> None:
     assert other.levelno == logging.WARNING  # untouched
 
 
+def test_patch_guard_rejects_unverified_upstream_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime patches replace 0.3.0 PRIVATE internals; any other
+    installed version must hard-fail loudly instead of silently corrupting
+    scraping (in-repo memory pitfall: re-verify patches on version bumps)."""
+    import importlib.metadata
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.4.0")
+    with pytest.raises(RuntimeError, match=r"oddsharvester 0\.4\.0 != 0\.3\.0"):
+        _patch_upstream_quirks()
+
+
 def test_patch_upstream_quirks_applies_and_is_idempotent() -> None:
     from oddsharvester.core.browser.market_navigation import MarketTabNavigator
     from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
+    from oddsharvester.core.market_extraction.odds_parser import OddsParser
     from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
 
     _patch_upstream_quirks()
@@ -265,6 +517,8 @@ def test_patch_upstream_quirks_applies_and_is_idempotent() -> None:
     assert MarketTabNavigator._click_more_if_market_hidden.__module__ == (
         "app.ingestion.oddsportal"
     )
+    assert MarketTabNavigator._wait_and_click.__module__ == "app.ingestion.oddsportal"
+    assert OddsParser._extract_bookmaker_name.__module__ == "app.ingestion.oddsportal"
     assert "li[class*='tab']" not in OddsPortalSelectors.MARKET_TAB_SELECTORS
     parser_filters = [
         f

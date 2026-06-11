@@ -29,12 +29,11 @@ from app.ingestion.football_data import MatchRow, fetch_season_csv, parse_season
 def make_fit_fn(xi: float):  # noqa: ANN201 - returns a closure
     """Returns a FitFn that fits penaltyblog Dixon-Coles and yields a
     (home, away) -> (p_home, p_draw, p_away) pricer."""
-    import math as _math
 
     def fit_fn(history, as_of: date):  # noqa: ANN001, ANN202
-        from penaltyblog.models import DixonColesGoalModel
+        from penaltyblog.models import DixonColesGoalModel, dixon_coles_weights
 
-        weights = [_math.exp(-xi * (as_of - h.match_date).days) for h in history]
+        weights = dixon_coles_weights([h.match_date for h in history], xi, base_date=as_of)
         model = DixonColesGoalModel(
             goals_home=[h.home_goals for h in history],
             goals_away=[h.away_goals for h in history],
@@ -42,7 +41,14 @@ def make_fit_fn(xi: float):  # noqa: ANN201 - returns a closure
             teams_away=[h.away_team for h in history],
             weights=weights,
         )
-        model.fit(minimizer_options={"maxiter": 1000})
+        # Docs-example tolerances; on optimizer failure retry once with
+        # numerical gradients ("sometimes more stable" per the pb docstring)
+        # so one degenerate weekly refit window doesn't kill the backtest.
+        options = {"maxiter": 3000, "gtol": 1e-8, "ftol": 1e-9}
+        try:
+            model.fit(minimizer_options=dict(options))
+        except ValueError:
+            model.fit(minimizer_options=dict(options), use_gradient=False)
         trained = {t for h in history for t in (h.home_team, h.away_team)}
 
         def priced(home: str, away: str):  # noqa: ANN202

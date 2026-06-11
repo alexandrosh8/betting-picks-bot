@@ -5,8 +5,11 @@ Synthetic fixture: 4 teams, repeated double round-robins where Alpha is
 clearly strongest at home.
 """
 
+import math
 from datetime import date, timedelta
+from importlib import metadata
 
+import numpy as np
 import pytest
 
 pytest.importorskip("penaltyblog")
@@ -164,3 +167,166 @@ def test_fit_requires_minimum_history() -> None:
     model = DixonColesFootballModel(EventDirectory())
     with pytest.raises(ValueError):
         model.fit(synthetic_history()[:10], AS_OF)
+
+
+# --- honest version label -----------------------------------------------
+
+
+def test_version_label_tracks_installed_penaltyblog() -> None:
+    """Registry rows must stay honest across penaltyblog bumps — the label
+    derives from the installed distribution, never a hardcoded literal."""
+    assert DixonColesFootballModel.version == f"pb-{metadata.version('penaltyblog')}"
+
+
+# --- totals push-mass guard ----------------------------------------------
+
+
+@pytest.mark.parametrize("line", [3.0, 2.25])
+def test_totals_line_rejects_integer_and_quarter_lines(line: float) -> None:
+    """grid.total_goals() silently drops push mass: over+under < 1 on
+    integer/quarter lines, corrupting EV. Only half lines are safe."""
+    with pytest.raises(ValueError, match="half line"):
+        DixonColesFootballModel(EventDirectory(), totals_line=line)
+
+
+@pytest.mark.parametrize("line", [2.5, 3.5])
+def test_totals_line_accepts_half_lines(line: float) -> None:
+    model = DixonColesFootballModel(EventDirectory(), totals_line=line)
+    assert model._totals_line == line
+
+
+# --- decay-weights helper equivalence -------------------------------------
+
+
+def test_dixon_coles_weights_match_manual_exponential_decay() -> None:
+    """fit() now uses penaltyblog's documented dixon_coles_weights helper;
+    it must equal the manual math.exp(-xi*days) computation it replaced."""
+    from penaltyblog.models import dixon_coles_weights
+
+    xi = 0.0018
+    dates = [AS_OF - timedelta(days=d) for d in (0, 1, 7, 30, 180, 365)]
+    manual = [math.exp(-xi * (AS_OF - d).days) for d in dates]
+    helper = dixon_coles_weights(dates, xi, base_date=AS_OF)
+    assert np.allclose(helper, manual, rtol=1e-15, atol=0.0)
+
+
+# --- fit robustness: numerical-gradient retry ------------------------------
+
+
+def _stub_pb_fit(monkeypatch: pytest.MonkeyPatch, fail_times: int) -> list[dict[str, object]]:
+    """Replace penaltyblog's DixonColesGoalModel with a stub whose fit()
+    fails `fail_times` times, recording every call's options/gradient flag."""
+    import penaltyblog.models as pb_models
+
+    calls: list[dict[str, object]] = []
+
+    class StubModel:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def fit(self, minimizer_options: dict | None = None, use_gradient: bool = True) -> None:
+            calls.append({"minimizer_options": minimizer_options, "use_gradient": use_gradient})
+            if len(calls) <= fail_times:
+                raise ValueError("Optimization failed with message: stub failure")
+
+    monkeypatch.setattr(pb_models, "DixonColesGoalModel", StubModel)
+    return calls
+
+
+def test_fit_retries_once_with_numerical_gradient(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_pb_fit(monkeypatch, fail_times=1)
+    model = DixonColesFootballModel(EventDirectory())
+    model.fit(synthetic_history(), AS_OF)  # must NOT raise: retry rescues it
+    assert model.fitted
+    assert len(calls) == 2
+    assert calls[0]["use_gradient"] is True
+    assert calls[1]["use_gradient"] is False
+    # docs-example tolerances on BOTH attempts
+    expected = {"maxiter": 3000, "gtol": 1e-8, "ftol": 1e-9}
+    assert calls[0]["minimizer_options"] == expected
+    assert calls[1]["minimizer_options"] == expected
+
+
+def test_fit_failing_twice_preserves_no_model_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pb_fit(monkeypatch, fail_times=2)
+    model = DixonColesFootballModel(EventDirectory())
+    with pytest.raises(ValueError, match="Optimization failed"):
+        model.fit(synthetic_history(), AS_OF)
+    assert not model.fitted  # unchanged failure mode: no model this cycle
+    assert len(calls) == 2  # exactly one retry, never more
+
+
+# --- batch prediction (predict_many fast-path) -----------------------------
+
+
+def test_predict_matches_matches_per_fixture_output(
+    fitted: tuple[DixonColesFootballModel, EventDirectory],
+) -> None:
+    """Batch results are identical to predict_match per fixture, and an
+    unresolvable team skips ONLY its own fixture (empty tuple)."""
+    model, _ = fitted
+    fixtures = [
+        ("Alpha", "Beta FC"),
+        ("Gamma City", "Omega Unknowns"),  # unresolvable away side
+        ("Delta Town", "Gamma City"),
+    ]
+    batch = model.predict_matches(fixtures)
+    assert len(batch) == 3
+    assert batch[0] == model.predict_match("Alpha", "Beta FC")
+    assert batch[1] == ()
+    assert batch[2] == model.predict_match("Delta Town", "Gamma City")
+
+
+def test_predict_matches_respects_per_fixture_neutral_flags(
+    fitted: tuple[DixonColesFootballModel, EventDirectory],
+) -> None:
+    model, _ = fitted
+    (home_adv,) = model.predict_matches([("Alpha", "Beta FC")], neutral=[False])
+    (neutral,) = model.predict_matches([("Alpha", "Beta FC")], neutral=[True])
+    assert neutral == model.predict_match("Alpha", "Beta FC", neutral=True)
+    by_key = lambda preds: {(p.market, p.selection): p.probability for p in preds}  # noqa: E731
+    # removing home advantage must lower the home side's win probability
+    assert by_key(neutral)[(Market.H2H, "Alpha")] < by_key(home_adv)[(Market.H2H, "Alpha")]
+
+
+def test_predict_matches_falls_back_per_fixture_when_batch_fails(
+    fitted: tuple[DixonColesFootballModel, EventDirectory],
+) -> None:
+    """predict_many is all-or-nothing: one invalid grid raises for the whole
+    batch. The fallback reprices per fixture so a single bad matchup yields
+    () while the rest of the slate survives — current behavior, preserved."""
+    model, _ = fitted
+
+    class FlakyBatch:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def predict_many(self, *args: object, **kwargs: object) -> None:
+            raise ValueError("goal_matrix contains negative probabilities")
+
+        def predict(self, home: str, away: str, neutral_venue: bool = False) -> object:
+            if home == "Gamma City":
+                raise ValueError("goal_matrix contains negative probabilities")
+            return self._inner.predict(home, away, neutral_venue=neutral_venue)  # type: ignore[attr-defined]
+
+    shadow = DixonColesFootballModel(EventDirectory(), confidence=0.7)  # match fixture
+    shadow._trained = dict(model._trained)
+    shadow._model = FlakyBatch(model._model)
+    batch = shadow.predict_matches([("Alpha", "Beta FC"), ("Gamma City", "Delta Town")])
+    assert batch[0] == model.predict_match("Alpha", "Beta FC")
+    assert batch[1] == ()  # the bad matchup skips itself, not the slate
+
+
+def test_predict_matches_requires_parallel_neutral(
+    fitted: tuple[DixonColesFootballModel, EventDirectory],
+) -> None:
+    model, _ = fitted
+    with pytest.raises(ValueError, match="parallel"):
+        model.predict_matches([("Alpha", "Beta FC")], neutral=[True, False])
+
+
+def test_predict_matches_unfitted_returns_empty_per_fixture() -> None:
+    model = DixonColesFootballModel(EventDirectory())
+    assert model.predict_matches([("Alpha", "Beta FC"), ("X", "Y")]) == ((), ())

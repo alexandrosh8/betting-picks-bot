@@ -126,8 +126,8 @@ async def main() -> None:
     matches = await scrape_wc()
     print(f"    {len(matches)} matches with odds scraped\n")
 
-    picks: list[WCPick] = []
     unresolved = 0
+    candidates: list[tuple[dict, str, str, bool]] = []
     for m in matches:
         home, away = (m.get("home_team") or "").strip(), (m.get("away_team") or "").strip()
         if not home or not away:
@@ -144,11 +144,17 @@ async def main() -> None:
             (_norm(resolved_home), _norm(resolved_away)),
             _norm(resolved_home) not in HOST_NATIONS,
         )
-        preds = {
-            p.selection: p.probability
-            for p in model.predict_match(home, away, neutral=neutral_flag)
-            if p.market is Market.H2H
-        }
+        candidates.append((m, home, away, neutral_flag))
+
+    # one batch predict_many call for the whole slate (per-fixture skip
+    # semantics preserved inside predict_matches)
+    slate = model.predict_matches(
+        [(home, away) for _, home, away, _ in candidates],
+        neutral=[flag for _, _, _, flag in candidates],
+    )
+    picks: list[WCPick] = []
+    for (m, home, away, neutral_flag), fixture_preds in zip(candidates, slate, strict=True):
+        preds = {p.selection: p.probability for p in fixture_preds if p.market is Market.H2H}
         if not preds:
             continue
         for entry in m.get("1x2_market") or []:

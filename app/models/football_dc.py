@@ -12,10 +12,10 @@ The penaltyblog import is lazy (football extra): `uv sync --extra football`.
 """
 
 import logging
-import math
 import re
 from collections.abc import Sequence
 from datetime import date
+from importlib import metadata
 from typing import Any
 
 from app.ingestion.base import EventDirectory
@@ -49,11 +49,27 @@ def _normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", name.lower()).strip()
 
 
+def _penaltyblog_version() -> str:
+    """Registry-honest model version derived from the installed package, so
+    rows written under `version` stay truthful across penaltyblog bumps."""
+    try:
+        return f"pb-{metadata.version('penaltyblog')}"
+    except metadata.PackageNotFoundError:  # football extra not installed
+        return "pb-unavailable"
+
+
+# Optimizer tolerances from penaltyblog's own docs example
+# (docs/models/example.ipynb upstream): a 3x iteration budget plus explicit
+# tolerances keep thin/degenerate samples convergent where the library
+# default (maxiter=1000) hard-fails with "Optimization failed".
+_FIT_MINIMIZER_OPTIONS: dict[str, float] = {"maxiter": 3000, "gtol": 1e-8, "ftol": 1e-9}
+
+
 class DixonColesFootballModel:
     """ProbabilityModel backed by penaltyblog.models.DixonColesGoalModel."""
 
     name = "football-dixon-coles-penaltyblog"
-    version = "pb-1.11"
+    version = _penaltyblog_version()
 
     def __init__(
         self,
@@ -64,6 +80,19 @@ class DixonColesFootballModel:
         aliases: dict[str, str] | None = None,
         predict_neutral: bool = False,
     ) -> None:
+        if totals_line % 1 != 0.5:
+            # grid.total_goals("over"/"under") silently EXCLUDES the push
+            # probability, so on integer/quarter lines over+under sums < 1
+            # and every EV computed from it is wrong. Half lines have no
+            # push mass and are safe. Supporting other lines requires
+            # grid.totals(line) -> (under, push, over) plus a push-aware
+            # EV path downstream.
+            raise ValueError(
+                f"totals_line={totals_line} is not a half line (x.5): integer/"
+                "quarter lines carry push probability that total_goals() "
+                "silently drops; use grid.totals(line) -> (under, push, over) "
+                "with push-aware EV before enabling such lines"
+            )
         self._directory = directory
         self._xi = xi
         self._confidence = confidence
@@ -103,9 +132,9 @@ class DixonColesFootballModel:
         if len(usable) < 50:
             raise ValueError(f"need >= 50 historical matches to fit, got {len(usable)}")
 
-        from penaltyblog.models import DixonColesGoalModel
+        from penaltyblog.models import DixonColesGoalModel, dixon_coles_weights
 
-        weights = [math.exp(-self._xi * (as_of - r.match_date).days) for r, _ in usable]
+        weights = dixon_coles_weights([r.match_date for r, _ in usable], self._xi, base_date=as_of)
         neutral_flag = [1 if n else 0 for _, n in usable]
         model = DixonColesGoalModel(
             goals_home=[r.home_goals for r, _ in usable],
@@ -115,7 +144,18 @@ class DixonColesFootballModel:
             weights=weights,
             neutral_venue=neutral_flag if any(neutral_flag) else None,
         )
-        model.fit(minimizer_options={"maxiter": 1000})
+        try:
+            model.fit(minimizer_options=dict(_FIT_MINIMIZER_OPTIONS))
+        except ValueError:
+            # The analytical gradient can stall SLSQP on degenerate/thin
+            # samples; penaltyblog's fit() docstring calls numerical
+            # gradients "sometimes more stable". Retry once — a second
+            # failure propagates (existing no-model-for-the-cycle behavior).
+            logger.info(
+                "dixon-coles fit failed with analytical gradient; "
+                "retrying once with use_gradient=False"
+            )
+            model.fit(minimizer_options=dict(_FIT_MINIMIZER_OPTIONS), use_gradient=False)
         self._model = model
         self._trained = {
             _normalize(team): team for r, _ in usable for team in (r.home_team, r.away_team)
@@ -181,6 +221,65 @@ class DixonColesFootballModel:
             logger.debug("team resolution miss: %r->%r, %r->%r", home_raw, home, away_raw, away)
             return ()
         neutral_venue = self._predict_neutral if neutral is None else neutral
+        return self._predict_resolved(home_raw, away_raw, home, away, neutral_venue)
+
+    def predict_matches(
+        self,
+        fixtures: Sequence[tuple[str, str]],
+        neutral: Sequence[bool] | None = None,
+    ) -> tuple[tuple[PredictedProbability, ...], ...]:
+        """Price a slate of (home_raw, away_raw) fixtures in ONE penaltyblog
+        predict_many call (batch fast-path with shared validation, pb>=1.10).
+
+        Per-fixture skip semantics are preserved exactly: a fixture whose
+        teams do not resolve, or whose score grid is invalid, yields an
+        empty tuple without affecting the rest of the slate. predict_many
+        itself is all-or-nothing (one invalid grid raises for the whole
+        batch), so on ValueError the slate is repriced per fixture.
+        """
+        if neutral is not None and len(neutral) != len(fixtures):
+            raise ValueError("neutral must be parallel to fixtures")
+        results: list[tuple[PredictedProbability, ...]] = [() for _ in fixtures]
+        if self._model is None or not fixtures:
+            return tuple(results)
+        flags = [self._predict_neutral] * len(fixtures) if neutral is None else list(neutral)
+        # (slate index, home_raw, away_raw, home trained, away trained, neutral)
+        resolved: list[tuple[int, str, str, str, str, bool]] = []
+        for i, (home_raw, away_raw) in enumerate(fixtures):
+            home = self.resolve_team(home_raw)
+            away = self.resolve_team(away_raw)
+            if home is None or away is None:
+                logger.debug("team resolution miss: %r->%r, %r->%r", home_raw, home, away_raw, away)
+                continue
+            resolved.append((i, home_raw, away_raw, home, away, flags[i]))
+        if not resolved:
+            return tuple(results)
+        try:
+            grids = self._model.predict_many(
+                [home for _, _, _, home, _, _ in resolved],
+                [away for _, _, _, _, away, _ in resolved],
+                neutral_venue=[nv for *_, nv in resolved],
+            )
+        except ValueError:
+            # One invalid grid (low-score rho correction on an extreme
+            # matchup) fails the entire predict_many batch — recover the
+            # priceable fixtures via the per-fixture path instead.
+            logger.info(
+                "dixon-coles batch prediction failed; repricing %d fixtures individually",
+                len(resolved),
+            )
+            for i, home_raw, away_raw, home, away, nv in resolved:
+                results[i] = self._predict_resolved(home_raw, away_raw, home, away, nv)
+            return tuple(results)
+        for (i, home_raw, away_raw, _, _, _), grid in zip(resolved, grids, strict=True):
+            results[i] = self._grid_predictions(grid, home_raw, away_raw)
+        return tuple(results)
+
+    def _predict_resolved(
+        self, home_raw: str, away_raw: str, home: str, away: str, neutral_venue: bool
+    ) -> tuple[PredictedProbability, ...]:
+        """Single-fixture pricing for already-resolved trained team names.
+        Callers guarantee self._model is fitted."""
         try:
             grid = self._model.predict(home, away, neutral_venue=neutral_venue)
         except ValueError as exc:
@@ -188,9 +287,16 @@ class DixonColesFootballModel:
             # for extreme matchups; skip the fixture rather than crash the poll.
             logger.warning("dixon-coles grid invalid for %s vs %s: %s", home, away, exc)
             return ()
+        return self._grid_predictions(grid, home_raw, away_raw)
+
+    def _grid_predictions(
+        self, grid: Any, home_raw: str, away_raw: str
+    ) -> tuple[PredictedProbability, ...]:
         line = self._totals_line
         conf = self._confidence
         # Selection strings MUST match app/ingestion/oddsportal.py.
+        # total_goals() is push-blind, safe ONLY because __init__ enforces
+        # half lines (push mass is zero at x.5).
         return (
             PredictedProbability(Market.H2H, home_raw, float(grid.home_win), conf),
             PredictedProbability(Market.H2H, "Draw", float(grid.draw), conf),

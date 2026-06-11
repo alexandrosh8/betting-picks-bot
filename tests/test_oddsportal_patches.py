@@ -222,6 +222,30 @@ def test_scrape_gap_filter_downgrades_expected_misses_to_info() -> None:
     assert f.filter(extractor)
     assert extractor.levelno == logging.INFO
 
+    tab_missing = logging.LogRecord(
+        "MarketTabNavigator",
+        logging.ERROR,
+        __file__,
+        0,
+        "Failed to find or click the Home/Away tab (searched visible tabs and 'More' dropdown).",
+        None,
+        None,
+    )
+    assert f.filter(tab_missing)
+    assert tab_missing.levelno == logging.INFO
+
+    bookies_nav = logging.LogRecord(
+        "SelectionManager",
+        logging.WARNING,
+        __file__,
+        0,
+        "bookies-filter navigation not found on page. Skipping selection.",
+        None,
+        None,
+    )
+    assert f.filter(bookies_nav)
+    assert bookies_nav.levelno == logging.INFO
+
     other = logging.LogRecord(
         "PageScroller", logging.WARNING, __file__, 0, "something else broke", None, None
     )

@@ -152,12 +152,16 @@ def _differential_margin(odds: _FloatArray, q: _FloatArray) -> _FloatArray:
     margin = q.sum() - 1.0
     n = float(odds.size)
     denom = n - margin * odds
+    # Longshot odds with a fat margin push the denominator non-positive: the
+    # method simply doesn't apply there and the multiplicative fallback is
+    # the design (same doctrine as Shin's underround fallback) — debug, not
+    # a warning per affected market per cycle.
     if np.any(denom <= 0.0):
-        logger.warning("differential-margin devig denominator <= 0; falling back")
+        logger.debug("differential-margin devig denominator <= 0; falling back")
         return _multiplicative(q)
     p = denom / (n * odds)
     if np.any(p <= 0.0) or np.any(p >= 1.0):
-        logger.warning("differential-margin devig out-of-range probability; falling back")
+        logger.debug("differential-margin devig out-of-range probability; falling back")
         return _multiplicative(q)
     return p
 

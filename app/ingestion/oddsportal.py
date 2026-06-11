@@ -322,6 +322,10 @@ class _ScrapeGapDowngradeFilter(logging.Filter):
     _NEEDLES = (
         "Failed to find and click parent of element",
         "Failed to find or select",
+        # A match page without the market tab at all (thin/obscure leagues)
+        # or without the bookies-filter nav is the same expected-gap class.
+        "Failed to find or click",
+        "bookies-filter navigation not found",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -365,8 +369,13 @@ def _patch_upstream_quirks() -> None:
     MarketTabNavigator._click_more_if_market_hidden = _patched_click_more_if_market_hidden
     OddsParser._extract_bookmaker_name = _patched_extract_bookmaker_name
     logging.getLogger("OddsParser").addFilter(_EXCHANGE_NOISE_FILTER)
-    logging.getLogger("PageScroller").addFilter(_SCRAPE_GAP_FILTER)
-    logging.getLogger("OddsPortalMarketExtractor").addFilter(_SCRAPE_GAP_FILTER)
+    for gap_logger in (
+        "PageScroller",
+        "OddsPortalMarketExtractor",
+        "MarketTabNavigator",
+        "SelectionManager",
+    ):
+        logging.getLogger(gap_logger).addFilter(_SCRAPE_GAP_FILTER)
     _upstream_patched = True
 
 

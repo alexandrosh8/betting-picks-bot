@@ -106,6 +106,23 @@ def test_shin_oracle_two_way_matches_additive_equivalence() -> None:
     assert probs == pytest.approx(expected, abs=1e-6)
 
 
+def test_differential_margin_extreme_longshot_falls_back_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Longshot odds with a fat margin make Buchdahl's denominator
+    # n - margin*odds_i non-positive: the multiplicative fallback IS the
+    # design (same doctrine as Shin's underround fallback above) — debug,
+    # not a warning per market per cycle.
+    import logging
+
+    odds = [1.02, 8.0, 81.0]  # margin*81 >> n=3
+    with caplog.at_level(logging.DEBUG, logger="app.probabilities.devig"):
+        probs = devig(odds, method=DevigMethod.DIFFERENTIAL_MARGIN)
+    assert math.isclose(sum(probs), 1.0, abs_tol=1e-9)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("denominator" in r.message for r in caplog.records)  # visible at debug
+
+
 def test_shin_underround_falls_back_quietly(caplog: pytest.LogCaptureFixture) -> None:
     # Max-of-books composite odds are routinely underround; Shin's fallback
     # there is documented-expected and must NOT warn (a backtest produced

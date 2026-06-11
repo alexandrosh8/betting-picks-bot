@@ -64,6 +64,24 @@ Crystal view of every pick: match, kickoff (your local time), market,
 selection, book, odds, edge, recommended stake, CLV badge, status — with
 search, status filter, summary cards, and 60s auto-refresh.
 
+**Reading the dashboard** (so a quiet screen isn't mistaken for a broken
+one — and a stale one isn't mistaken for healthy):
+
+- It lists **value picks, not the fixture schedule**. A game with no pick
+  means no book beat the sharp fair price by ≥ the edge gate — typical for
+  heavily-traded matches (e.g. a World Cup opener). Off-season leagues
+  yield nothing until they resume.
+- Each cycle scrapes **today + tomorrow (UTC)** per configured league
+  (`ODDSPORTAL_DAYS_AHEAD`); far-future fixtures are skipped by design.
+- Every row shows **"picked Xh ago — verify price"**: always re-check the
+  book's current price before acting; soft-book prices move.
+- A ⚠ banner appears when **no odds poll finished in 45 min** — the engine
+  is down or its first multi-league cycle is still running. `GET /health`
+  shows per-sport poll timestamps (`polls`) and upstream release checks.
+- Picks come from the **best price across all scraped bookmakers** (~16
+  books per market on OddsPortal) — the named book held the best price at
+  scrape time; it is not a single-bookie feed.
+
 Or raw JSON:
 
 ```bash

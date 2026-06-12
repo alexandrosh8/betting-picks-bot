@@ -141,3 +141,62 @@ positive, and the edge survives even the Max-of-books closing reference
 - `scripts/value_backtest.py` — the v2 validation above (re-runnable).
 - `scripts/value_picks.py` — LIVE picks with min-odds gate; names the exact
   book and price.
+
+## Track D — staking-policy evaluation (2026-06-12): drawdown-constrained Kelly vs the deployed 0.25x + 2% cap
+
+- **Question:** as a _recommended-stake_ policy (informational only — this
+  platform never places bets), does the drawdown-constrained fractional-Kelly
+  variant (`app/risk/staking.py`, `STAKE_MAX_DRAWDOWN` /
+  `STAKE_MAX_DRAWDOWN_PROBABILITY`, default OFF) beat the deployed default
+  (0.25x Kelly + 2% per-bet cap) or flat staking?
+- **Harness:** `scripts/ml/evaluate_staking.py` (tests:
+  `tests/test_evaluate_staking.py`). Premium stream regenerated with the
+  deployed selection config (differential-margin devig, edge ≥ 0.03, odds ≥
+  1.60, 1x2+ou25, one bet per match-market — construction parity-locked
+  against `scripts/value_backtest.py` by test) on **TRAIN seasons 1920–2324
+  ONLY** — staking is strategy-adjacent, so the spent 2425+2526 holdout was
+  not consulted (`assert_train_only` hard-fails on it). Stakes route through
+  `app.risk.staking.recommended_stake` — the same code path live picks use.
+- **Method:** circular block bootstrap of the chronological stream (10,000
+  paths, block = 20 picks, seed 20260612), all policies paired on the same
+  resampled paths; chronological sanity pass alongside. **The decision
+  criterion was pre-registered in code before the first run** (constants at
+  the top of the script): switch only if a variant (A) improves median
+  log-growth per bet, or (B) cuts P95 max-drawdown ≥ 20% relative while
+  costing ≤ 10% of median growth.
+- **Stream:** n = 249 picks, 2019-08-03…2024-06-02, hit 49.0%, flat ROI
+  +19.5%/bet (in-sample for the selection config — levels are optimistic;
+  the _paired policy comparison_ is the result here, not the level).
+
+| policy (multiplier)                 | medT      | P5        | P95       | g/bet         | medDD     | P95DD     | P(ruin −50%) |
+| ----------------------------------- | --------- | --------- | --------- | ------------- | --------- | --------- | ------------ |
+| flat 1u of 100 (context)            | 1.478     | 1.189     | 1.795     | +0.001570     | 7.4%      | 12.1%     | 0.00%        |
+| **kelly 0.25x + 2% cap (deployed)** | **1.945** | **1.263** | **3.097** | **+0.002673** | **14.3%** | **22.0%** | **0.00%**    |
+| dd 0.50/0.010 (0.250 — no-op)       | 1.945     | 1.263     | 3.097     | +0.002673     | 14.3%     | 22.0%     | 0.00%        |
+| dd 0.50/0.005 (0.231)               | 1.901     | 1.258     | 2.960     | +0.002579     | 13.6%     | 20.9%     | 0.00%        |
+| dd 0.50/0.001 (0.182)               | 1.773     | 1.249     | 2.607     | +0.002301     | 11.3%     | 17.2%     | 0.00%        |
+| dd 0.30/0.050 (0.213)               | 1.857     | 1.256     | 2.838     | +0.002486     | 12.8%     | 19.7%     | 0.00%        |
+| dd 0.30/0.010 (0.144)               | 1.638     | 1.224     | 2.253     | +0.001981     | 9.2%      | 14.0%     | 0.00%        |
+| dd 0.20/0.050 (0.139)               | 1.621     | 1.220     | 2.211     | +0.001939     | 9.0%      | 13.5%     | 0.00%        |
+| dd 0.20/0.010 (0.092)               | 1.435     | 1.166     | 1.786     | +0.001452     | 6.4%      | 9.7%      | 0.00%        |
+
+- **Computed verdict (pre-registered criterion): KEEP the deployed default.**
+  No variant passes: every multiplier-tightening cuts growth roughly in
+  proportion to drawdown. The nearest miss, dd 0.50/0.001, cuts P95
+  max-drawdown 21.8% but costs 13.9% of median growth (budget: ≤ 10%);
+  dd 0.30/0.010 cuts the tail 36% but costs 25.9%. Crucially **P(50%
+  drawdown from peak) is already 0.00% at the deployed default** on this
+  stream — the capped quarter-Kelly sits well below the dangerous zone, so
+  the drawdown constraint has nothing to rescue and only taxes growth.
+  Verdict is stable under block-size sensitivity (10/20/50; criterion was
+  fixed at 20 before running). Flat 1u grows materially slower (medT 1.478
+  vs 1.945) at lower drawdown — context only, per the pre-registration.
+- **No defaults change.** If a user nevertheless wants the most defensible
+  tightening for personal risk preference, the exact .env lines are e.g.
+  `STAKE_MAX_DRAWDOWN=0.5` + `STAKE_MAX_DRAWDOWN_PROBABILITY=0.001`
+  (multiplier 0.182) — informational recommended-stake shaping only, not
+  betting advice, no guarantee of profit.
+- **Limitations:** train slice is in-sample for selection (paired comparison
+  unaffected); daily-exposure ledger (5%) not simulated (per-bet 2% cap
+  dominates at ~50 picks/season); bootstrap treats 20-pick blocks as
+  exchangeable. Full tables: `data/ml/staking_evaluation*.csv` (gitignored).

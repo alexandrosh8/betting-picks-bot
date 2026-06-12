@@ -47,6 +47,11 @@ class PickOut(InternalModel):
     # unless VALUE_ML_FILTER is on (then sub-threshold premium candidates
     # are demoted to the volume tier before alerting).
     value_filter_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Fair-value anchor that produced this pick: "pinnacle" | "sharp" |
+    # "consensus" (app/edge/value.py::anchor_type_for). None for the model
+    # strategy. Persisted so live CLV can be stratified by anchor — the
+    # consensus fallback's live verdict mechanism.
+    anchor_type: str | None = None
     created_at: datetime
     risk_warning: str = "Betting involves risk. Nothing here is guaranteed profit."
     manual_betting_reminder: str = MANUAL_BETTING_REMINDER

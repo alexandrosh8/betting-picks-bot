@@ -498,6 +498,51 @@
         }
       }
 
+      /* --- live evidence panel (score/tier/anchor-stratified CLV) ----- */
+      .evpanel {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        background: var(--panel);
+        padding: 8px 12px 10px;
+      }
+      .evtitle {
+        color: var(--dim);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+      }
+      .evtable {
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+      .evtable th,
+      .evtable td {
+        padding: 2px 14px 2px 0;
+        text-align: left;
+        white-space: nowrap;
+      }
+      .evtable th {
+        color: var(--faint);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+      .evgroup td {
+        color: var(--faint);
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        padding-top: 6px;
+      }
+      .evinsuf {
+        color: var(--dim);
+        font-style: italic;
+      }
+
       footer {
         color: var(--faint);
         font-size: 11px;
@@ -563,6 +608,28 @@
         <div class="v" id="c-swclv">—</div>
         <div class="k">Stake-wtd CLV (premium settled)</div>
       </div>
+    </div>
+
+    <!-- Live evidence: CLV/ROI over settled picks stratified by ML score
+         bucket / tier / anchor — the accumulating instrument for the
+         VALUE_ML_FILTER flip decision. Hidden until /performance serves the
+         section; strata under n=50 CLV observations show an explicit
+         insufficient-data state instead of point estimates. -->
+    <div class="evpanel" id="evidence-panel" style="display: none">
+      <div class="evtitle" id="evidence-title">Live evidence</div>
+      <table class="evtable" aria-label="Live evidence by stratum">
+        <thead>
+          <tr>
+            <th>stratum</th>
+            <th>n</th>
+            <th>n CLV</th>
+            <th>sw CLV</th>
+            <th>beat close</th>
+            <th>ROI</th>
+          </tr>
+        </thead>
+        <tbody id="evidence-rows"></tbody>
+      </table>
     </div>
 
     <div class="controls">
@@ -907,6 +974,26 @@
               "the operating point from the held-out evaluation is 0.725.";
             selCell.append(ml);
           }
+          // Anchor chip: which fair-value anchor produced this pick.
+          // PIN = Pinnacle (backtested primary), SHARP = other named sharp
+          // book, CONS = >=3-book median fallback (train-validated as
+          // weaker than PIN — its live CLV verdict is exactly what this
+          // stratification chip exists to accumulate).
+          if (p.anchor_type) {
+            const an = document.createElement("small");
+            an.style.color = "var(--faint)";
+            an.textContent =
+              { pinnacle: "PIN", sharp: "SHARP", consensus: "CONS" }[
+                p.anchor_type
+              ] || p.anchor_type.toUpperCase();
+            an.title =
+              "fair-value anchor for this pick: " +
+              p.anchor_type +
+              ". Live CLV is tracked per anchor (PIN = Pinnacle, " +
+              "CONS = cross-book median fallback, SHARP = other named " +
+              "sharp book).";
+            selCell.append(an);
+          }
           td(tr, selCell);
           // ellipsis-capped (110px) so a long book name can never push the
           // Status/Settle column off a 1280px screen; tooltip = full name.
@@ -950,6 +1037,23 @@
             nowLine.textContent =
               "now " + Number(p.current_odds).toFixed(2) + verdict;
             oddsCell.appendChild(nowLine);
+          }
+          // Execution helper: the minimum displayed odds at which this pick
+          // still clears the premium edge floor vs its sharp fair prob —
+          // "still +EV down to X.XX" (server-computed; null = not derivable).
+          if (p.status === "alerted" && p.min_acceptable_odds != null) {
+            const minLine = document.createElement("small");
+            minLine.style.display = "block";
+            minLine.style.color = "var(--faint)";
+            minLine.textContent = "ok ≥ " + p.min_acceptable_odds;
+            minLine.title =
+              "still +EV down to " +
+              p.min_acceptable_odds +
+              " — the lowest odds at which this pick keeps the premium " +
+              "edge floor against its sharp fair probability; if the book " +
+              "now quotes less, skip. Informational only — never a profit " +
+              "guarantee.";
+            oddsCell.appendChild(minLine);
           }
           td(tr, oddsCell);
           // Fair % with EV folded in as a sub-line (one column fewer keeps
@@ -1117,6 +1221,103 @@
             (clvPct >= 0 ? "+" : "") + clvPct.toFixed(1) + "%";
           clvEl.style.color = clvPct < 0 ? "var(--neg)" : "";
         }
+        renderEvidence(perf.live_evidence);
+      }
+
+      // --- live evidence panel -----------------------------------------------
+      // Honesty contract (mirrors app/backtesting/live_evidence.py): every
+      // stratum shows its n; a stratum whose CLV sample is under min_n shows
+      // "insufficient data (n<min_n)" INSTEAD of point estimates. The panel
+      // hides entirely on payloads without the section (older API).
+      function evGroupRow(tbody, label) {
+        const tr = document.createElement("tr");
+        tr.className = "evgroup";
+        const cell = td(tr, label);
+        cell.colSpan = 6;
+        tbody.appendChild(tr);
+      }
+      function evRow(tbody, label, s, minN) {
+        const tr = document.createElement("tr");
+        td(tr, label);
+        td(tr, String(s.n));
+        td(tr, String(s.n_clv));
+        if (!s.sufficient) {
+          const cell = td(tr, "insufficient data (n<" + minN + ")", "evinsuf");
+          cell.colSpan = 3;
+          cell.title =
+            "fewer than " +
+            minN +
+            " CLV-revalidated settled picks in this stratum — point " +
+            "estimates would be noise; the row fills in as live evidence " +
+            "accumulates";
+        } else {
+          const swclv =
+            s.stake_weighted_clv_log === null
+              ? "—"
+              : (() => {
+                  const p =
+                    (Math.exp(Number(s.stake_weighted_clv_log)) - 1) * 100;
+                  return (p >= 0 ? "+" : "") + p.toFixed(1) + "%";
+                })();
+          td(tr, swclv);
+          td(
+            tr,
+            s.beat_close_rate === null
+              ? "—"
+              : (Number(s.beat_close_rate) * 100).toFixed(0) + "%",
+          );
+          td(
+            tr,
+            s.roi === null
+              ? "—"
+              : (Number(s.roi) >= 0 ? "+" : "") +
+                  (Number(s.roi) * 100).toFixed(1) +
+                  "%",
+          );
+        }
+        tbody.appendChild(tr);
+      }
+      function renderEvidence(ev) {
+        const panel = $("evidence-panel");
+        if (!ev) {
+          panel.style.display = "none";
+          return;
+        }
+        const minN = Number(ev.min_n) || 50;
+        const tbody = $("evidence-rows");
+        tbody.replaceChildren();
+        $("evidence-title").textContent =
+          "Live evidence — " +
+          ev.n_settled +
+          " settled picks · stake-wtd CLV by stratum · instrument for the " +
+          "VALUE_ML_FILTER flip (evidence, not a profit promise)";
+        const SCORE_LABELS = {
+          score_ge_q:
+            "ML score ≥ q*" +
+            (ev.q_star !== null
+              ? " (" + Number(ev.q_star).toFixed(3) + ")"
+              : ""),
+          score_lt_q: "ML score < q*",
+          scored: "ML scored (no q* configured)",
+          unscored: "unscored (out of model scope)",
+        };
+        evGroupRow(tbody, "by ML score bucket");
+        Object.keys(ev.by_score || {}).forEach((k) =>
+          evRow(tbody, SCORE_LABELS[k] || k, ev.by_score[k], minN),
+        );
+        evGroupRow(tbody, "by tier");
+        Object.keys(ev.by_tier || {}).forEach((k) =>
+          evRow(tbody, k, ev.by_tier[k], minN),
+        );
+        // by_anchor === null means the anchor_type column has not landed
+        // yet (dimension unavailable) — omit the group entirely.
+        if (ev.by_anchor) {
+          evGroupRow(tbody, "by anchor");
+          Object.keys(ev.by_anchor).forEach((k) =>
+            evRow(tbody, k, ev.by_anchor[k], minN),
+          );
+        }
+        panel.style.display = "";
       }
 
       function summarizePerf(perf) {
@@ -1132,6 +1333,11 @@
         }
         if (LAST_PERF) {
           fillPerf(LAST_PERF); // keep last-known values, visibly demoted
+          // the evidence panel re-rendered from the frozen payload — say so
+          if (LAST_PERF.live_evidence)
+            $("evidence-title").textContent +=
+              " · STALE — /performance failing, frozen at " +
+              fmtTime(LAST_PERF_AT);
           PERF_CARDS.forEach((id) =>
             setCardStale(
               id,
@@ -1142,6 +1348,7 @@
             ),
           );
         } else {
+          $("evidence-panel").style.display = "none";
           ["c-settled", "c-record", "c-pnl", "c-swclv"].forEach(
             (id) => ($(id).textContent = "—"),
           );

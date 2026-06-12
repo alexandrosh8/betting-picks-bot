@@ -400,3 +400,119 @@ async def test_latest_picks_tier_scope_protects_premium_window(session) -> None:
     volume = await latest_picks_with_events(session, limit=200, tier="volume")
     assert all(p["tier"] == "volume" for p in volume)
     assert sum(1 for p in volume if p["bookmaker"] == "testbook") == 3
+
+
+async def test_latest_picks_min_acceptable_odds_execution_helper(session) -> None:  # type: ignore[no-untyped-def]
+    # "still +EV down to X.XX": with min_edge the payload carries the floor
+    # (model_probability 0.55, threshold 0.03 -> 1/0.52 = 1.923 -> "1.93"
+    # after the round-UP display rule); without min_edge the field is null.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(session, make_pick("evt-minacc"), teams, "value-sharp-vs-soft", "t-minacc")
+
+    payload = await latest_picks_with_events(session, limit=200, min_edge=0.03)
+    ours = [p for p in payload if p["bookmaker"] == "testbook"]
+    assert ours and ours[0]["min_acceptable_odds"] == "1.93"
+
+    plain = await latest_picks_with_events(session, limit=200)
+    ours_plain = [p for p in plain if p["bookmaker"] == "testbook"]
+    assert ours_plain and ours_plain[0]["min_acceptable_odds"] is None
+
+
+async def test_live_evidence_rows_reduce_settled_picks_to_floats(session) -> None:  # type: ignore[no-untyped-def]
+    # The DB half of the /performance live-evidence section: settled picks
+    # come back as plain-float rows; anchor_type stays None until the column
+    # lands (feature-detected on the ORM attribute, never assumed).
+    from sqlalchemy import insert as sa_insert
+    from sqlalchemy import text
+
+    from app.storage.models import ResultTracking
+    from app.storage.repositories import live_evidence_rows
+
+    if hasattr(Pick, "anchor_type"):
+        # Track A3 transition window: the ORM attribute can land one commit
+        # before its alembic migration is applied to this DB. Selecting the
+        # ORM model would fail on EVERY query then — skip honestly instead
+        # of failing on another track's migration sequencing.
+        cols = {
+            row[0]
+            for row in await session.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'picks'"
+                )
+            )
+        }
+        if "anchor_type" not in cols:
+            pytest.skip("picks.anchor_type ORM attr present but migration not yet applied")
+
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(session, make_pick("evt-evidence"), teams, "value-sharp-vs-soft", "t-ev")
+    pick_row = await session.scalar(
+        select(Pick).where(Pick.bookmaker == "testbook").order_by(Pick.id.desc())
+    )
+    assert pick_row is not None
+    await session.execute(
+        sa_update(Pick)
+        .where(Pick.id == pick_row.id)
+        .values(
+            status="settled",
+            clv_log=Decimal("0.042"),
+            beat_close=True,
+            value_filter_score=Decimal("0.81"),
+        )
+    )
+    await session.execute(
+        sa_insert(ResultTracking).values(
+            pick_id=pick_row.id,
+            outcome="won",
+            pnl=Decimal("22.00"),
+            roi=Decimal("1.1"),
+            settled_at=datetime(2026, 6, 11, 22, 0, tzinfo=UTC),
+        )
+    )
+
+    rows = await live_evidence_rows(session)
+    ours = [r for r in rows if r.stake == 20.0 and r.clv_log == 0.042]
+    assert ours, "settled pick missing from live-evidence rows"
+    r = ours[0]
+    assert r.tier == "premium"
+    assert r.value_filter_score == 0.81
+    assert r.beat_close is True
+    assert r.pnl == 22.0
+    assert r.anchor_type is None  # column not landed yet -> feature-detected None
+
+
+async def test_anchor_type_roundtrips_and_serializes(session) -> None:  # type: ignore[no-untyped-def]
+    # Track A live verdict mechanism: the anchor that produced a pick is
+    # persisted (picks.anchor_type) and served to the dashboard so live CLV
+    # can be stratified PIN/SHARP/CONS.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    pick = make_pick("evt-anchor-rt").model_copy(update={"anchor_type": "consensus"})
+    assert await persist_pick(session, pick, teams, "value-sharp-vs-soft", "t-anchor") == "inserted"
+    row = await session.scalar(
+        select(Pick).where(Pick.bookmaker == "testbook").order_by(Pick.id.desc())
+    )
+    assert row is not None
+    assert row.anchor_type == "consensus"
+    payload = await latest_picks_with_events(session, limit=200)
+    ours = [p for p in payload if p["event"] == "Alpha FC vs Beta United"]
+    assert ours and ours[0]["anchor_type"] == "consensus"
+
+
+async def test_anchor_type_follows_volume_to_premium_upgrade(session) -> None:  # type: ignore[no-untyped-def]
+    # the upgraded row must describe the alert the operator acts on — the
+    # promoting detection's anchor replaces the shadow row's.
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    shadow = make_pick("evt-anchor-up", tier="volume", edge=0.02).model_copy(
+        update={"anchor_type": "consensus"}
+    )
+    assert await persist_pick(session, shadow, teams, "value-sharp-vs-soft", "t-au") == "inserted"
+    premium = make_pick("evt-anchor-up", tier="premium", edge=0.05).model_copy(
+        update={"anchor_type": "pinnacle"}
+    )
+    assert await persist_pick(session, premium, teams, "value-sharp-vs-soft", "t-au") == "upgraded"
+    row = await session.scalar(
+        select(Pick).where(Pick.bookmaker == "testbook").order_by(Pick.id.desc())
+    )
+    assert row is not None
+    assert row.tier == "premium"
+    assert row.anchor_type == "pinnacle"

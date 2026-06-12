@@ -212,3 +212,24 @@ def test_pick_alert_contains_required_fields_and_reminder() -> None:
 
 def test_same_pick_same_dedupe_key() -> None:
     assert build_pick_alert(make_pick()).dedupe_key == build_pick_alert(make_pick()).dedupe_key
+
+
+def test_pick_alert_still_ev_line_from_value_min_edge() -> None:
+    # Value-pipeline alerts carry the execution helper: model_probability is
+    # the sharp fair prob there, so the floor is 1/(0.55-0.03)=1.923 -> 1.93
+    # after the round-UP display rule (rounding down would lose the edge).
+    alert = build_pick_alert(make_pick(), value_min_edge=0.03)
+    assert "Still +EV down to: 1.93 at bookie_one" in alert.body
+    assert "skip" in alert.body
+    # default (model strategy / legacy callers): no line, identical key
+    plain = build_pick_alert(make_pick())
+    assert "Still +EV down to" not in plain.body
+    assert plain.dedupe_key == alert.dedupe_key
+
+
+def test_pick_alert_omits_still_ev_line_when_no_price_retains_edge() -> None:
+    # fair prob at/below the threshold: the helper has no honest floor to
+    # print, and the alert must not invent one.
+    pick = make_pick().model_copy(update={"model_probability": 0.02})
+    alert = build_pick_alert(pick, value_min_edge=0.03)
+    assert "Still +EV down to" not in alert.body

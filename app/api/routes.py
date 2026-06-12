@@ -8,6 +8,7 @@ place a bet.
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -17,10 +18,15 @@ from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
+from app.backtesting.live_evidence import live_evidence_report
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
-from app.storage.repositories import latest_picks_with_events, performance_report
+from app.storage.repositories import (
+    latest_picks_with_events,
+    live_evidence_rows,
+    performance_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +69,34 @@ async def latest_picks(
     the volume shadow tier runs ~6x premium volume, so an unscoped
     latest-200 window would fill with volume rows and hide open premium
     picks entirely (the dashboard fetches each tier separately).
-    None = both tiers (legacy feed)."""
-    return await latest_picks_with_events(session, limit, tier=tier)
+    None = both tiers (legacy feed).
+
+    `min_acceptable_odds` per row is the execution helper: the minimum
+    displayed odds at which the pick still retains the premium edge floor
+    ("still +EV down to X.XX" on the dashboard)."""
+    from app.config import get_settings
+
+    return await latest_picks_with_events(
+        session, limit, tier=tier, min_edge=get_settings().value_min_edge
+    )
+
+
+@lru_cache(maxsize=1)
+def _ml_operating_point() -> float | None:
+    """The configured value-filter manifest's frozen q* (None = no artifact).
+
+    Cached for the process lifetime: artifacts only change at deploy, and a
+    per-request disk read would be blocking IO in the event loop. Reports
+    accept ANY manifest verdict — stratifying shadow scores is annotation,
+    never enforcement (demotion keeps ValueFilterModel.load's ADOPT gate).
+    """
+    from app.config import get_settings
+    from app.models.value_filter import manifest_operating_point
+
+    settings = get_settings()
+    return manifest_operating_point(
+        Path(settings.value_ml_model_dir), settings.value_ml_manifest_filename
+    )
 
 
 @router.get("/performance")
@@ -76,8 +108,17 @@ async def performance(
     Headline fields are PREMIUM-tier scoped ("tier_scope": "premium"); the
     volume shadow tier's aggregates ride under "volume" so its many small
     edges can never distort the alerted strategy's numbers.
+
+    "live_evidence" stratifies the settled picks by ML score bucket
+    (q* from the configured manifest), tier, and — once the column lands —
+    anchor type: the accumulating live instrument for the VALUE_ML_FILTER
+    flip decision. Every stratum carries its n; strata under min_n are
+    flagged insufficient and the dashboard shows the state, not estimates.
     """
-    return await performance_report(session)
+    report = await performance_report(session)
+    rows = await live_evidence_rows(session)
+    report["live_evidence"] = live_evidence_report(rows, ml_threshold=_ml_operating_point())
+    return report
 
 
 @router.post("/events/{event_id}/result")

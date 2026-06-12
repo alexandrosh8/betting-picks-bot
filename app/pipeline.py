@@ -479,7 +479,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
 
     No prediction model involved; deps.model is unused here.
     """
-    from app.edge.value import CONSENSUS_ANCHOR, find_value_bets_with_fair
+    from app.edge.value import CONSENSUS_ANCHOR, anchor_type_for, find_value_bets_with_fair
 
     snapshots = await deps.loader.fetch_odds(sport_key)
     # `now` AFTER the fetch — see run_pick_pipeline comment (negative ages).
@@ -665,6 +665,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 ),
                 tier=tier,
                 value_filter_score=ml_score,
+                # anchor stratification key for live CLV (PIN/SHARP/CONS)
+                anchor_type=anchor_type_for(v.sharp_book),
                 created_at=now,
             )
             outcome = await _maybe_persist(deps, pick, event_id)
@@ -698,7 +700,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 # threshold: THIS is its alert moment, and the reservation
                 # made above stays (the shadow row never held one).
                 picks.append(pick)
-            await deps.dispatcher.dispatch(build_pick_alert(pick))
+            # value_min_edge adds the "Still +EV down to X.XX" execution
+            # line (value-strategy semantics: model_probability holds the
+            # sharp fair prob here — see build_pick_alert).
+            await deps.dispatcher.dispatch(build_pick_alert(pick, deps.value_min_edge))
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +
     # current odds/edge ("still worth betting?") — no second scrape. Picks

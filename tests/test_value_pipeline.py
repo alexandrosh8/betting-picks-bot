@@ -159,10 +159,35 @@ async def test_value_pipeline_produces_pick_and_alert() -> None:
     assert pick.model_probability > pick.fair_probability
     assert pick.edge >= 0.015
     assert pick.confidence == 0.9  # named sharp anchor (Pinnacle)
+    assert pick.anchor_type == "pinnacle"  # live CLV stratification key
     assert pick.event == "Home FC vs Away FC"
     assert len(sink.sent) == 1
     assert "does not place bets" in sink.sent[0].body
     assert "value: Pinnacle fair" in pick.reason_summary
+
+
+async def test_value_pipeline_tags_consensus_anchor_picks() -> None:
+    # No Pinnacle: 3 soft books price the full market -> median consensus
+    # anchor; the pick must carry anchor_type="consensus" (and the weaker
+    # fallback confidence) so live CLV can be stratified by anchor.
+    snapshots = [
+        snap("BookA", "Home FC", 2.50),
+        snap("BookA", "Draw", 3.30),
+        snap("BookA", "Away FC", 3.10),
+        snap("BookB", "Home FC", 2.52),
+        snap("BookB", "Draw", 3.28),
+        snap("BookB", "Away FC", 3.05),
+        snap("SoftBook", "Home FC", 2.95),
+        snap("SoftBook", "Draw", 3.25),
+        snap("SoftBook", "Away FC", 3.00),
+    ]
+    sink = RecordingSink()
+    picks = await run_value_pipeline(make_deps(sink, FakeLoader(snapshots)), "soccer")
+    assert len(picks) == 1
+    pick = picks[0]
+    assert pick.anchor_type == "consensus"
+    assert pick.confidence == 0.7  # consensus fallback confidence
+    assert "consensus(median)" in pick.reason_summary
 
 
 async def test_value_pipeline_rerun_dedupes_alert() -> None:

@@ -244,12 +244,20 @@ def test_to_dataframe_v1_flag_reproduces_v1_columns() -> None:
     df_v1 = bvd._to_dataframe(cands, schema_version=1)
     assert list(df_v1.columns) == list(bvd.SCHEMA_V1)
     df_v2 = bvd._to_dataframe(cands)
-    assert list(df_v2.columns) == list(bvd.SCHEMA)
+    # default (v2) output keeps the FROZEN v2 column set: no v3 column leaks
+    assert list(df_v2.columns) == list(bvd.SCHEMA_V2)
+    assert "anchor_type" not in df_v2.columns
+    assert "ah_line" not in df_v2.columns
     assert df_v2["consulted_before"].dtype == bool
     assert str(df_v2["fair_prob_rank"].dtype) == "int32"
     # v2 nullable feature columns land as float64 (LightGBM-native NaN)
     assert str(df_v2["home_xg_for_r5"].dtype) == "float64"
     assert str(df_v2["away_corners_against_r5"].dtype) == "float64"
+    # v3 output carries every column, including the two v3-only ones
+    df_v3 = bvd._to_dataframe(cands, schema_version=3)
+    assert list(df_v3.columns) == list(bvd.SCHEMA)
+    assert set(bvd.V3_ONLY_COLUMNS) <= set(df_v3.columns)
+    assert str(df_v3["ah_line"].dtype) == "float64"
 
 
 def test_rolling_form_uses_only_strictly_prior_matches() -> None:
@@ -443,3 +451,170 @@ def test_unmatched_understat_names_quarantine_with_log(capsys: pytest.CaptureFix
     captured = capsys.readouterr().out
     assert "quarantine understat names" in captured
     assert "Phantom FC" in captured  # explicit log, no fuzzy auto-merge
+
+
+# ---------------------------------------------------------------------------
+# v3 — consensus anchor (Track A) and Asian handicap (Track B)
+# ---------------------------------------------------------------------------
+def _row_consensus(**over: str) -> dict[str, str]:
+    """maxavg row with three full non-Pinnacle 1x2 books (consensus-eligible).
+
+    The soft books are deliberately MEANER on Home than Pinnacle so the
+    consensus fair differs from the Pinnacle fair in a known direction.
+    """
+    r = _row_maxavg(
+        B365H="2.10",
+        B365D="3.40",
+        B365A="3.80",
+        BWH="2.08",
+        BWD="3.45",
+        BWA="3.75",
+        IWH="2.12",
+        IWD="3.35",
+        IWA="3.70",
+    )
+    r.update(over)
+    return r
+
+
+def _row_ah(**over: str) -> dict[str, str]:
+    """maxavg row with a half-line AH market (home -0.5) and matching close."""
+    r = _row_maxavg(
+        AHh="-0.5",
+        PAHH="1.93",
+        PAHA="1.97",
+        MaxAHH="2.05",
+        MaxAHA="2.00",
+        AHCh="-0.5",
+        PCAHH="1.90",
+        PCAHA="2.00",
+        MaxCAHH="1.98",
+        MaxCAHA="2.05",
+    )
+    r.update(over)
+    return r
+
+
+def test_default_build_emits_no_consensus_or_ah_rows() -> None:
+    cands = bvd.candidates_from_rows("E0", "2425", [_row_consensus(**_row_ah())])
+    assert cands, "the pinnacle path must still emit"
+    assert all(c.anchor_type == "pinnacle" for c in cands)
+    assert all(c.market != "ah" for c in cands)
+    assert all(c.ah_line is None for c in cands)
+
+
+def test_consensus_anchor_rows_tagged_and_independent_of_pinnacle() -> None:
+    import statistics
+
+    cands = bvd.candidates_from_rows("E0", "2425", [_row_consensus()], consensus_anchor=True)
+    cons = [c for c in cands if c.anchor_type == "consensus"]
+    pinn = [c for c in cands if c.anchor_type == "pinnacle"]
+    assert cons and pinn, "both anchor types must emit on this fixture"
+    assert all(c.market == "1x2" for c in cons)  # ou25 has <3 non-Pinnacle books
+    # consensus fair = devig(median of B365/BW/IW), Pinnacle EXCLUDED
+    med = [
+        statistics.median(v) for v in ([2.10, 2.08, 2.12], [3.40, 3.45, 3.35], [3.80, 3.75, 3.70])
+    ]
+    fair_cons = devig(med, method=DevigMethod.DIFFERENTIAL_MARGIN)
+    home = next(c for c in cons if c.selection == "H")
+    assert home.fair_prob == pytest.approx(fair_cons[0])
+    assert home.edge == pytest.approx(fair_cons[0] - 1.0 / home.best_price)
+    # Pinnacle-referencing features stay Pinnacle-derived on consensus rows
+    assert home.pinn_price == pytest.approx(2.00)
+    # labels are the SAME dual CLV references as pinnacle rows
+    assert home.clv_pinn is not None
+    assert home.clv_max is not None
+    # one argmax per (match, market, anchor): both anchors keep their own
+    assert sum(c.is_argmax_edge for c in cons) == 1
+    assert sum(c.is_argmax_edge for c in pinn if c.market == "1x2") == 1
+
+
+def test_consensus_anchor_requires_three_full_market_books() -> None:
+    # only B365 + BW price the full market -> no consensus anchor
+    row = _row_consensus(IWH="", IWD="", IWA="")
+    cands = bvd.candidates_from_rows("E0", "2425", [row], consensus_anchor=True)
+    assert all(c.anchor_type == "pinnacle" for c in cands)
+
+
+def test_consensus_anchor_rejects_implausible_overround() -> None:
+    # arb-looking medians (sum 1/o < 1) fail the live sanity gate
+    row = _row_consensus(
+        B365H="3.00",
+        BWH="3.00",
+        IWH="3.00",
+        B365D="4.50",
+        BWD="4.50",
+        IWD="4.50",
+        B365A="4.50",
+        BWA="4.50",
+        IWA="4.50",
+    )
+    cands = bvd.candidates_from_rows("E0", "2425", [row], consensus_anchor=True)
+    assert all(c.anchor_type == "pinnacle" for c in cands)
+
+
+def test_ah_half_line_candidates_settle_and_label() -> None:
+    bvd._reset_ah_coverage()
+    cands = bvd.candidates_from_rows("E0", "2425", [_row_ah()], include_ah=True)
+    ah = [c for c in cands if c.market == "ah"]
+    assert ah, "half-line AH candidates must emit under the flag"
+    for c in ah:
+        assert c.anchor_type == "pinnacle"
+        assert c.ah_line == pytest.approx(-0.5)
+        assert c.era == "maxavg"
+    fair = devig([1.93, 1.97], method=DevigMethod.DIFFERENTIAL_MARGIN)
+    home = next(c for c in ah if c.selection == "home")
+    assert home.fair_prob == pytest.approx(fair[0])
+    assert home.edge == pytest.approx(fair[0] - 1.0 / 2.05)
+    # FTHG 2 FTAG 1 -> margin +1; home -0.5 covers (no push possible)
+    assert home.won is True
+    assert home.profit_units == pytest.approx(2.05 - 1.0)
+    # close line matches -> dual CLV labels from PCAH*/MaxCAH*
+    close_fair = devig([1.90, 2.00], method=DevigMethod.DIFFERENTIAL_MARGIN)
+    assert home.pinn_close_fair == pytest.approx(close_fair[0])
+    assert home.clv_pinn == pytest.approx(math.log(2.05 * close_fair[0]))
+    assert home.clv_max is not None
+    assert bvd.AH_COVERAGE["priced"] == 1
+    assert bvd.AH_COVERAGE["half_line"] == 1
+    assert bvd.AH_COVERAGE["close_line_matched"] == 1
+
+
+def test_ah_away_side_loses_when_home_covers() -> None:
+    # away +0.5 with margin +1 -> away does NOT cover
+    row = _row_ah(MaxAHA="2.30")  # inflate away price so it clears min_edge
+    cands = bvd.candidates_from_rows("E0", "2425", [row], include_ah=True)
+    away = next(c for c in cands if c.market == "ah" and c.selection == "away")
+    assert away.won is False
+    assert away.profit_units == -1.0
+
+
+def test_ah_integer_and_quarter_lines_are_skipped() -> None:
+    bvd._reset_ah_coverage()
+    rows = [_row_ah(AHh="-1"), _row_ah(AHh="-0.25"), _row_ah(AHh="0.75")]
+    cands = bvd.candidates_from_rows("E0", "2425", rows, include_ah=True)
+    assert all(c.market != "ah" for c in cands)
+    assert bvd.AH_COVERAGE["priced"] == 3
+    assert bvd.AH_COVERAGE["skipped_integer_or_quarter"] == 3
+    assert bvd.AH_COVERAGE["half_line"] == 0
+
+
+def test_ah_moved_close_line_voids_clv_labels_only() -> None:
+    bvd._reset_ah_coverage()
+    # close moved to -0.75: the close prices a DIFFERENT bet -> labels null
+    cands = bvd.candidates_from_rows("E0", "2425", [_row_ah(AHCh="-0.75")], include_ah=True)
+    ah = [c for c in cands if c.market == "ah"]
+    assert ah, "the row itself still emits (won/profit are line-independent)"
+    for c in ah:
+        assert c.pinn_close_fair is None
+        assert c.max_close_fair is None
+        assert c.clv_pinn is None
+        assert c.clv_max is None
+        assert c.won is not None
+    assert bvd.AH_COVERAGE["close_line_matched"] == 0
+
+
+def test_ah_betbrain_era_rows_never_emit() -> None:
+    # betbrain-era files carry no PAH*/MaxAH* pre-match columns
+    row = _row_betbrain(AHh="-0.5", AHCh="-0.5")
+    cands = bvd.candidates_from_rows("E0", "1314", [row], include_ah=True)
+    assert all(c.market != "ah" for c in cands)

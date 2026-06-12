@@ -145,6 +145,61 @@ def test_dashboard_fetches_picks_per_tier() -> None:
     assert '"/picks?limit=200"' not in text  # the unscoped fetch is gone
 
 
+def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """GET /performance carries the stratified live-evidence section — the
+    instrument for the VALUE_ML_FILTER flip. DB reads are stubbed at the
+    route's own imports; the pure report runs for real, so the honest-n
+    contract (sufficient=false under min_n CLV rows) is asserted end-to-end."""
+    from app.api import routes
+    from app.backtesting.live_evidence import SettledPickRow
+
+    async def fake_perf(session):  # type: ignore[no-untyped-def]
+        return {"n_settled": 2, "tier_scope": "premium"}
+
+    async def fake_rows(session):  # type: ignore[no-untyped-def]
+        return [
+            SettledPickRow("premium", 0.80, 0.02, True, 10.0, 1.0),
+            SettledPickRow("volume", None, None, None, 5.0, None),
+        ]
+
+    monkeypatch.setattr(routes, "performance_report", fake_perf)
+    monkeypatch.setattr(routes, "live_evidence_rows", fake_rows)
+    monkeypatch.setattr(routes, "_ml_operating_point", lambda: 0.725)
+
+    body = TestClient(make_app()).get("/performance").json()
+    assert body["tier_scope"] == "premium"  # headline scope untouched
+    ev = body["live_evidence"]
+    assert ev["q_star"] == 0.725
+    assert ev["min_n"] == 50
+    assert ev["by_score"]["score_ge_q"]["n"] == 1
+    assert ev["by_score"]["unscored"]["n"] == 1
+    assert ev["by_tier"]["premium"]["n_clv"] == 1
+    # 1 CLV row < 50: the stratum is explicitly insufficient — the dashboard
+    # must render the state, never a lone point estimate. Estimates are
+    # nulled AT THE SOURCE so any other /performance consumer sees no
+    # noise-level numbers either.
+    assert ev["by_tier"]["premium"]["sufficient"] is False
+    assert ev["by_tier"]["premium"]["mean_clv_log"] is None
+    assert ev["by_tier"]["premium"]["roi"] is None
+    # anchor dimension feature-detected: absent until the column lands
+    assert ev["by_anchor"] is None
+
+
+def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
+    """Live-evidence panel + execution helper on the dashboard: honest-n
+    insufficient states, hidden-until-served panel, the 'ok >=' odds-floor
+    line, and the textContent discipline still holding."""
+    text = TestClient(make_app()).get("/").text
+    assert 'id="evidence-panel"' in text
+    assert "renderEvidence" in text
+    assert "insufficient data (n<" in text  # explicit per-stratum state
+    assert "Live evidence" in text
+    # execution helper line in the odds column
+    assert "min_acceptable_odds" in text
+    assert "still +EV down to" in text
+    assert "innerHTML" not in text  # untrusted strings stay on textContent
+
+
 def test_result_payload_validation_rejects_bad_outcome() -> None:
     client = TestClient(make_app())
     response = client.post(

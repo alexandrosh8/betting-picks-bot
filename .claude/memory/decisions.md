@@ -1,5 +1,61 @@
 # Decisions Log
 
+- 2026-06-12 (optimization round 3 FINALIZED — validated verdicts + hardening;
+  full digest: `docs/research/optimization-round-3.md`) — validation upheld:
+  **Track A consensus anchor STAGE** (train evidence reproduced exactly;
+  anchor verified PS/BFE-free 40/40 vs raw CSVs; weaker than Pinnacle on
+  shared matches → fallback-only; binding = live `anchor_type`-stratified
+  CLV + 2627); **Track B AH STAGE-tooling / REJECT premium eligibility**
+  (one-shot UNDERPOWERED n_labeled=10, dataset verified 40/40 + 0 moved-line
+  label leaks; knobs stay default-off); **Track C live-evidence tooling
+  ADOPT** (honest-n gates verified, 30+ tests); **Track D staking ADOPT the
+  KEEP-default verdict** (byte-identical re-run, no variant passes at block
+  10/20/50; criterion (B) is structurally near-unsatisfiable under
+  proportional Kelly — "KEEP" means "no evidence to switch"). **No live
+  defaults changed.** Validator fixes landed: (1) `run_ah_oneshot` now
+  writes an INTENT marker before the first label/outcome read — a crash can
+  no longer permit a second look (the 2627 one-shot inherits this); (2) the
+  corrected power gate (selectable matches, not pool rows) is
+  regression-tested label-blind (`tests/test_anchor_ah_backtest.py`);
+  (3) `live_evidence_report` NULLS point estimates for insufficient strata
+  at the source — no `/performance` consumer can read noise-level numbers
+  (`app/backtesting/live_evidence.py`; n_roi must still be eyeballed on
+  sufficient strata). **SPENT-HOLDOUT LEDGER (restated, binding):**
+  consumed = 18 baseline leagues + EC/SC1/SC2/SC3 (1x2+ou25, 2425+2526,
+  4 looks), the v2 fresh slice (never-loaded divisions), and — NEW this
+  round — **the AH market 2425+2526** (one-shot 2026-06-12, marker
+  `data/ml/AH_ONESHOT_CONSUMED.json`). Football-data "new leagues"
+  (BRA/ARG/…) carry closing odds only → unusable for the protocol.
+  **Remaining legitimate fresh domain: season 2627 ALONE.** Develop only on
+  <=2324; pre-register every one-shot in code; 2425/2526 numbers anywhere =
+  CONTAMINATED-REFERENCE.
+
+- 2026-06-12 (AH 2425+2526 fresh domain CONSUMED — one-shot UNDERPOWERED;
+  consensus anchor validated on train) — the pre-registered Asian-handicap
+  one-shot (`scripts/ml/anchor_ah_backtest.py --oneshot-ah`, criterion
+  frozen in code: thr\*=0.015 train-chosen, pass iff n_labeled>=100 and
+  incCLV_max−2SE>0 and ROI>0) **executed 2026-06-12 and consumed the AH
+  2425+2526 domain** (marker `data/ml/AH_ONESHOT_CONSUMED.json`). Result:
+  n=27, n_labeled=10, ROI −10.96% [boot CI −48.1%, +28.1%], incCLV_max
+  +0.0330 [CI −0.0019, +0.0687] → **verdict UNDERPOWERED — AH does NOT meet
+  the premium bar**; a row-count power gate intended to cancel the look had
+  a bound bug (compared pool rows 140 vs floor 100) — honest execution
+  record in the script docstring. Binding AH verdict now = live shadow CLV
+  - season **2627 alone**. AH scope facts: half-lines = 23.1% of AH-priced
+    matches; close line == pre-match line on 60.3% of half-line matches (CLV
+    labels only there). Track A (consensus anchor, TRAIN <=2324 only, maxavg
+    1x2): consensus-anchored selection shows real incremental CLV vs its own
+    null (thr 0.02: n=477, ROI +12.4% [+0.5,+24.6], incCLV_max +0.0348
+    [+0.0262,+0.0443]) but is WEAKER than the Pinnacle anchor on the same
+    matches at moderate thresholds (paired dCLV_max −0.0071 [−0.0132,−0.0011]
+    at thr 0.015; no separation at 0.03) → consensus stays the FALLBACK, now
+    trackable live via `picks.anchor_type` (pinnacle/sharp/consensus). The
+    football-data "new leagues" feed (BRA/ARG/…) was verified 2026-06-12 to
+    carry CLOSING odds only → no Track A one-shot exists; binding consensus
+    verdict = live anchor-stratified CLV + 2627. Dataset v3
+    (`--anchor-consensus --ah`, `value_candidates_v3.parquet`, 95,928 rows)
+    is additive; v1/v2 artifacts byte-identical (proven by full rebuild).
+
 - 2026-06-12 (value filter v2: SHADOW-CANDIDATE, spent-holdout kept) —
   **v2 retrain ships annotation-only; verdict stage-v2-shadow** (full
   digest + numbers: `docs/research/premium-tier-v2.md`). Discipline held:

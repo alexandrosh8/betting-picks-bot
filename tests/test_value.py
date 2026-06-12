@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.edge.value import effective_odds, find_value_bets
+from app.edge.value import ceil_odds, effective_odds, find_value_bets, min_acceptable_odds
 
 
 def test_flags_value_when_soft_beats_pinnacle_fair() -> None:
@@ -198,3 +198,83 @@ def test_find_value_bets_with_fair_flags_soft_dc_price() -> None:
         )
         == []
     )
+
+
+# --- execution helper: "still +EV down to X.XX" ------------------------------
+
+
+def test_min_acceptable_odds_inverts_the_edge_definition() -> None:
+    # edge = fair - 1/odds (no commission): at exactly the returned price the
+    # retained edge equals min_edge; one tick below it drops under min_edge.
+    fair, threshold = 0.55, 0.03
+    floor = min_acceptable_odds(fair, threshold)
+    assert floor is not None
+    assert floor == pytest.approx(1.0 / (fair - threshold), abs=1e-12)
+    assert fair - 1.0 / floor == pytest.approx(threshold, abs=1e-12)
+    assert fair - 1.0 / (floor - 0.01) < threshold
+
+
+def test_min_acceptable_odds_nets_exchange_commission() -> None:
+    # At a 5% exchange the DISPLAYED floor must sit above the no-commission
+    # floor: eff(raw) == 1/(fair - threshold) exactly at the returned price.
+    fair, threshold = 0.55, 0.03
+    raw_floor = min_acceptable_odds(fair, threshold, book="Betfair Exchange")
+    plain_floor = min_acceptable_odds(fair, threshold)
+    assert raw_floor is not None and plain_floor is not None
+    assert raw_floor > plain_floor
+    assert effective_odds("Betfair Exchange", raw_floor) == pytest.approx(plain_floor, abs=1e-12)
+
+
+def test_min_acceptable_odds_none_when_no_price_retains_edge() -> None:
+    # fair prob at/below the threshold: edge < threshold at ANY price.
+    assert min_acceptable_odds(0.03, 0.03) is None
+    assert min_acceptable_odds(0.02, 0.03) is None
+
+
+def test_min_acceptable_odds_rejects_degenerate_inputs() -> None:
+    with pytest.raises(ValueError):
+        min_acceptable_odds(0.0, 0.03)
+    with pytest.raises(ValueError):
+        min_acceptable_odds(1.0, 0.03)
+    with pytest.raises(ValueError):
+        min_acceptable_odds(0.5, -0.01)
+
+
+def test_ceil_odds_never_rounds_the_floor_down() -> None:
+    # display rounding must keep the edge: round UP at 2dp...
+    assert ceil_odds(1.8462) == pytest.approx(1.85)
+    # ...but an exactly-representable threshold must not be bumped a tick
+    assert ceil_odds(1.85) == pytest.approx(1.85)
+    assert ceil_odds(2.0) == pytest.approx(2.0)
+
+
+def test_min_acceptable_floor_still_passes_the_live_scan() -> None:
+    # End-to-end invariant: at the (display-ceiled) floor price the live
+    # scanner still emits the pick at min_edge; just below it, it does not.
+    fair_half = {"home": {"Pinnacle": 2.00, "SoftBook": 2.30}, "away": {"Pinnacle": 2.00}}
+    bets = find_value_bets(fair_half, min_edge=0.03, min_odds=1.30)
+    assert bets and bets[0].selection == "home"
+    floor = min_acceptable_odds(bets[0].sharp_fair_prob, 0.03, book="SoftBook")
+    assert floor is not None
+    at_floor = {
+        "home": {"Pinnacle": 2.00, "SoftBook": ceil_odds(floor)},
+        "away": {"Pinnacle": 2.00},
+    }
+    assert find_value_bets(at_floor, min_edge=0.03, min_odds=1.30)
+    below_floor = {
+        "home": {"Pinnacle": 2.00, "SoftBook": round(floor - 0.01, 4)},
+        "away": {"Pinnacle": 2.00},
+    }
+    assert find_value_bets(below_floor, min_edge=0.03, min_odds=1.30) == []
+
+
+def test_anchor_type_for_categorizes_every_anchor() -> None:
+    # the live CLV stratification key persisted on picks (picks.anchor_type)
+    from app.edge.value import CONSENSUS_ANCHOR, anchor_type_for
+
+    assert anchor_type_for("Pinnacle") == "pinnacle"
+    assert anchor_type_for("pinnacle sports") == "pinnacle"
+    assert anchor_type_for(CONSENSUS_ANCHOR) == "consensus"
+    # named non-Pinnacle sharps are their own stratum, never "pinnacle"
+    assert anchor_type_for("Betfair Exchange") == "sharp"
+    assert anchor_type_for("Smarkets") == "sharp"

@@ -230,6 +230,11 @@ class Pick(Base):
     # app/models/value_filter.py). NULL = artifact absent or candidate
     # outside the model's trained scope; historical rows stay NULL.
     value_filter_score: Mapped[Decimal | None] = mapped_column(PROB)
+    # Fair-value anchor that produced the pick: 'pinnacle' | 'sharp' (named
+    # non-Pinnacle sharp book) | 'consensus' (>=3-book median fallback) —
+    # lets live CLV be stratified by anchor (the consensus fallback's live
+    # verdict mechanism). NULL = model-strategy pick or pre-column row.
+    anchor_type: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # --- CLV (filled at/after market close) ---------------------------------
     closing_odds: Mapped[Decimal | None] = mapped_column(ODDS)

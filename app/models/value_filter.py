@@ -256,6 +256,25 @@ def live_features(
     }
 
 
+def manifest_operating_point(
+    model_dir: Path, manifest_filename: str = MANIFEST_FILENAME
+) -> float | None:
+    """The manifest's frozen operating point q*, WITHOUT loading the booster
+    (no lightgbm needed) — for score-bucket stratification in reports
+    (GET /performance live evidence). Accepts ANY verdict: stratifying
+    accumulated shadow scores is annotation, never enforcement — demotion
+    still goes through ValueFilterModel.load's ADOPT gate. None on any
+    failure (missing/unreadable manifest, no operating point)."""
+    manifest_path = model_dir / manifest_filename
+    try:
+        manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.info("value-filter manifest unavailable for reports: %s", type(exc).__name__)
+        return None
+    q = (manifest.get("operating_point") or {}).get("q")
+    return float(q) if q is not None else None
+
+
 @dataclass(frozen=True)
 class ValueFilterModel:
     """Loaded meta-model: LightGBM booster + manifest calibrator/threshold."""

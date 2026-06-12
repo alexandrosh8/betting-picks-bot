@@ -36,6 +36,8 @@ from app.storage.models import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from app.backtesting.live_evidence import SettledPickRow
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,7 +125,7 @@ async def _get_or_create_model_version(
 
 
 async def latest_picks_with_events(
-    session: AsyncSession, limit: int = 50, tier: str | None = None
+    session: AsyncSession, limit: int = 50, tier: str | None = None, min_edge: float | None = None
 ) -> list[dict[str, Any]]:
     """Latest picks joined with their event (match label, league, kickoff) —
     the payload served by GET /picks and rendered by the dashboard.
@@ -132,7 +134,25 @@ async def latest_picks_with_events(
     `tier` scopes the window SERVER-side ("premium"/"volume"; None = both):
     the volume shadow tier runs ~6x premium volume, so an unscoped
     latest-N window fills with volume rows and pushes open premium picks
-    out of the feed entirely."""
+    out of the feed entirely.
+
+    `min_edge` (Settings.value_min_edge, passed by the route) adds
+    `min_acceptable_odds` per row — "still +EV down to X.XX": the minimum
+    displayed odds retaining >= that edge vs the pick's sharp fair prob.
+    VALUE-strategy semantics: `model_probability` holds the devigged sharp
+    fair probability on value picks (the deployed strategy — the dashboard
+    documents the same caveat for its Fair column)."""
+    from app.edge.value import ceil_odds, min_acceptable_odds
+
+    def _min_acceptable(p: Pick) -> str | None:
+        if min_edge is None:
+            return None
+        fair = float(p.model_probability)
+        if not 0.0 < fair < 1.0:
+            return None  # degenerate stored prob: no honest floor exists
+        floor = min_acceptable_odds(fair, min_edge, book=p.bookmaker)
+        return f"{ceil_odds(floor):.2f}" if floor is not None else None
+
     home = aliased(Team)
     away = aliased(Team)
     stmt = (
@@ -173,12 +193,19 @@ async def latest_picks_with_events(
             "value_filter_score": (
                 str(p.value_filter_score) if p.value_filter_score is not None else None
             ),
+            # fair-value anchor that produced the pick (pinnacle/sharp/
+            # consensus) — live CLV stratification key; null = model pick
+            # or pre-column row
+            "anchor_type": p.anchor_type,
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
             "current_odds": str(p.current_odds) if p.current_odds is not None else None,
             "current_edge": str(p.current_edge) if p.current_edge is not None else None,
             "revalidated_at": p.revalidated_at.isoformat() if p.revalidated_at else None,
+            # execution helper: "still +EV down to X.XX" (null = not
+            # computable — min_edge unset or fair prob >= floor impossible)
+            "min_acceptable_odds": _min_acceptable(p),
         }
         for p, home_name, away_name, league_name, starts_at in rows.all()
     ]
@@ -289,6 +316,46 @@ def _ratio(numerator: Decimal, denominator: Decimal) -> str | None:
     if not denominator:
         return None
     return format((numerator / denominator).normalize(), "f")
+
+
+async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
+    """Settled picks reduced to plain-float rows for the pure stratified
+    live-evidence report (app/backtesting/live_evidence.py) — the DB read
+    half of the GET /performance "live_evidence" section.
+
+    anchor_type is FEATURE-DETECTED: a separate migration is adding the
+    column; until the ORM model carries it, every row gets None and the
+    report omits the anchor grouping. Detection is on the ORM attribute —
+    the agreed contract with the migration work — never a DB introspection.
+    """
+    from app.backtesting.live_evidence import SettledPickRow
+
+    anchor_attr = getattr(Pick, "anchor_type", None)
+    columns = [
+        Pick.tier,
+        Pick.value_filter_score,
+        Pick.clv_log,
+        Pick.beat_close,
+        Pick.recommended_stake_amount,
+        ResultTracking.pnl,
+    ]
+    if anchor_attr is not None:
+        columns.append(anchor_attr)
+    rows = (
+        await session.execute(select(*columns).join(Pick, ResultTracking.pick_id == Pick.id))
+    ).all()
+    return [
+        SettledPickRow(
+            tier=row[0],
+            value_filter_score=float(row[1]) if row[1] is not None else None,
+            clv_log=float(row[2]) if row[2] is not None else None,
+            beat_close=row[3],
+            stake=float(row[4]),
+            pnl=float(row[5]) if row[5] is not None else None,
+            anchor_type=row[6] if anchor_attr is not None else None,
+        )
+        for row in rows
+    ]
 
 
 # asyncpg runs prepared statements: keep each INSERT comfortably under
@@ -601,6 +668,7 @@ async def persist_pick(
                 if pick.value_filter_score is not None
                 else None
             ),
+            anchor_type=pick.anchor_type,
             created_at=datetime.now(tz=UTC),
         )
         .on_conflict_do_nothing(constraint="uq_picks_event_market_selection_model")
@@ -650,6 +718,9 @@ async def persist_pick(
             if pick.value_filter_score is not None
             else None
         )
+        # likewise the promoting detection's anchor: the row must describe
+        # the alert the operator acts on
+        existing.anchor_type = pick.anchor_type
         # created_at advances to the upgrade moment: it is when the pick
         # became an actionable premium alert AND when its exposure was
         # reserved — seed_exposure_ledger (premium-scoped, created_at within

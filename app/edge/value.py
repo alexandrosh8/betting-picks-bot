@@ -18,6 +18,7 @@ Review-hardened (2026-06-10 deep review):
 Pure module: no IO. Input is per-bookmaker decimal odds for one market.
 """
 
+import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -38,6 +39,29 @@ EXCHANGE_COMMISSION = {
 
 CONSENSUS_ANCHOR = "consensus(median)"
 MIN_CONSENSUS_BOOKS = 3
+
+# Anchor-type tags persisted on picks (picks.anchor_type) so live CLV can be
+# stratified by the anchor that produced each pick — the live verdict
+# mechanism for the consensus fallback (train-only validation 2026-06-12:
+# consensus selection beats its own null but underperforms the Pinnacle
+# anchor on shared matches; see .claude/memory/decisions.md).
+ANCHOR_TYPE_PINNACLE = "pinnacle"
+ANCHOR_TYPE_SHARP = "sharp"  # named non-Pinnacle sharp (exchange) anchor
+ANCHOR_TYPE_CONSENSUS = "consensus"
+
+
+def anchor_type_for(anchor_book: str) -> str:
+    """Anchor category for one pick: pinnacle | sharp | consensus.
+
+    `anchor_book` is ValueBet.sharp_book — either a named sharp book from
+    SHARP_BOOKS or the CONSENSUS_ANCHOR sentinel. Pure function (tested
+    directly); the pipeline persists its result on every value pick.
+    """
+    if anchor_book == CONSENSUS_ANCHOR:
+        return ANCHOR_TYPE_CONSENSUS
+    if "pinnacle" in _norm(anchor_book):
+        return ANCHOR_TYPE_PINNACLE
+    return ANCHOR_TYPE_SHARP
 
 
 @dataclass(frozen=True)
@@ -67,6 +91,48 @@ def effective_odds(
 
 def _overround(odds: Sequence[float]) -> float:
     return sum(1.0 / o for o in odds) - 1.0
+
+
+def min_acceptable_odds(
+    fair_prob: float,
+    min_edge: float,
+    *,
+    book: str = "",
+    commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+) -> float | None:
+    """Minimum RAW (displayed) decimal odds at which a pick still retains
+    `min_edge` of edge against `fair_prob` — the execution helper behind
+    "still +EV down to X.XX".
+
+    Derived from THIS module's edge definition (`_scan_against_fair`):
+        edge = fair_prob - 1/effective_odds,  retained while edge >= min_edge
+        =>  effective_odds >= 1 / (fair_prob - min_edge)
+    then converted back to the displayed price through the book's exchange
+    commission (inverse of `effective_odds`): raw = 1 + (eff - 1)/(1 - c).
+
+    Returns None when fair_prob - min_edge <= 0: no price retains the edge.
+    Pure function; informational only — nothing here places bets.
+    """
+    if not 0.0 < fair_prob < 1.0:
+        raise ValueError(f"fair_prob must be in (0, 1), got {fair_prob}")
+    if min_edge < 0.0:
+        raise ValueError(f"min_edge must be >= 0, got {min_edge}")
+    headroom = fair_prob - min_edge
+    if headroom <= 0.0:
+        return None
+    eff_min = 1.0 / headroom
+    c = commissions.get(_norm(book), 0.0)
+    return 1.0 + (eff_min - 1.0) / (1.0 - c)
+
+
+def ceil_odds(value: float, decimals: int = 2) -> float:
+    """Round odds UP at `decimals` places — display helper for
+    `min_acceptable_odds`: the printed minimum must still RETAIN the edge,
+    so the exact threshold may never be rounded down. The inner round()
+    absorbs float-representation noise (1.85 -> 185.00000000000003) so an
+    exactly-representable threshold is not bumped a tick up."""
+    scale = 10.0**decimals
+    return math.ceil(round(value * scale, 6)) / scale
 
 
 def anchor_fair_probs(

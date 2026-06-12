@@ -93,6 +93,25 @@ class Settings(BaseSettings):
     # >= 1.30; a higher floor only narrows to a subset of validated picks.
     value_min_odds: float = 1.60
     value_devig: str = "differential_margin_weighting"  # any DevigMethod value
+    # --- ML value filter (meta-labeling SECONDARY model — OFF by default) ----
+    # Scores value CANDIDATES (never match outcomes — ML winner-prediction
+    # backtested negative and is forbidden as a strategy). One-shot held-out
+    # evidence (seasons 2425+2526, scripts/ml/train_value_filter.py --final,
+    # docs/research/ml-value-filter.md): META q>=0.725 selected n=396 bets,
+    # ROI +12.0% (boot CI [-1.6%, +26.7%]), incremental CLV vs the vig-free
+    # Max-of-books close +0.0357 ± 0.0075 (2SE) — beating the thr=0 null,
+    # the per-(league,market) threshold control (+0.0082), and the volume
+    # baseline; all four pre-registered adoption criteria passed (ADOPT).
+    # OFF: scores are still annotated on picks whenever the artifact loads
+    # (shadow evidence + dashboard display) but never change behavior.
+    # ON: premium candidates scoring BELOW the manifest's frozen operating
+    # point are demoted to the volume (shadow) tier — no alert, no exposure
+    # reservation; out-of-scope candidates always pass through unfiltered.
+    value_ml_filter: bool = False
+    # Directory holding value_filter_manifest.json + value_filter_model.txt
+    # (gitignored; produced by the trainer, copied to the host at deploy —
+    # docs/deployment/openclaw-ubuntu.md). Missing artifacts = no scoring.
+    value_ml_model_dir: str = "data/ml"
 
     # --- Odds sources (read-only access) -----------------------------------------
     # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);

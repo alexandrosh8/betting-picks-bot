@@ -226,6 +226,10 @@ class Pick(Base):
     # (alerted/settled/superseded...) for BOTH tiers, so revalidation and
     # settlement treat them identically; tier scopes alerts/exposure/reports.
     tier: Mapped[str] = mapped_column(String(16), server_default="premium")
+    # Calibrated value-filter meta-model score (P(beats the Max close) —
+    # app/models/value_filter.py). NULL = artifact absent or candidate
+    # outside the model's trained scope; historical rows stay NULL.
+    value_filter_score: Mapped[Decimal | None] = mapped_column(PROB)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # --- CLV (filled at/after market close) ---------------------------------
     closing_odds: Mapped[Decimal | None] = mapped_column(ODDS)

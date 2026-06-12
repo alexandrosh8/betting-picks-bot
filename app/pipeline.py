@@ -18,6 +18,7 @@ from app.backtesting import clv as _clv  # noqa: F401  (settlement uses this mod
 from app.edge.gates import GatePolicy, PickCandidate, evaluate
 from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.models.base import ProbabilityModel
+from app.models.value_filter import ValueFilterModel, live_features
 from app.notifications.base import build_pick_alert
 from app.notifications.dispatcher import AlertDispatcher
 from app.probabilities.devig import DevigMethod, devig
@@ -143,6 +144,14 @@ class PipelineDeps:
     value_min_edge: float = 0.015
     value_volume_min_edge: float = 0.015
     value_min_odds: float = 1.30
+    # value-filter meta-model (app/models/value_filter.py). When loaded,
+    # every in-scope candidate gets a calibrated score annotated on its
+    # pick; the score only CHANGES behavior (premium -> volume demotion
+    # below the manifest's frozen operating point) when the composition
+    # root also sets value_ml_filter_enabled (Settings.value_ml_filter,
+    # default OFF — held-out evidence cited in app/config.py).
+    value_filter: ValueFilterModel | None = None
+    value_ml_filter_enabled: bool = False
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
@@ -364,6 +373,55 @@ def pick_tier(edge: float, premium_min_edge: float, volume_min_edge: float) -> s
     return None
 
 
+def _score_value_candidate(
+    deps: "PipelineDeps",
+    event_id: str,
+    market: Market,
+    detail: str | None,
+    selection: str,
+    prices: dict[str, dict[str, float]],
+    fair_by_sel: dict[str, float],
+    anchor_book: str,
+    sport_key: str,
+    now: datetime,
+) -> float | None:
+    """Calibrated meta-model score for one candidate that SURVIVED the edge
+    gate, or None. None means: no artifact loaded, candidate outside the
+    model's trained scope (market/league/anchor/odds-floor — see
+    app/models/value_filter.py), or the scorer failed (logged by exception
+    type only). Scoring must never break picking.
+    """
+    if deps.value_filter is None:
+        return None
+    league = deps.league or sport_key
+    kickoff = None
+    if deps.directory is not None:
+        teams = deps.directory.lookup(event_id)
+        if teams is not None:
+            kickoff = teams.starts_at
+            if teams.league:  # scraped per-event league beats config csv
+                league = teams.league
+    try:
+        feats = live_features(
+            market=market,
+            market_detail=detail,
+            selection=selection,
+            prices=prices,
+            fair_by_sel=fair_by_sel,
+            anchor_book=anchor_book,
+            league=league,
+            kickoff_utc=kickoff,
+            now=now,
+            min_odds=deps.value_filter.min_odds,
+        )
+        if feats is None:
+            return None
+        return deps.value_filter.score([feats])[0]
+    except Exception as exc:  # scoring must never break the pick pipeline
+        logger.warning("value-filter scoring failed: %s", type(exc).__name__)
+        return None
+
+
 PersistOutcome = Literal["inserted", "upgraded", "duplicate", "unpersisted"]
 
 
@@ -433,6 +491,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     picks: list[PickOut] = []
     n_volume = 0
     n_stale = 0
+    n_ml_demoted = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
     # min() guards a deps-level inversion (Settings already validates the
     # ordering at startup) so a bad override can widen nothing.
@@ -460,6 +519,39 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             tier = pick_tier(v.edge, deps.value_min_edge, deps.value_volume_min_edge)
             if tier is None:
                 continue  # below both floors (unreachable via scan_min_edge)
+            # Meta-model score AFTER the edge gate (meta-labeling: the
+            # deterministic rule generates, the model only filters).
+            ml_score = _score_value_candidate(
+                deps,
+                event_id,
+                market,
+                detail,
+                v.selection,
+                prices,
+                fair_by_sel,
+                anchor_book,
+                sport_key,
+                now,
+            )
+            ml_note = ""
+            if (
+                deps.value_ml_filter_enabled
+                and deps.value_filter is not None
+                and tier == "premium"
+                and ml_score is not None
+                and ml_score < deps.value_filter.threshold
+            ):
+                # VALUE_ML_FILTER on: a sub-threshold premium candidate is
+                # DEMOTED to the volume (shadow) tier — persisted for CLV
+                # evidence, never alerted, never reserving exposure. Out-of-
+                # scope candidates (ml_score None) always pass unfiltered:
+                # the model must not veto markets it has never seen.
+                tier = "volume"
+                n_ml_demoted += 1
+                ml_note = (
+                    f" | ml-filter {ml_score:.3f} < q* "
+                    f"{deps.value_filter.threshold:.3f}: demoted to volume"
+                )
             # Stake from the sharp fair prob at the EFFECTIVE (net) price.
             breakdown = recommended_stake(
                 v.sharp_fair_prob, v.best_odds_effective, deps.stake_policy
@@ -521,8 +613,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         if v.best_odds_effective != v.best_odds
                         else ""
                     )
+                    + ml_note
                 ),
                 tier=tier,
+                value_filter_score=ml_score,
                 created_at=now,
             )
             outcome = await _maybe_persist(deps, pick, event_id)
@@ -584,6 +678,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         n_premium,
         n_volume,
     )
+    if n_ml_demoted:
+        # VALUE_ML_FILTER intervention is never silent: these candidates
+        # cleared the premium edge gate and were demoted by the meta-model.
+        logger.info(
+            "value pipeline %s: ml-filter demoted %d premium candidate(s) to volume",
+            sport_key,
+            n_ml_demoted,
+        )
     if n_stale:
         # The silent failure mode of a too-slow cycle: candidates captured
         # more than MAX_ODDS_AGE_SECONDS before the cycle ended are dropped

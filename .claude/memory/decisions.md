@@ -1,5 +1,26 @@
 # Decisions Log
 
+- 2026-06-12 (ML value filter: ADOPT, shadow-first) — **meta-labeling
+  SECONDARY model over the value signal adopted; enforcement OFF by
+  default** (full evidence + protocol: `docs/research/ml-value-filter.md`;
+  artifacts gitignored in `data/ml/`). One-shot holdout 2425+2526
+  (consultation #4, declared final — binding metric incCLV vs Max close,
+  NOT ROI): META q>=0.725 n=396, ROI +12.0% [CI −1.6,+26.7], incCLV_max
+  +0.0357 ± 0.0075 (2SE) — beats thr=0 null, the volume baseline (+0.0138),
+  and the per-cell threshold control (+0.0082); all four pre-registered
+  gates passed. **Doctrine intact:** this scores value CANDIDATES (P(beats
+  the vig-free Max close)), never match outcomes — winner-prediction ML
+  remains forbidden. **Wiring:** `app/models/value_filter.py` (ADOPT-only
+  manifest gate, lazy ML imports, numpy calibrator replay);
+  `run_value_pipeline` scores AFTER the edge gate; scope = 1x2/ou25, 18
+  trained leagues, named sharp anchor, odds >= 1.6 — out-of-scope is
+  unscored, never vetoed. `VALUE_ML_FILTER=false` (default) annotates
+  scores only (`picks.value_filter_score`, dashboard "ML 0.xx");
+  `true` demotes sub-q\* premium picks to the volume shadow tier. **How to
+  apply:** keep flag OFF until score-stratified LIVE CLV confirms; retrain
+  when `odds_snapshots` reaches scale (true intraday distribution); any
+  protocol change needs the fresh 2627 holdout — 2425+2526 is spent.
+
 - 2026-06-11 (Wave-4 repo verdicts) — **six user-mandated repos evaluated,
   NOTHING adoptable as a dependency** (full tables:
   docs/research/betting-repo-research.md Wave 4 + nba-repo-evaluations.md).

@@ -41,6 +41,12 @@ class PickOut(InternalModel):
     # "premium" (edge >= VALUE_MIN_EDGE: alerted + exposure-reserved) or
     # "volume" (shadow tier: persisted + CLV-tracked only, never alerted).
     tier: str = "premium"
+    # Calibrated meta-model score P(candidate beats the vig-free Max close)
+    # from app/models/value_filter.py — None when the artifact is absent or
+    # the candidate is outside the model's trained scope. Informational
+    # unless VALUE_ML_FILTER is on (then sub-threshold premium candidates
+    # are demoted to the volume tier before alerting).
+    value_filter_score: float | None = Field(default=None, ge=0.0, le=1.0)
     created_at: datetime
     risk_warning: str = "Betting involves risk. Nothing here is guaranteed profit."
     manual_betting_reminder: str = MANUAL_BETTING_REMINDER

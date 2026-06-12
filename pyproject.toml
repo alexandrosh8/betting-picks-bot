@@ -29,6 +29,15 @@ models = ["lightgbm>=4.3", "xgboost>=2.0"]
 # EXACT pin: app/ingestion/oddsportal.py patches six 0.3.0 internals at
 # runtime; _patch_upstream_quirks hard-fails on any other version.
 backfill = ["oddsharvester==0.3.0"]
+ml = [
+    "lightgbm>=4.6.0",
+    # pandas is a DIRECT dependency of scripts/ml/* and of the
+    # app/models/value_filter.py scorer (lazy import) — previously it only
+    # arrived transitively via the football extra (penaltyblog).
+    "pandas>=2.2",
+    "pyarrow>=24.0.0",
+    "scikit-learn>=1.9.0",
+]
 
 [dependency-groups]
 dev = [
@@ -74,5 +83,5 @@ warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "fakeredis.*", "scipy.*", "oddsharvester.*", "penaltyblog.*"]
+module = ["apscheduler.*", "fakeredis.*", "scipy.*", "oddsharvester.*", "penaltyblog.*", "pandas.*"]
 ignore_missing_imports = true

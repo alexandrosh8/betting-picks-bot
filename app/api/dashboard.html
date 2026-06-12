@@ -869,6 +869,12 @@
                 Number(p.confidence).toFixed(1) +
                 ")",
             );
+          if (p.value_filter_score != null)
+            why.push(
+              "ml score " +
+                Number(p.value_filter_score).toFixed(3) +
+                " (P(beats close), q* 0.725)",
+            );
           if (why.length) selCell.title = why.join("\n");
           const selName = document.createElement("span");
           selName.className = "sel";
@@ -888,6 +894,19 @@
             "at the bookmaker before betting";
           if (ageH > 6) pickedAgo.style.color = "var(--warn)";
           selCell.append(selName, pickedAgo);
+          // Value-filter meta-model score, when the pick was scored (null =
+          // artifact absent or candidate outside the model's trained scope
+          // — 1x2/ou25, mapped league, sharp anchor, odds >= 1.6 only).
+          if (p.value_filter_score != null) {
+            const ml = document.createElement("small");
+            ml.style.color = "var(--faint)";
+            ml.textContent = "ML " + Number(p.value_filter_score).toFixed(2);
+            ml.title =
+              "value-filter meta-model score: calibrated P(this pick beats " +
+              "the vig-free best-of-books closing line). Informational — " +
+              "the operating point from the held-out evaluation is 0.725.";
+            selCell.append(ml);
+          }
           td(tr, selCell);
           // ellipsis-capped (110px) so a long book name can never push the
           // Status/Settle column off a 1280px screen; tooltip = full name.

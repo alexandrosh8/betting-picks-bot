@@ -15,6 +15,7 @@ import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -40,6 +41,7 @@ from app.ingestion.odds_api import OddsApiClient
 from app.ingestion.oddsportal import OddsPortalLoader
 from app.models.base import NullModel, ProbabilityModel
 from app.models.football_dc import DixonColesFootballModel
+from app.models.value_filter import ValueFilterModel
 from app.notifications.dedupe import RedisIdempotencyStore
 from app.notifications.dispatcher import AlertDispatcher
 from app.notifications.telegram import TelegramSink
@@ -246,6 +248,21 @@ def build_scheduler(
         # value-findings.md); the same method prices the closing fair in the
         # CLV true-up so live CLV is comparable to the backtest.
         value_devig = DevigMethod(settings.value_devig)
+        # Value-filter meta-model (verdict ADOPT — held-out evidence cited in
+        # app/config.py). Loading is best-effort: missing artifacts or ML
+        # deps leave value_filter=None and the pipeline runs unfiltered.
+        # When the ENFORCEMENT flag is on but nothing loaded, fail LOUDLY at
+        # composition time — a silently absent filter must not masquerade as
+        # an active one.
+        value_filter = (
+            ValueFilterModel.load(Path(settings.value_ml_model_dir)) if use_value else None
+        )
+        if settings.value_ml_filter and value_filter is None:
+            logger.error(
+                "VALUE_ML_FILTER=true but no value-filter model loaded from %s "
+                "(missing artifacts or ML deps?) — picks run UNFILTERED",
+                settings.value_ml_model_dir,
+            )
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -268,6 +285,8 @@ def build_scheduler(
             # volume (shadow) tier floor; == value_min_edge disables it
             value_volume_min_edge=settings.value_volume_min_edge,
             value_min_odds=settings.value_min_odds,
+            value_filter=value_filter,
+            value_ml_filter_enabled=settings.value_ml_filter,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 

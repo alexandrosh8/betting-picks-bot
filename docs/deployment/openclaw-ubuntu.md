@@ -148,6 +148,66 @@ After bumping `oddsharvester` past 0.3.0: re-verify the Dockerfile's sandbox
 note — 0.3.0 detects Docker via `/.dockerenv` and launches Chromium with
 `--no-sandbox --disable-dev-shm-usage`; the container relies on that.
 
+## 4b. ML value-filter artifacts (optional)
+
+The value-filter meta-model (`docs/research/ml-value-filter.md`, verdict
+ADOPT) annotates picks with a calibrated score and — only when
+`VALUE_ML_FILTER=true` — demotes sub-threshold premium picks to the volume
+tier. Its two artifacts are **deliberately not in git** (`/data/` is
+gitignored: large/binary, and the manifest pins a dataset hash the repo
+doesn't carry). Without them the app runs exactly as before; the loader
+logs "value-filter artifacts not found" and scoring stays off.
+
+To enable scoring on the VPS:
+
+1. **Train on a dev machine** (one-shot holdout protocol — never on the VPS):
+
+   ```bash
+   uv sync --extra ml
+   uv run python scripts/ml/build_value_dataset.py
+   uv run python scripts/ml/train_value_filter.py --final
+   ```
+
+   The loader refuses any manifest whose `verdict` is not `ADOPT`.
+
+2. **Copy ONLY the two runtime artifacts to the host** (not the parquet
+   caches):
+
+   ```bash
+   scp "data/ml/value_filter_manifest.json" "data/ml/value_filter_model.txt" \
+       <vps>:/opt/betting-ai/data/ml/
+   ```
+
+3. **Mount them into the app container** (read-only) via
+   `docker-compose.override.yml` on the host — the image does not COPY
+   `data/` and must not (artifacts would be baked stale into every build):
+
+   ```yaml
+   services:
+     app:
+       volumes:
+         - ./data/ml:/srv/betting-ai/data/ml:ro
+   ```
+
+4. **Add the ML deps to the image.** The production Dockerfile installs
+   only `--extra football --extra backfill`; scoring additionally needs the
+   `ml` extra (lightgbm/pandas). Append `--extra ml` to BOTH `uv sync` lines
+   in the Dockerfile, then `docker compose up -d --build`. Skipping this
+   step is safe: the loader logs "lightgbm is not installed" and the
+   pipeline runs unfiltered.
+
+5. Verify in the logs:
+
+   ```bash
+   docker compose logs app | grep value-filter
+   # value-filter meta-model loaded (manifest 2026-06-12T..., q*=0.725, 14 features)
+   ```
+
+`VALUE_ML_FILTER` stays at its default (`false`) until score-stratified LIVE
+CLV confirms the holdout evidence — scores then show on the dashboard rows
+("ML 0.xx") without changing any pick behavior. Flipping it to `true` in
+`.env` is the deliberate, evidence-backed step that activates demotion.
+
 ## 5. Backups
 
 The odds-snapshot archive is the irreplaceable asset (NBA closing lines

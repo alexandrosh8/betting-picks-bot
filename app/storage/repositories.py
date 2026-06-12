@@ -169,6 +169,10 @@ async def latest_picks_with_events(
             # "premium" = alerted tier; "volume" = CLV-evidence shadow tier
             # (default view on the dashboard shows premium only).
             "tier": p.tier,
+            # value-filter meta-model score (null = unscored / out of scope)
+            "value_filter_score": (
+                str(p.value_filter_score) if p.value_filter_score is not None else None
+            ),
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
@@ -592,6 +596,11 @@ async def persist_pick(
             reason_summary=pick.reason_summary,
             status="alerted",
             tier=pick.tier,
+            value_filter_score=(
+                Decimal(str(round(pick.value_filter_score, 6)))
+                if pick.value_filter_score is not None
+                else None
+            ),
             created_at=datetime.now(tz=UTC),
         )
         .on_conflict_do_nothing(constraint="uq_picks_event_market_selection_model")
@@ -634,6 +643,13 @@ async def persist_pick(
         existing.recommended_stake_amount = pick.recommended_stake_amount
         existing.stake_breakdown = pick.stake_breakdown.model_dump()
         existing.reason_summary = pick.reason_summary
+        # the promoting detection's score replaces the shadow row's (it is
+        # the score of the alert the operator will actually see)
+        existing.value_filter_score = (
+            Decimal(str(round(pick.value_filter_score, 6)))
+            if pick.value_filter_score is not None
+            else None
+        )
         # created_at advances to the upgrade moment: it is when the pick
         # became an actionable premium alert AND when its exposure was
         # reserved — seed_exposure_ledger (premium-scoped, created_at within

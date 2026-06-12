@@ -78,9 +78,16 @@ def _train_frame(n: int = 600) -> Any:
     return x[FEATURES]
 
 
-def _write_artifacts(tmp_path: Path, q: float) -> Path:
+def _write_artifacts(
+    tmp_path: Path,
+    q: float,
+    verdict: str = "ADOPT",
+    manifest_filename: str = "value_filter_manifest.json",
+    model_filename: str = "value_filter_model.txt",
+) -> Path:
     """Train a tiny real booster (learnable rule: y = edge > 0.03) and write
-    the model + an ADOPT manifest with operating point `q`."""
+    the model + a manifest with operating point `q` (default: ADOPT verdict
+    under the deployed v1 filenames)."""
     x = _train_frame()
     y = (x["edge"].to_numpy() > 0.03).astype(int)
     booster = lgb.train(
@@ -88,10 +95,10 @@ def _write_artifacts(tmp_path: Path, q: float) -> Path:
         lgb.Dataset(x, label=y, categorical_feature=list(CATS)),
         num_boost_round=30,
     )
-    booster.save_model(str(tmp_path / "value_filter_model.txt"))
+    booster.save_model(str(tmp_path / model_filename))
     manifest: dict[str, Any] = {
         "created_utc": NOW.isoformat(),
-        "verdict": "ADOPT",
+        "verdict": verdict,
         "operating_point": {"q": q},
         "features": FEATURES,
         "min_odds": 1.6,
@@ -99,8 +106,31 @@ def _write_artifacts(tmp_path: Path, q: float) -> Path:
         # identity isotonic map: calibrated == raw (clipped off 0/1)
         "calibrator": {"kind": "isotonic", "x_thresholds": [0.0, 1.0], "y_thresholds": [0.0, 1.0]},
     }
-    (tmp_path / "value_filter_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (tmp_path / manifest_filename).write_text(json.dumps(manifest), encoding="utf-8")
     return tmp_path
+
+
+V2_VERDICT = "CANDIDATE (binding verdict: live shadow CLV + fresh 2627 season)"
+
+
+def _write_shadow_v2_artifacts(tmp_path: Path, q: float) -> Path:
+    """v2-style artifacts: CANDIDATE verdict under the *_v2 filenames."""
+    return _write_artifacts(
+        tmp_path,
+        q,
+        verdict=V2_VERDICT,
+        manifest_filename="value_filter_manifest_v2.json",
+        model_filename="value_filter_model_v2.txt",
+    )
+
+
+def _load_shadow_v2(tmp_path: Path) -> ValueFilterModel | None:
+    return ValueFilterModel.load(
+        tmp_path,
+        manifest_filename="value_filter_manifest_v2.json",
+        model_filename="value_filter_model_v2.txt",
+        allow_shadow=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +180,37 @@ def test_empty_batch_scores_to_empty_list(tmp_path: Path) -> None:
     vf = ValueFilterModel.load(_write_artifacts(tmp_path, q=0.725))
     assert vf is not None
     assert vf.score([]) == []
+
+
+def test_adopt_manifest_loads_with_shadow_false(tmp_path: Path) -> None:
+    vf = ValueFilterModel.load(_write_artifacts(tmp_path, q=0.725))
+    assert vf is not None
+    assert vf.shadow is False
+
+
+def test_shadow_candidate_refused_without_allow_shadow(tmp_path: Path) -> None:
+    # The v2 manifest carries verdict CANDIDATE (2425+2526 are SPENT; its
+    # binding verdict is live shadow CLV + the fresh 2627 season) — the
+    # default loader must refuse it exactly like any non-ADOPT artifact.
+    path = _write_shadow_v2_artifacts(tmp_path, q=0.725)
+    assert (
+        ValueFilterModel.load(
+            path,
+            manifest_filename="value_filter_manifest_v2.json",
+            model_filename="value_filter_model_v2.txt",
+        )
+        is None
+    )
+
+
+def test_allow_shadow_loads_shadow_candidate_for_annotation(tmp_path: Path) -> None:
+    vf = _load_shadow_v2(_write_shadow_v2_artifacts(tmp_path, q=0.725))
+    assert vf is not None
+    assert vf.shadow is True
+    assert vf.threshold == 0.725
+    scores = vf.score([_row(0.06), _row(0.005)])
+    assert all(0.0 < s < 1.0 for s in scores)
+    assert scores[0] > scores[1]
 
 
 # ---------------------------------------------------------------------------
@@ -286,3 +347,25 @@ async def test_pipeline_never_demotes_out_of_scope_candidates(tmp_path: Path) ->
     assert picks[0].tier == "premium"
     assert picks[0].value_filter_score is None
     assert len(sink.sent) == 1
+
+
+async def test_shadow_manifest_never_demotes_even_when_enforcement_enabled(
+    tmp_path: Path,
+) -> None:
+    # SHADOW-CANDIDATE + VALUE_ML_FILTER force-combined directly on deps
+    # (bypassing the composition root, which would already refuse): with
+    # q=1.0 every score is sub-threshold, yet the premium pick must flow
+    # untouched — annotated for live-shadow evidence, alerted as always.
+    # Enforcement requires a true ADOPT manifest; a shadow model may not
+    # change behavior under ANY flag combination.
+    vf = _load_shadow_v2(_write_shadow_v2_artifacts(tmp_path, q=1.0))
+    assert vf is not None
+    assert vf.shadow is True
+    sink = RecordingSink()
+    picks = await run_value_pipeline(_deps(sink, vf, enabled=True), "soccer")
+    assert len(picks) == 1
+    assert picks[0].tier == "premium"
+    assert picks[0].value_filter_score is not None
+    assert 0.0 < picks[0].value_filter_score < 1.0
+    assert "demoted" not in picks[0].reason_summary
+    assert len(sink.sent) == 1  # shadow scoring never suppresses alerts

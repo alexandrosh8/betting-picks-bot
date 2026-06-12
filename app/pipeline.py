@@ -16,6 +16,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from app.backtesting import clv as _clv  # noqa: F401  (settlement uses this module)
 from app.edge.gates import GatePolicy, PickCandidate, evaluate
+from app.edge.value_policy import (
+    ValuePolicy,
+    distinct_book_count,
+    min_books_for,
+    min_edge_for,
+    odds_in_bands,
+)
 from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.models.base import ProbabilityModel
 from app.models.value_filter import ValueFilterModel, live_features
@@ -144,12 +151,22 @@ class PipelineDeps:
     value_min_edge: float = 0.015
     value_volume_min_edge: float = 0.015
     value_min_odds: float = 1.30
+    # OPTIONAL value-gate refinements (app/edge/value_policy.py): per-market
+    # premium floors, raw-odds bands, per-market min book counts. The default
+    # all-empty policy is a strict no-op — current behavior, untouched. Built
+    # from Settings at the composition root only (app/config.value_policy);
+    # evidence requirements before enabling any knob live in
+    # docs/backtesting/value-findings.md (spent-holdout discipline).
+    value_policy: ValuePolicy = ValuePolicy()
     # value-filter meta-model (app/models/value_filter.py). When loaded,
     # every in-scope candidate gets a calibrated score annotated on its
     # pick; the score only CHANGES behavior (premium -> volume demotion
     # below the manifest's frozen operating point) when the composition
     # root also sets value_ml_filter_enabled (Settings.value_ml_filter,
-    # default OFF — held-out evidence cited in app/config.py).
+    # default OFF — held-out evidence cited in app/config.py) AND the
+    # loaded manifest is a true ADOPT (model.shadow False): a SHADOW-
+    # CANDIDATE manifest (v2, VALUE_ML_MANIFEST_ALLOW_SHADOW) annotates
+    # only and is refused for demotion both here and at the root.
     value_filter: ValueFilterModel | None = None
     value_ml_filter_enabled: bool = False
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
@@ -492,13 +509,28 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_volume = 0
     n_stale = 0
     n_ml_demoted = 0
+    n_off_band = 0
+    n_thin_books = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
     # min() guards a deps-level inversion (Settings already validates the
-    # ordering at startup) so a bad override can widen nothing.
-    scan_min_edge = min(deps.value_volume_min_edge, deps.value_min_edge)
+    # ordering at startup) so a bad override can widen nothing. Per-market
+    # premium overrides join the scan floor so an override BELOW the global
+    # premium floor (>= the volume floor, Settings-validated) still scans.
+    scan_min_edge = min(
+        deps.value_volume_min_edge,
+        deps.value_min_edge,
+        *(edge for _, edge in deps.value_policy.min_edge_by_market),
+    )
     for (event_id, market, detail), (prices, captured) in grouped.items():
         if event_id in started:
             continue  # kicked off: in-play odds never become picks/upgrades
+        # Per-market book-count floor (default 0 = off): a market quoted by
+        # too few books is skipped wholesale — scaffolding for new lines/
+        # divisions where thin coverage makes the anchor untrustworthy.
+        min_books = min_books_for(deps.value_policy, str(market), detail)
+        if min_books and distinct_book_count(prices) < min_books:
+            n_thin_books += 1
+            continue
         anchored = fair.get((event_id, market, detail))
         if anchored is None:
             continue  # no trustworthy fair value for this market
@@ -516,7 +548,17 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             if age > deps.gate_policy.max_odds_age_seconds:
                 n_stale += 1
                 continue
-            tier = pick_tier(v.edge, deps.value_min_edge, deps.value_volume_min_edge)
+            # Odds-band refinement (default empty = off): RAW best odds must
+            # fall inside a configured band — same convention as the
+            # value_min_odds floor, which also gates on raw odds.
+            if not odds_in_bands(v.best_odds, deps.value_policy.odds_bands):
+                n_off_band += 1
+                continue
+            # Per-market PREMIUM floor override (default: global floor).
+            premium_floor = min_edge_for(
+                deps.value_policy, str(market), detail, deps.value_min_edge
+            )
+            tier = pick_tier(v.edge, premium_floor, deps.value_volume_min_edge)
             if tier is None:
                 continue  # below both floors (unreachable via scan_min_edge)
             # Meta-model score AFTER the edge gate (meta-labeling: the
@@ -537,6 +579,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             if (
                 deps.value_ml_filter_enabled
                 and deps.value_filter is not None
+                # a SHADOW-CANDIDATE manifest (verdict != ADOPT, loaded via
+                # VALUE_ML_MANIFEST_ALLOW_SHADOW) must NEVER demote — its
+                # scores are live-shadow evidence only. Defense in depth:
+                # the composition root already refuses to enable enforcement
+                # with a shadow model (app/scheduler.py).
+                and not deps.value_filter.shadow
                 and tier == "premium"
                 and ml_score is not None
                 and ml_score < deps.value_filter.threshold
@@ -685,6 +733,20 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: ml-filter demoted %d premium candidate(s) to volume",
             sport_key,
             n_ml_demoted,
+        )
+    if n_off_band:
+        # VALUE_ODDS_BANDS intervention is never silent either: these
+        # candidates cleared the edge scan and were rejected on price band.
+        logger.info(
+            "value pipeline %s: %d candidate(s) outside VALUE_ODDS_BANDS",
+            sport_key,
+            n_off_band,
+        )
+    if n_thin_books:
+        logger.info(
+            "value pipeline %s: %d market(s) skipped below their VALUE_MIN_BOOKS_PER_MARKET floor",
+            sport_key,
+            n_thin_books,
         )
     if n_stale:
         # The silent failure mode of a too-slow cycle: candidates captured

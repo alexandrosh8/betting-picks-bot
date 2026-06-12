@@ -234,6 +234,40 @@ def test_load_refuses_non_adopt_verdict(tmp_path: Path) -> None:
     assert ValueFilterModel.load(_write_artifacts(tmp_path, manifest)) is None
 
 
+def test_allow_shadow_still_refuses_incomplete_manifest(tmp_path: Path) -> None:
+    # VALUE_ML_MANIFEST_ALLOW_SHADOW relaxes ONLY the verdict gate — a
+    # shadow candidate without a frozen operating point is still refused
+    # (this check precedes any ML import, no lightgbm needed).
+    manifest = {
+        "verdict": "CANDIDATE (binding verdict: live shadow CLV + fresh 2627 season)",
+        "operating_point": None,
+        "features": ["edge"],
+        "calibrator": {"kind": "platt", "coef": 1.0, "intercept": 0.0},
+        "model": {"kind": "lgbm"},
+    }
+    assert ValueFilterModel.load(_write_artifacts(tmp_path, manifest), allow_shadow=True) is None
+
+
+def test_load_honors_custom_artifact_filenames(tmp_path: Path) -> None:
+    # Only the default-named artifacts exist: pointing the loader at the v2
+    # filenames must be a clean miss (None), never a fallback to v1 files.
+    manifest = {
+        "verdict": "ADOPT",
+        "operating_point": {"q": 0.7},
+        "features": ["edge"],
+        "calibrator": {"kind": "platt", "coef": 1.0, "intercept": 0.0},
+        "model": {"kind": "lgbm"},
+    }
+    assert (
+        ValueFilterModel.load(
+            _write_artifacts(tmp_path, manifest),
+            manifest_filename="value_filter_manifest_v2.json",
+            model_filename="value_filter_model_v2.txt",
+        )
+        is None
+    )
+
+
 def test_load_refuses_manifest_without_operating_point(tmp_path: Path) -> None:
     manifest = {
         "verdict": "ADOPT",

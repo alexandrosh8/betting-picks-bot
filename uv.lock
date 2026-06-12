@@ -225,6 +225,7 @@ ml = [
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "scikit-learn" },
+    { name = "xgboost" },
 ]
 models = [
     { name = "lightgbm" },
@@ -267,6 +268,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "tenacity", specifier = ">=8.3" },
     { name = "uvicorn", specifier = ">=0.30" },
+    { name = "xgboost", marker = "extra == 'ml'", specifier = ">=3.2" },
     { name = "xgboost", marker = "extra == 'models'", specifier = ">=2.0" },
 ]
 provides-extras = ["football", "nba", "models", "backfill", "ml"]

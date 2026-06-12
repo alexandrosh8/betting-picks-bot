@@ -36,6 +36,8 @@ LEAGUES = {
     "EC": "England National League",
     "SC0": "Scotland Premiership",
     "SC1": "Scotland Championship",
+    "SC2": "Scotland League One",
+    "SC3": "Scotland League Two",
     "D1": "Germany Bundesliga",
     "D2": "Germany 2. Bundesliga",
     "I1": "Italy Serie A",

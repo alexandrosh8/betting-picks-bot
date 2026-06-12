@@ -37,6 +37,10 @@ ml = [
     "pandas>=2.2",
     "pyarrow>=24.0.0",
     "scikit-learn>=1.9.0",
+    # v2 challenger (scripts/ml/train_value_filter_v2.py): hist + native
+    # categoricals + monotone_constraints dict-by-name need 3.x; 3.2 adds
+    # pandas-3.0 compat (we run pandas 3.0.3).
+    "xgboost>=3.2",
 ]
 
 [dependency-groups]

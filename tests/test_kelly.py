@@ -7,7 +7,14 @@ from decimal import Decimal
 
 import pytest
 
-from app.risk.staking import StakePolicy, kelly_fraction, recommended_stake, stake_amount
+from app.risk.staking import (
+    StakePolicy,
+    drawdown_constrained_multiplier,
+    effective_kelly_multiplier,
+    kelly_fraction,
+    recommended_stake,
+    stake_amount,
+)
 
 
 def test_full_kelly_exact_value() -> None:
@@ -71,3 +78,66 @@ def test_stake_amount_quantizes_to_cents() -> None:
     assert stake_amount(0.02, Decimal("1000")) == Decimal("20.00")
     assert stake_amount(0.0333, Decimal("1000")) == Decimal("33.30")
     assert stake_amount(0.0, Decimal("1000")) == Decimal("0.00")
+
+
+# --- drawdown-constrained fractional Kelly (OPTIONAL knob, default OFF) ------
+# Continuous-Kelly drawdown law: Pr(dip below 1-d) = (1-d)^(2/lambda - 1).
+
+
+def test_default_policy_keeps_drawdown_knobs_off() -> None:
+    policy = StakePolicy()
+    assert policy.max_drawdown is None
+    assert policy.max_drawdown_probability is None
+    # OFF means the multiplier is exactly the configured fraction.
+    assert effective_kelly_multiplier(policy) == 0.25
+
+
+def test_drawdown_multiplier_reproduces_published_anchors() -> None:
+    # Full Kelly has ~50% chance of a 50% drawdown (MacLean-Thorp-Ziemba):
+    # allowing exactly that risk returns the full-Kelly multiplier.
+    assert drawdown_constrained_multiplier(0.5, 0.5) == pytest.approx(1.0, abs=1e-12)
+    # Quarter Kelly: Pr(50% drawdown) = 0.5 ** (2/0.25 - 1) = 0.5**7.
+    assert drawdown_constrained_multiplier(0.5, 0.5**7) == pytest.approx(0.25, abs=1e-12)
+
+
+def test_drawdown_multiplier_never_exceeds_full_kelly() -> None:
+    # A loose constraint must cap at 1.0, never recommend above full Kelly.
+    assert drawdown_constrained_multiplier(0.5, 0.9) == 1.0
+
+
+def test_binding_drawdown_constraint_tightens_the_stake() -> None:
+    # Pr(50% drawdown) <= 0.1%: lambda* = 2/(1 + ln(.001)/ln(.5)) ~= 0.1824
+    policy = StakePolicy(max_drawdown=0.5, max_drawdown_probability=0.001)
+    lam = effective_kelly_multiplier(policy)
+    assert lam == pytest.approx(0.18238, abs=1e-4)
+    breakdown = recommended_stake(0.55, 2.0, policy)
+    assert breakdown.raw_kelly == pytest.approx(0.10, abs=1e-12)
+    assert breakdown.fractional == pytest.approx(0.10 * lam, abs=1e-12)
+    assert breakdown.fractional < 0.025  # tighter than plain quarter Kelly
+
+
+def test_loose_drawdown_constraint_is_numerically_a_noop() -> None:
+    # Pr(50% dd) <= 10% allows lambda ~0.463 > 0.25 -> the configured quarter
+    # fraction binds and the breakdown is IDENTICAL to the default policy.
+    constrained = StakePolicy(max_drawdown=0.5, max_drawdown_probability=0.1)
+    assert recommended_stake(0.55, 2.0, constrained) == recommended_stake(0.55, 2.0, StakePolicy())
+
+
+def test_per_bet_cap_still_binds_under_drawdown_constraint() -> None:
+    # Big edge: raw Kelly 0.40 -> 0.40 * lambda* still exceeds the 2% cap.
+    policy = StakePolicy(max_drawdown=0.5, max_drawdown_probability=0.01)
+    breakdown = recommended_stake(0.70, 2.0, policy)
+    assert breakdown.capped is True
+    assert breakdown.final == pytest.approx(0.02, abs=1e-12)
+
+
+@pytest.mark.parametrize("d", [0.0, 1.0, -0.1, 1.5])
+def test_out_of_range_drawdown_raises(d: float) -> None:
+    with pytest.raises(ValueError):
+        drawdown_constrained_multiplier(d, 0.1)
+
+
+@pytest.mark.parametrize("beta", [0.0, 1.0, -0.5, 2.0])
+def test_out_of_range_drawdown_probability_raises(beta: float) -> None:
+    with pytest.raises(ValueError):
+        drawdown_constrained_multiplier(0.5, beta)

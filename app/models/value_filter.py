@@ -19,6 +19,16 @@ Dependency policy: importing this module needs core deps only (numpy/stdlib).
 lightgbm and pandas are imported lazily inside `ValueFilterModel.load`/
 `score`; when they are absent the loader returns None and the pipeline runs
 exactly as before — the `ml` extra stays optional.
+
+Shadow candidates (v2, 2026-06-12): a manifest whose verdict is NOT "ADOPT"
+(e.g. the v2 trainer's "CANDIDATE..." — seasons 2425+2526 are SPENT, so v2
+cannot honestly claim ADOPT before live shadow CLV + the fresh 2627 season)
+is refused by default. With `allow_shadow=True` (Settings.
+value_ml_manifest_allow_shadow / VALUE_ML_MANIFEST_ALLOW_SHADOW) it loads
+with `shadow=True`: scores ANNOTATE picks for live shadow evidence, but the
+demotion path (app/pipeline.py) and the composition root (app/scheduler.py)
+both refuse to enforce on a shadow model — enforcement always requires a
+true ADOPT manifest.
 """
 
 from __future__ import annotations
@@ -256,18 +266,33 @@ class ValueFilterModel:
     threshold: float  # frozen operating point q* (manifest, train-only choice)
     min_odds: float  # training odds floor — candidates below it are unscored
     manifest_created_utc: str
+    # True when the manifest verdict is NOT "ADOPT" and loading was allowed
+    # via allow_shadow: ANNOTATION-ONLY. Every enforcement (demotion) call
+    # site MUST check this — a shadow candidate never changes pick behavior.
+    shadow: bool = False
 
     @classmethod
-    def load(cls, model_dir: Path) -> ValueFilterModel | None:
+    def load(
+        cls,
+        model_dir: Path,
+        *,
+        manifest_filename: str = MANIFEST_FILENAME,
+        model_filename: str = MODEL_FILENAME,
+        allow_shadow: bool = False,
+    ) -> ValueFilterModel | None:
         """Load artifacts from `model_dir`, or None (logged) when unavailable.
 
         Refuses anything but a manifest whose ONE-SHOT held-out verdict is
         ADOPT with a frozen operating point: an unvalidated artifact must
-        never be able to demote live picks. All failure modes are non-fatal
-        — the value pipeline simply runs unfiltered, as it always has.
+        never be able to demote live picks. The single exception is
+        `allow_shadow=True` (VALUE_ML_MANIFEST_ALLOW_SHADOW): a non-ADOPT
+        manifest then loads with `shadow=True` for annotation-only scoring —
+        demotion call sites refuse shadow models, so enforcement still
+        requires a true ADOPT manifest. All failure modes are non-fatal —
+        the value pipeline simply runs unfiltered, as it always has.
         """
-        manifest_path = model_dir / MANIFEST_FILENAME
-        model_path = model_dir / MODEL_FILENAME
+        manifest_path = model_dir / manifest_filename
+        model_path = model_dir / model_filename
         if not manifest_path.exists() or not model_path.exists():
             logger.info("value-filter artifacts not found in %s; scoring disabled", model_dir)
             return None
@@ -276,12 +301,22 @@ class ValueFilterModel:
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("value-filter manifest unreadable: %s", type(exc).__name__)
             return None
-        if manifest.get("verdict") != "ADOPT":
+        verdict = manifest.get("verdict")
+        is_adopt = verdict == "ADOPT"
+        if not is_adopt:
+            if not allow_shadow:
+                logger.warning(
+                    "value-filter manifest verdict is %r (not ADOPT); scoring disabled",
+                    verdict,
+                )
+                return None
             logger.warning(
-                "value-filter manifest verdict is %r (not ADOPT); scoring disabled",
-                manifest.get("verdict"),
+                "value-filter manifest %s verdict is %r — loading as SHADOW-CANDIDATE "
+                "(VALUE_ML_MANIFEST_ALLOW_SHADOW): scores annotate picks only; "
+                "demotion still requires a true ADOPT manifest",
+                manifest_filename,
+                verdict,
             )
-            return None
         threshold = (manifest.get("operating_point") or {}).get("q")
         features = manifest.get("features")
         calibrator = manifest.get("calibrator")
@@ -312,12 +347,14 @@ class ValueFilterModel:
             threshold=float(threshold),
             min_odds=float(manifest.get("min_odds", 1.6)),
             manifest_created_utc=str(manifest.get("created_utc", "")),
+            shadow=not is_adopt,
         )
         logger.info(
-            "value-filter meta-model loaded (manifest %s, q*=%.3f, %d features)",
+            "value-filter meta-model loaded (manifest %s, q*=%.3f, %d features, mode=%s)",
             loaded.manifest_created_utc,
             loaded.threshold,
             len(loaded.features),
+            "SHADOW/annotation-only" if loaded.shadow else "ADOPT",
         )
         return loaded
 

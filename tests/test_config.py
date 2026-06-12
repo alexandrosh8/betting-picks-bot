@@ -5,7 +5,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings, gate_policy, stake_policy
+from app.config import Settings, gate_policy, stake_policy, value_policy
+from app.edge.value_policy import ValuePolicy
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -159,3 +160,98 @@ def test_scoped_leagues_keep_the_full_market_list() -> None:
     # as an unknown league) keep the full devig-sound default lists.
     s = make_settings()  # defaults: scoped leagues + 18/21-key lists
     assert len(s.oddsportal_football_markets.split(",")) > 4
+
+
+# --- premium-tier adjustment knobs (2026-06 research): default OFF -----------
+
+
+def test_premium_adjustment_knobs_default_to_current_behavior() -> None:
+    # Every knob empty/None => the built policies are exact no-ops. This is
+    # the contract that protects the live defaults (spent-holdout discipline:
+    # no knob may change behavior without fresh-domain/nested-CV evidence).
+    s = make_settings()
+    assert s.value_min_edge_per_market == ""
+    assert s.value_odds_bands == ""
+    assert s.value_min_books_per_market == ""
+    assert s.stake_max_drawdown is None
+    assert s.stake_max_drawdown_probability is None
+    assert value_policy(s) == ValuePolicy()
+    stakes = stake_policy(s)
+    assert stakes.max_drawdown is None
+    assert stakes.max_drawdown_probability is None
+
+
+def test_value_policy_parses_market_maps_and_bands() -> None:
+    s = make_settings(
+        value_min_edge_per_market="1x2:0.04, Over_Under_2_5:0.035",
+        value_odds_bands="1.8-2.6, 3.0-4.2",
+        value_min_books_per_market="over_under_1_5:5",
+    )
+    policy = value_policy(s)
+    assert policy.min_edge_by_market == (("1x2", 0.04), ("over_under_2_5", 0.035))
+    assert policy.odds_bands == ((1.8, 2.6), (3.0, 4.2))
+    assert policy.min_books_by_market == (("over_under_1_5", 5),)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("value_min_edge_per_market", "1x2"),  # no value
+        ("value_min_edge_per_market", "1x2:abc"),  # not a number
+        ("value_min_edge_per_market", ":0.04"),  # empty key
+        ("value_min_edge_per_market", "1x2:0.04,1x2:0.05"),  # duplicate key
+        ("value_min_edge_per_market", "1x2:1.5"),  # edge outside (0, 1)
+        ("value_odds_bands", "2.6-1.8"),  # lo > hi
+        ("value_odds_bands", "0.9-2.0"),  # lo <= 1.0 (not decimal odds)
+        ("value_odds_bands", "abc"),
+        ("value_min_books_per_market", "h2h:0"),  # < 1 is a pointless entry
+        ("value_min_books_per_market", "h2h:1.5"),  # not an integer
+    ],
+)
+def test_malformed_adjustment_knobs_fail_at_startup(field: str, value: str) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**{field: value})
+
+
+def test_per_market_floor_below_volume_floor_is_fatal() -> None:
+    # Same tier-ordering rule as the global validator, applied per market.
+    with pytest.raises(ValidationError, match="inverts the tiers"):
+        make_settings(value_min_edge_per_market="1x2:0.01")  # volume floor 0.015
+
+
+def test_odds_band_entirely_below_min_odds_is_fatal() -> None:
+    # value_min_odds=1.60 already rejects everything such a band could match;
+    # a dead band silently rejecting ALL picks must refuse to start instead.
+    with pytest.raises(ValidationError, match="can never match"):
+        make_settings(value_odds_bands="1.2-1.5")
+
+
+def test_stake_drawdown_knobs_must_be_set_together() -> None:
+    with pytest.raises(ValidationError, match="both or neither"):
+        make_settings(stake_max_drawdown=0.5)
+    with pytest.raises(ValidationError, match="both or neither"):
+        make_settings(stake_max_drawdown_probability=0.1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("stake_max_drawdown", 0.0),
+        ("stake_max_drawdown", 1.0),
+        ("stake_max_drawdown_probability", 0.0),
+        ("stake_max_drawdown_probability", 1.5),
+    ],
+)
+def test_out_of_range_stake_drawdown_knobs_are_fatal(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**{field: value})
+
+
+def test_valid_stake_drawdown_pair_flows_into_stake_policy() -> None:
+    s = make_settings(stake_max_drawdown=0.5, stake_max_drawdown_probability=0.1)
+    stakes = stake_policy(s)
+    assert stakes.max_drawdown == 0.5
+    assert stakes.max_drawdown_probability == 0.1
+    # the validated defaults stay untouched alongside the optional knob
+    assert stakes.fractional_kelly == 0.25
+    assert stakes.max_stake_fraction == 0.02

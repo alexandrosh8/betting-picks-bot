@@ -1,5 +1,28 @@
 # Decisions Log
 
+- 2026-06-12 (value filter v2: SHADOW-CANDIDATE, spent-holdout kept) —
+  **v2 retrain ships annotation-only; verdict stage-v2-shadow** (full
+  digest + numbers: `docs/research/premium-tier-v2.md`). Discipline held:
+  2425+2526 NEVER loaded (trainer filters + asserts at load); every number
+  is train-OOF (<=2324) or the pre-registered FRESH one-shot
+  (EC/SC1/SC2/SC3). Selected model `lgbm_v1feat_sweep_draw81`: pooled OOF
+  log-loss 0.64968 vs v1's 0.65175 — **hyperparameter lift only; the 37
+  new features (rolling form, Understat xG, devig deltas, odds_band) gave
+  NO lift** (honest negative, recorded in the manifest); XGB challenger
+  refused by the pre-registered rule. Fresh one-shot: META transports
+  (incCLV_max +0.0338 vs null) but does not separate from plain
+  edge>=0.03 (overlapping CIs). **Manifest verdict is `CANDIDATE` — the
+  trainer can never emit ADOPT; binding verdict = live shadow CLV + the
+  one-shot fresh 2627 season.** Wiring: loader gained
+  `VALUE_ML_MANIFEST_ALLOW_SHADOW` (+ filename overrides) — a non-ADOPT
+  manifest loads ONLY with that flag, is marked `shadow=True`, and can
+  never demote (pipeline branch + composition root both refuse;
+  enforcement requires a true ADOPT manifest). Config defaults still point
+  at v1 ADOPT artifacts. **How to apply:** to shadow v2 live set the three
+  env overrides in `.env.example`; flip verdict to ADOPT only with §5
+  evidence of the digest attached; 2425/2526 numbers anywhere =
+  CONTAMINATED-REFERENCE, never headlines.
+
 - 2026-06-12 (ML value filter: ADOPT, shadow-first) — **meta-labeling
   SECONDARY model over the value signal adopted; enforcement OFF by
   default** (full evidence + protocol: `docs/research/ml-value-filter.md`;

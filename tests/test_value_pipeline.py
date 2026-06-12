@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from app.edge.gates import GatePolicy
+from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import EventDirectory, EventTeams
 from app.models.base import NullModel
 from app.notifications.base import Alert
@@ -573,3 +574,77 @@ def test_event_fair_probs_expanded_markets_devig_per_line_and_derive_dc() -> Non
     assert dc_fair["Draw or Away FC"] == pytest.approx(h2h_fair["Draw"] + h2h_fair["Away FC"])
     # overlapping legs by design: DC fair sums to 2.0, not 1.0
     assert sum(dc_fair.values()) == pytest.approx(2.0)
+
+
+# --- optional ValuePolicy knobs (premium-tier adjustments, default OFF) ------
+# Evidence requirements before enabling any of these live in
+# docs/backtesting/value-findings.md (spent-holdout discipline).
+
+
+async def test_default_value_policy_is_a_strict_noop() -> None:
+    # PipelineDeps' default policy must reproduce the baseline exactly: one
+    # premium pick, one alert (same fixture as the liveness test above).
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    assert deps.value_policy == ValuePolicy()
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    assert picks[0].tier == "premium"
+    assert len(sink.sent) == 1
+
+
+async def test_per_market_premium_floor_demotes_to_volume() -> None:
+    # An h2h-specific premium floor far above the candidate's ~0.045 edge
+    # demotes it to the volume (shadow) tier: never alerted; without a DB the
+    # shadow pick is dropped entirely (no evidence row to accumulate).
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_policy = ValuePolicy(min_edge_by_market=(("h2h", 0.50),))
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []
+    assert sink.sent == []
+
+
+async def test_per_market_floor_on_another_market_changes_nothing() -> None:
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_policy = ValuePolicy(min_edge_by_market=(("totals", 0.50),))
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    assert picks[0].tier == "premium"
+
+
+async def test_odds_band_gate_rejects_out_of_band_prices() -> None:
+    # SoftBook's 2.90 best price sits outside a 3.0-4.0 band -> no pick, and
+    # the rejection happens AFTER the edge scan (it is a price-shape gate).
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_policy = ValuePolicy(odds_bands=((3.0, 4.0),))
+    assert await run_value_pipeline(deps, "soccer") == []
+    assert sink.sent == []
+
+
+async def test_odds_band_gate_passes_in_band_prices() -> None:
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_policy = ValuePolicy(odds_bands=((2.5, 3.0),))
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    assert picks[0].decimal_odds == 2.90
+
+
+async def test_min_books_floor_skips_thinly_quoted_markets() -> None:
+    # The fixture quotes h2h at exactly 2 books; a 3-book floor skips the
+    # whole market before any anchoring/scanning happens.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_policy = ValuePolicy(min_books_by_market=(("h2h", 3),))
+    assert await run_value_pipeline(deps, "soccer") == []
+    assert sink.sent == []
+
+
+async def test_min_books_floor_at_actual_count_changes_nothing() -> None:
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.value_policy = ValuePolicy(min_books_by_market=(("h2h", 2),))
+    assert len(await run_value_pipeline(deps, "soccer")) == 1

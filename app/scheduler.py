@@ -28,7 +28,7 @@ from redis.asyncio import Redis
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.config import Settings, gate_policy, stake_policy
+from app.config import Settings, gate_policy, stake_policy, value_policy
 from app.ingestion.base import EventDirectory, OddsLoader
 from app.ingestion.football_data import (
     MatchRow,
@@ -248,21 +248,41 @@ def build_scheduler(
         # value-findings.md); the same method prices the closing fair in the
         # CLV true-up so live CLV is comparable to the backtest.
         value_devig = DevigMethod(settings.value_devig)
-        # Value-filter meta-model (verdict ADOPT — held-out evidence cited in
-        # app/config.py). Loading is best-effort: missing artifacts or ML
-        # deps leave value_filter=None and the pipeline runs unfiltered.
-        # When the ENFORCEMENT flag is on but nothing loaded, fail LOUDLY at
-        # composition time — a silently absent filter must not masquerade as
-        # an active one.
+        # Value-filter meta-model (v1 verdict ADOPT — held-out evidence cited
+        # in app/config.py; the v2 retrain is a SHADOW-CANDIDATE loadable
+        # only via VALUE_ML_MANIFEST_ALLOW_SHADOW, annotation-only). Loading
+        # is best-effort: missing artifacts or ML deps leave value_filter=
+        # None and the pipeline runs unfiltered. When the ENFORCEMENT flag
+        # is on but nothing loaded, fail LOUDLY at composition time — a
+        # silently absent filter must not masquerade as an active one.
         value_filter = (
-            ValueFilterModel.load(Path(settings.value_ml_model_dir)) if use_value else None
+            ValueFilterModel.load(
+                Path(settings.value_ml_model_dir),
+                manifest_filename=settings.value_ml_manifest_filename,
+                model_filename=settings.value_ml_model_filename,
+                allow_shadow=settings.value_ml_manifest_allow_shadow,
+            )
+            if use_value
+            else None
         )
-        if settings.value_ml_filter and value_filter is None:
+        ml_filter_enforced = settings.value_ml_filter
+        if ml_filter_enforced and value_filter is None:
             logger.error(
                 "VALUE_ML_FILTER=true but no value-filter model loaded from %s "
                 "(missing artifacts or ML deps?) — picks run UNFILTERED",
                 settings.value_ml_model_dir,
             )
+        if ml_filter_enforced and value_filter is not None and value_filter.shadow:
+            # Enforcement requires a true ADOPT manifest. A SHADOW-CANDIDATE
+            # (verdict != ADOPT, loaded via VALUE_ML_MANIFEST_ALLOW_SHADOW)
+            # may only annotate — demotion on unproven evidence is forbidden
+            # by the spent-holdout discipline (.claude/memory/decisions.md).
+            logger.error(
+                "VALUE_ML_FILTER=true but manifest %s is a SHADOW-CANDIDATE "
+                "(verdict != ADOPT) — enforcement refused; running ANNOTATION-ONLY",
+                settings.value_ml_manifest_filename,
+            )
+            ml_filter_enforced = False
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -285,8 +305,11 @@ def build_scheduler(
             # volume (shadow) tier floor; == value_min_edge disables it
             value_volume_min_edge=settings.value_volume_min_edge,
             value_min_odds=settings.value_min_odds,
+            # optional per-market/odds-band/book-count refinements — the
+            # default (all env knobs empty) is the all-empty no-op policy
+            value_policy=value_policy(settings),
             value_filter=value_filter,
-            value_ml_filter_enabled=settings.value_ml_filter,
+            value_ml_filter_enabled=ml_filter_enforced,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 

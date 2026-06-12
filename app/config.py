@@ -11,6 +11,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.edge.gates import GatePolicy
+from app.edge.value_policy import ValuePolicy
 from app.risk.staking import StakePolicy
 
 # leagues=all scrapes oddsportal's WORLDWIDE daily pages — typically 100-300+
@@ -22,6 +23,78 @@ from app.risk.staking import StakePolicy
 # whenever 'all' is configured: 4 tabs at concurrency 5 keeps a 300-400 match
 # slate inside a ~30-minute freshness window.
 ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET = 4
+
+
+def _parse_market_map(raw: str, env_name: str) -> tuple[tuple[str, str], ...]:
+    """Parse a csv of "market_key:value" into ordered (key, raw_value) pairs.
+
+    Keys are lowercased; blanks are skipped; a malformed or duplicate entry
+    is a fatal config error (fail fast at startup, like the pacing knobs).
+    """
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for entry in (e.strip() for e in raw.split(",") if e.strip()):
+        key, sep, value = entry.rpartition(":")
+        key = key.strip().lower()
+        value = value.strip()
+        if not sep or not key or not value:
+            raise ValueError(f"{env_name}: bad entry {entry!r} (expected 'market_key:value')")
+        if key in seen:
+            raise ValueError(f"{env_name}: duplicate market key {key!r}")
+        seen.add(key)
+        pairs.append((key, value))
+    return tuple(pairs)
+
+
+def parse_market_min_edges(raw: str) -> tuple[tuple[str, float], ...]:
+    """VALUE_MIN_EDGE_PER_MARKET entries as (market_key, edge) pairs."""
+    out: list[tuple[str, float]] = []
+    for key, value in _parse_market_map(raw, "VALUE_MIN_EDGE_PER_MARKET"):
+        try:
+            edge = float(value)
+        except ValueError:
+            raise ValueError(
+                f"VALUE_MIN_EDGE_PER_MARKET[{key}]: {value!r} is not a number"
+            ) from None
+        if not 0.0 < edge < 1.0:
+            raise ValueError(f"VALUE_MIN_EDGE_PER_MARKET[{key}]={edge} must be in (0, 1)")
+        out.append((key, edge))
+    return tuple(out)
+
+
+def parse_market_min_books(raw: str) -> tuple[tuple[str, int], ...]:
+    """VALUE_MIN_BOOKS_PER_MARKET entries as (market_key, count) pairs."""
+    out: list[tuple[str, int]] = []
+    for key, value in _parse_market_map(raw, "VALUE_MIN_BOOKS_PER_MARKET"):
+        try:
+            count = int(value)
+        except ValueError:
+            raise ValueError(
+                f"VALUE_MIN_BOOKS_PER_MARKET[{key}]: {value!r} is not an integer"
+            ) from None
+        if count < 1:
+            raise ValueError(f"VALUE_MIN_BOOKS_PER_MARKET[{key}]={count} must be >= 1")
+        out.append((key, count))
+    return tuple(out)
+
+
+def parse_odds_bands(raw: str) -> tuple[tuple[float, float], ...]:
+    """VALUE_ODDS_BANDS csv ("lo-hi,...") as inclusive (lo, hi) band pairs."""
+    bands: list[tuple[float, float]] = []
+    for entry in (e.strip() for e in raw.split(",") if e.strip()):
+        lo_s, sep, hi_s = entry.partition("-")
+        try:
+            lo, hi = float(lo_s), float(hi_s)
+        except ValueError:
+            raise ValueError(f"VALUE_ODDS_BANDS: bad band {entry!r} (expected 'lo-hi')") from None
+        if not sep:
+            raise ValueError(f"VALUE_ODDS_BANDS: bad band {entry!r} (expected 'lo-hi')")
+        if not 1.0 < lo <= hi:
+            raise ValueError(
+                f"VALUE_ODDS_BANDS: band {entry!r} needs 1.0 < lo <= hi (decimal odds)"
+            )
+        bands.append((lo, hi))
+    return tuple(bands)
 
 
 class Settings(BaseSettings):
@@ -112,6 +185,66 @@ class Settings(BaseSettings):
     # (gitignored; produced by the trainer, copied to the host at deploy —
     # docs/deployment/openclaw-ubuntu.md). Missing artifacts = no scoring.
     value_ml_model_dir: str = "data/ml"
+    # Which manifest/model files inside VALUE_ML_MODEL_DIR the loader reads.
+    # Defaults = the v1 ADOPT artifacts. The v2 retrain (scripts/ml/
+    # train_value_filter_v2.py, docs/research/premium-tier-v2.md) writes
+    # value_filter_manifest_v2.json + value_filter_model_v2.txt with verdict
+    # "CANDIDATE": seasons 2425+2526 are SPENT as a holdout, so v2 cannot
+    # honestly claim ADOPT until live shadow CLV + the one-shot fresh 2627
+    # season decide. The default therefore stays v1 — pointing these at the
+    # v2 files requires VALUE_ML_MANIFEST_ALLOW_SHADOW=true below.
+    value_ml_manifest_filename: str = "value_filter_manifest.json"
+    value_ml_model_filename: str = "value_filter_model.txt"
+    # Allow loading a manifest whose verdict is NOT "ADOPT" (e.g. the v2
+    # SHADOW-CANDIDATE) for ANNOTATION-ONLY scoring: picks carry the score
+    # for dashboards + live-shadow CLV stratification, but demotion never
+    # happens — both app/pipeline.py and app/scheduler.py refuse to enforce
+    # on a shadow model even if VALUE_ML_FILTER=true. Enforcement always
+    # requires a true ADOPT manifest. Default OFF.
+    value_ml_manifest_allow_shadow: bool = False
+
+    # --- Premium-tier adjustment knobs (2026-06 strategy research) -----------
+    # ALL default OFF (empty/None = exactly the validated global-threshold
+    # behavior). Each knob exists so the existing harness can evaluate it
+    # later; NONE may be enabled without nested season-blocked walk-forward
+    # evidence WITHIN train seasons <= 2324 or a never-consulted fresh domain
+    # (AH market, never-loaded divisions) — seasons 2425+2526 are SPENT as a
+    # holdout (.claude/memory/decisions.md; docs/backtesting/value-findings.md;
+    # docs/research/ml-value-filter.md). The binding verdict for any setting
+    # chosen there is live shadow CLV + the one-shot fresh 2627 season.
+    #
+    # Per-market PREMIUM min-edge overrides, csv of "market_key:edge" — e.g.
+    # "1x2:0.04,over_under_2_5:0.035,asian_handicap_-1_5:0.05". Keys are the
+    # line-qualified source market (OddsSnapshotIn.market_detail, the same
+    # keys the dashboard per-market counters show) or the market family
+    # ("h2h", "totals", ...); most specific wins; unlisted markets keep
+    # VALUE_MIN_EDGE. One mapping env var instead of VALUE_MIN_EDGE_1X2-style
+    # suffixes because line-qualified keys ("asian_handicap_-1_5") are not
+    # legal env-var fragments and new markets must not need code changes.
+    value_min_edge_per_market: str = ""
+    # Odds-band gate refinement, csv of "lo-hi" inclusive RAW-odds bands —
+    # e.g. "1.8-2.6" or "1.6-2.4,3.0-4.2". Empty = only the VALUE_MIN_ODDS
+    # floor (current behavior). FLB literature establishes margin is loaded
+    # onto longshots; WHICH bands are structurally soft at soft books is
+    # practitioner folklore — bands must be learned on nested CV (<= 2324),
+    # never asserted (research item #1/FLB, rank #5).
+    value_odds_bands: str = ""
+    # Market-expansion scaffolding: per-market minimum distinct-bookmaker
+    # count, csv of "market_key:count" — e.g. "over_under_1_5:5". A market
+    # quoted by fewer books is skipped entirely (thin-liquidity proxy for
+    # new lines/divisions). Empty = no floor anywhere (current behavior).
+    value_min_books_per_market: str = ""
+
+    # --- Optional drawdown-constrained staking (default OFF) -----------------
+    # Both set => Kelly multiplier = min(FRACTIONAL_KELLY, lambda*) where
+    # lambda* solves Pr(drawdown > STAKE_MAX_DRAWDOWN) <=
+    # STAKE_MAX_DRAWDOWN_PROBABILITY (Busseti-Boyd 2016 single-bet closed
+    # form — app/risk/staking.py). Staking never changes per-bet yield; this
+    # shapes bankroll growth/drawdown only, and stakes stay informational
+    # (picks-only platform, ADR-0002). Phase-6 decision; do not enable
+    # without the evidence protocol above.
+    stake_max_drawdown: float | None = Field(default=None, gt=0.0, lt=1.0)
+    stake_max_drawdown_probability: float | None = Field(default=None, gt=0.0, lt=1.0)
 
     # --- Odds sources (read-only access) -----------------------------------------
     # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);
@@ -251,6 +384,32 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _enforce_premium_adjustment_knobs(self) -> "Settings":
+        # Default-off knobs must still fail FAST when set badly: a malformed
+        # mapping or a contradictory band silently changing the pick flow is
+        # exactly the failure mode the pacing validators exist to prevent.
+        for key, edge in parse_market_min_edges(self.value_min_edge_per_market):
+            if edge < self.value_volume_min_edge:
+                raise ValueError(
+                    f"VALUE_MIN_EDGE_PER_MARKET[{key}]={edge} is below "
+                    f"VALUE_VOLUME_MIN_EDGE={self.value_volume_min_edge} — a per-market "
+                    "premium floor under the volume floor inverts the tiers."
+                )
+        parse_market_min_books(self.value_min_books_per_market)
+        for lo, hi in parse_odds_bands(self.value_odds_bands):
+            if hi < self.value_min_odds:
+                raise ValueError(
+                    f"VALUE_ODDS_BANDS band {lo}-{hi} sits entirely below "
+                    f"VALUE_MIN_ODDS={self.value_min_odds} — it can never match."
+                )
+        if (self.stake_max_drawdown is None) != (self.stake_max_drawdown_probability is None):
+            raise ValueError(
+                "STAKE_MAX_DRAWDOWN and STAKE_MAX_DRAWDOWN_PROBABILITY define one "
+                "constraint — set both or neither."
+            )
+        return self
+
     def odds_api_keys(self) -> tuple[str, ...]:
         """Configured Odds API keys for rotation, in order, empties dropped."""
         keys = (self.odds_api_key, self.odds_api_key_1, self.odds_api_key_2, self.odds_api_key_3)
@@ -271,6 +430,20 @@ def stake_policy(settings: Settings) -> StakePolicy:
     return StakePolicy(
         fractional_kelly=settings.fractional_kelly,
         max_stake_fraction=settings.max_recommended_stake_percent,
+        # Optional drawdown constraint (default None/None = the plain
+        # 0.25x/2% path, numerically unchanged) — see Settings comments.
+        max_drawdown=settings.stake_max_drawdown,
+        max_drawdown_probability=settings.stake_max_drawdown_probability,
+    )
+
+
+def value_policy(settings: Settings) -> ValuePolicy:
+    """Optional value-gate refinements; the default (empty) Settings knobs
+    build the all-empty no-op policy — current live behavior, untouched."""
+    return ValuePolicy(
+        min_edge_by_market=parse_market_min_edges(settings.value_min_edge_per_market),
+        odds_bands=parse_odds_bands(settings.value_odds_bands),
+        min_books_by_market=parse_market_min_books(settings.value_min_books_per_market),
     )
 
 

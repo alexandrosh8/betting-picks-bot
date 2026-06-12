@@ -199,3 +199,247 @@ def test_kickoff_utc_is_tz_aware_and_converted_from_uk_local() -> None:
     # 2024-08-16 is BST (UTC+1): 20:00 UK -> 19:00 UTC
     assert k == datetime(2024, 8, 16, 19, 0, tzinfo=UTC)
     assert cands[0].day_of_week == 4  # Friday
+
+
+# ---------------------------------------------------------------------------
+# v2 — schema versioning, FLB, anchor disagreement, rolling form, xG
+# ---------------------------------------------------------------------------
+def _stat_row(date: str, home: str, away: str, **over: str) -> dict[str, str]:
+    """maxavg row with stats columns (HS/HST/HC) for rolling-form tests."""
+    r = _row_maxavg(Date=date, HomeTeam=home, AwayTeam=away)
+    r.update(over)
+    return r
+
+
+def test_v1_schema_is_exact_frozen_subset() -> None:
+    assert len(bvd.SCHEMA_V1) == 29
+    assert set(bvd.SCHEMA_V1) <= set(bvd.SCHEMA)
+    # frozen v1 ordering — the --v1 artifact must keep the original layout
+    assert bvd.SCHEMA_V1[:8] == (
+        "league",
+        "season",
+        "match_date",
+        "kickoff_utc",
+        "home_team",
+        "away_team",
+        "market",
+        "selection",
+    )
+    assert bvd.SCHEMA_V1[-7:] == (
+        "won",
+        "bet_odds",
+        "pinn_close_fair",
+        "max_close_fair",
+        "clv_pinn",
+        "clv_max",
+        "profit_units",
+    )
+    # v1 columns keep their original ID/SIGNAL/LABEL classification
+    for col in bvd.SCHEMA_V1:
+        assert col in bvd.SCHEMA
+
+
+def test_to_dataframe_v1_flag_reproduces_v1_columns() -> None:
+    cands = bvd.candidates_from_rows("E0", "2425", [_row_maxavg()])
+    df_v1 = bvd._to_dataframe(cands, schema_version=1)
+    assert list(df_v1.columns) == list(bvd.SCHEMA_V1)
+    df_v2 = bvd._to_dataframe(cands)
+    assert list(df_v2.columns) == list(bvd.SCHEMA)
+    assert df_v2["consulted_before"].dtype == bool
+    assert str(df_v2["fair_prob_rank"].dtype) == "int32"
+    # v2 nullable feature columns land as float64 (LightGBM-native NaN)
+    assert str(df_v2["home_xg_for_r5"].dtype) == "float64"
+    assert str(df_v2["away_corners_against_r5"].dtype) == "float64"
+
+
+def test_rolling_form_uses_only_strictly_prior_matches() -> None:
+    rows = [
+        _stat_row(
+            "16/08/2024",
+            "Alpha",
+            "Beta",
+            FTHG="2",
+            FTAG="1",
+            HS="10",
+            AS="4",
+            HST="5",
+            AST="2",
+            HC="6",
+            AC="3",
+        ),
+        _stat_row(
+            "23/08/2024",
+            "Beta",
+            "Alpha",
+            FTHG="0",
+            FTAG="3",
+            HS="7",
+            AS="12",
+            HST="3",
+            AST="6",
+            HC="2",
+            AC="8",
+        ),
+        _stat_row(
+            "30/08/2024",
+            "Alpha",
+            "Beta",
+            FTHG="5",
+            FTAG="5",
+            FTR="D",
+            HS="99",
+            AS="99",
+            HST="99",
+            AST="99",
+            HC="99",
+            AC="99",
+        ),
+    ]
+    cands = bvd.candidates_from_rows("E0", "2425", rows)
+    first = next(c for c in cands if c.match_date.day == 16)
+    # first match of the season: no prior matches -> all form features null
+    for col in (f"home_{f}" for f in bvd._FORM_FEATS):
+        assert getattr(first, col) is None, f"{col} must be null on matchday 1"
+    third = next(c for c in cands if c.match_date.day == 30)
+    # Alpha (home): m1 home (gf 2, ga 1, sf 10, sa 4), m2 away (gf 3, ga 0, sf 12, sa 7)
+    assert third.home_gf_r5 == pytest.approx(2.5)
+    assert third.home_ga_r5 == pytest.approx(0.5)
+    assert third.home_gf_r10 == pytest.approx(2.5)
+    assert third.home_shots_for_r5 == pytest.approx(11.0)
+    assert third.home_shots_against_r5 == pytest.approx(5.5)
+    assert third.home_sot_for_r5 == pytest.approx(5.5)
+    assert third.home_sot_against_r5 == pytest.approx(2.5)
+    assert third.home_corners_for_r5 == pytest.approx(7.0)
+    assert third.home_corners_against_r5 == pytest.approx(2.5)
+    # Beta (away): mirror image
+    assert third.away_gf_r5 == pytest.approx(0.5)
+    assert third.away_ga_r5 == pytest.approx(2.5)
+    assert third.away_shots_for_r5 == pytest.approx(5.5)
+    assert third.away_shots_against_r5 == pytest.approx(11.0)
+    # the current match's own 99s did NOT enter its features (shift(1) proof):
+    # had they leaked, home_shots_for_r5 would be (10+12+99)/3 = 40.33
+    assert third.home_shots_for_r5 < 12.0
+
+
+def test_rolling_form_stats_nullable_but_goals_present() -> None:
+    rows = [
+        _stat_row("16/08/2024", "Alpha", "Beta", FTHG="2", FTAG="1"),  # no HS/HC cols
+        _stat_row("23/08/2024", "Alpha", "Beta", FTHG="0", FTAG="0", FTR="D"),
+    ]
+    cands = bvd.candidates_from_rows("E0", "2425", rows)
+    second = next(c for c in cands if c.match_date.day == 23)
+    assert second.home_gf_r5 == pytest.approx(2.0)  # goals always present
+    assert second.away_ga_r5 == pytest.approx(2.0)
+    assert second.home_shots_for_r5 is None  # stats columns absent -> null
+    assert second.away_corners_against_r5 is None
+
+
+def test_flb_odds_band_and_fair_prob_rank() -> None:
+    assert bvd._odds_band(1.5) == "(1.0,1.5]"
+    assert bvd._odds_band(1.51) == "(1.5,2.0]"
+    assert bvd._odds_band(2.2) == "(2.0,3.0]"
+    assert bvd._odds_band(10.0) == "(5.0,10.0]"
+    assert bvd._odds_band(10.01) == "(10.0,inf)"
+    cands = bvd.candidates_from_rows("E0", "2425", [_row_maxavg()])
+    fair = devig([2.00, 3.50, 4.00], method=DevigMethod.DIFFERENTIAL_MARGIN)
+    for c in cands:
+        assert c.odds_band == bvd._odds_band(c.best_price)
+        if c.market == "1x2":
+            i = ("H", "D", "A").index(c.selection)
+            assert c.fair_prob_rank == 1 + sum(1 for p in fair if p > fair[i])
+    home = next(c for c in cands if c.market == "1x2" and c.selection == "H")
+    assert home.fair_prob_rank == 1  # shortest price = highest fair prob
+    assert home.odds_band == "(2.0,3.0]"  # best price 2.20
+
+
+def test_anchor_disagreement_v2_features() -> None:
+    cands = bvd.candidates_from_rows("E0", "2425", [_row_maxavg()])
+    home = next(c for c in cands if c.market == "1x2" and c.selection == "H")
+    assert home.price_ratio_best_pinn == pytest.approx(2.20 / 2.00)
+    assert home.prob_gap_pinn_best == pytest.approx(1 / 2.00 - 1 / 2.20)
+    ps = [2.00, 3.50, 4.00]
+    canon = devig(ps, method=DevigMethod.DIFFERENTIAL_MARGIN)
+    assert home.fair_mult_delta == pytest.approx(
+        devig(ps, method=DevigMethod.MULTIPLICATIVE)[0] - canon[0]
+    )
+    assert home.fair_shin_delta == pytest.approx(devig(ps, method=DevigMethod.SHIN)[0] - canon[0])
+    assert home.fair_power_delta == pytest.approx(devig(ps, method=DevigMethod.POWER)[0] - canon[0])
+
+
+def test_consulted_before_tags_the_18_league_universe() -> None:
+    assert len(bvd.CONSULTED_LEAGUES) == 18
+    for code in ("EC", "SC1", "SC2", "SC3"):
+        assert code not in bvd.CONSULTED_LEAGUES
+    consulted = bvd.candidates_from_rows("E0", "2425", [_row_maxavg()])
+    assert all(c.consulted_before for c in consulted)
+    fresh = bvd.candidates_from_rows("SC2", "2425", [_row_maxavg()])
+    assert fresh and all(not c.consulted_before for c in fresh)
+
+
+def _us_fixture(
+    dt: str, home: str, away: str, gh: int, ga: int, xgh: float, xga: float
+) -> dict[str, str]:
+    return {
+        "datetime": dt,
+        "team_home": home,
+        "team_away": away,
+        "goals_home": str(gh),
+        "goals_away": str(ga),
+        "xg_home": str(xgh),
+        "xg_away": str(xga),
+    }
+
+
+def test_xg_lookup_rolls_strictly_prior_and_maps_names() -> None:
+    fixtures = [
+        _us_fixture("2024-08-10 12:00:00", "Manchester City", "Alpha", 2, 1, 1.8, 0.7),
+        _us_fixture("2024-08-17 12:00:00", "Alpha", "Manchester City", 0, 1, 0.5, 2.2),
+        _us_fixture("2024-08-24 12:00:00", "Manchester City", "Beta", 3, 0, 2.5, 0.4),
+    ]
+    lookup = bvd.build_xg_lookup(fixtures)
+    # join keys are MAPPED football-data names (Manchester City -> Man City)
+    h1, a1 = lookup[("Man City", "Alpha")]
+    assert all(v is None for v in h1.values())  # first match: no prior xG
+    assert all(v is None for v in a1.values())
+    h3, _ = lookup[("Man City", "Beta")]
+    assert h3["xg_for_r5"] == pytest.approx((1.8 + 2.2) / 2)
+    assert h3["xg_against_r5"] == pytest.approx((0.7 + 0.5) / 2)
+    assert h3["xg_for_r10"] == pytest.approx((1.8 + 2.2) / 2)
+    # overperformance = goals_for - xg_for over priors: (2-1.8), (1-2.2)
+    assert h3["xg_overperf_r10"] == pytest.approx((0.2 - 1.2) / 2)
+    # the current fixture's own 2.5 xG did not leak into its features
+    assert h3["xg_for_r5"] < 2.2
+
+
+def test_xg_features_join_candidates_and_default_null() -> None:
+    fixtures = [
+        _us_fixture("2024-08-10 12:00:00", "Manchester City", "Beta", 2, 1, 1.8, 0.7),
+        _us_fixture("2024-08-17 12:00:00", "Manchester City", "Alpha", 1, 1, 1.4, 1.1),
+    ]
+    lookup = bvd.build_xg_lookup(fixtures)
+    row = _row_maxavg(HomeTeam="Man City", AwayTeam="Alpha", Date="17/08/2024")
+    cands = bvd.candidates_from_rows("E0", "2425", [row], 0.005, lookup)
+    assert cands
+    for c in cands:
+        assert c.home_xg_for_r5 == pytest.approx(1.8)
+        assert c.home_xg_against_r5 == pytest.approx(0.7)
+        assert c.home_xg_overperf_r10 == pytest.approx(0.2)
+        assert c.away_xg_for_r5 is None  # Alpha's first appearance
+    # no lookup (non-big-5 league / offline) -> all xG features null
+    plain = bvd.candidates_from_rows("E1", "2425", [_row_maxavg()])
+    for c in plain:
+        for col in (f"{s}_{f}" for s in ("home", "away") for f in bvd._XG_FEATS):
+            assert getattr(c, col) is None
+
+
+def test_unmatched_understat_names_quarantine_with_log(capsys: pytest.CaptureFixture) -> None:
+    fixtures = [
+        _us_fixture("2024-08-10 12:00:00", "Phantom FC", "Manchester City", 1, 1, 1.0, 1.0),
+        _us_fixture("2024-08-17 12:00:00", "Manchester City", "Phantom FC", 1, 1, 1.0, 1.0),
+    ]
+    lookup = bvd.build_xg_lookup(fixtures)
+    rows = [_row_maxavg(HomeTeam="Man City", AwayTeam="Beta")]
+    bvd._quarantine_unmatched_names("E0", "2425", rows, lookup)
+    captured = capsys.readouterr().out
+    assert "quarantine understat names" in captured
+    assert "Phantom FC" in captured  # explicit log, no fuzzy auto-merge

@@ -368,3 +368,35 @@ async def test_latest_picks_payload_carries_event_fields(session) -> None:  # ty
     # API payload is data-only; the safety reminder lives in alerts
     # (app/schemas/picks.py, safety_audit check 8) and the dashboard banner.
     assert "manual_betting_reminder" not in p
+
+
+async def test_latest_picks_tier_scope_protects_premium_window(session) -> None:  # type: ignore[no-untyped-def]
+    """Volume-flood regression: the volume shadow tier runs ~6x premium, so
+    an unscoped latest-N window fills with volume rows and an open premium
+    pick falls out of the feed entirely. The server-side tier scope must
+    keep the premium window premium-only."""
+    teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    await persist_pick(
+        session, make_pick("evt-tier-window-prem"), teams, "value-sharp-vs-soft", "tw1"
+    )
+    for i in range(3):  # newer volume picks (persist_pick stamps created_at=now)
+        await persist_pick(
+            session,
+            make_pick(f"evt-tier-window-vol-{i}", tier="volume", edge=0.02),
+            teams,
+            "value-sharp-vs-soft",
+            "tw1",
+        )
+
+    # Unscoped narrow window: ALL volume — the open premium pick is invisible.
+    unscoped = await latest_picks_with_events(session, limit=2)
+    assert all(p["tier"] == "volume" for p in unscoped)
+
+    # Premium-scoped window of the SAME size: the premium pick stays served.
+    premium = await latest_picks_with_events(session, limit=2, tier="premium")
+    assert any(p["bookmaker"] == "testbook" for p in premium)
+    assert all(p["tier"] == "premium" for p in premium)
+
+    volume = await latest_picks_with_events(session, limit=200, tier="volume")
+    assert all(p["tier"] == "volume" for p in volume)
+    assert sum(1 for p in volume if p["bookmaker"] == "testbook") == 3

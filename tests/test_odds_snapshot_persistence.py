@@ -255,6 +255,46 @@ async def test_unresolvable_event_skipped_and_not_cached(factory) -> None:  # ty
     assert await _rows_for_event(factory, EVENT) == 1
 
 
+async def test_poisoned_event_does_not_kill_other_events_history(factory) -> None:  # type: ignore[no-untyped-def]
+    """Per-event SAVEPOINT isolation: ONE event whose insert fails (here an
+    external_ref longer than events.external_ref String(128) — live max is
+    already 112 chars) must not abort the whole batch. Pre-fix the entire
+    cycle's odds history died, every cycle, for as long as the bad match
+    stayed in the scrape window. The poisoned event leads the batch to prove
+    recovery after its savepoint rollback."""
+    bad_ref = "https://www.oddsportal.com/football/world/" + "x" * 120  # > 128 chars
+    teams = {
+        bad_ref: EventTeams(home="Poison Home FC", away="Poison Away FC"),
+        EVENT: TEAMS[EVENT],
+    }
+    rows = [
+        snap("Pinnacle", "Poison Sel", 2.10, event=bad_ref),
+        snap("Pinnacle", "Home FC", 2.50),
+    ]
+    written = await persist_odds_snapshots(factory, rows, teams, "soccer", "test-league")
+    assert written == 1  # the healthy event persisted despite the poison
+    assert await _rows_for_event(factory, EVENT) == 1
+    assert await _rows_for_event(factory, bad_ref) == 0
+
+
+async def test_overlong_free_text_fields_are_clamped_not_fatal(factory) -> None:  # type: ignore[no-untyped-def]
+    """bookmaker/selection are display strings: clamping to their column
+    lengths (64) beats losing the event's whole history to one oversized
+    'TeamName +10.5'-style selection (leagues=all surfaces long slugs)."""
+    rows = [snap("B" * 80, "S" * 80, 2.50)]
+    assert await persist_odds_snapshots(factory, rows, TEAMS, "soccer", "test-league") == 1
+
+    async with factory() as session:
+        stored = await session.scalar(
+            select(OddsSnapshot)
+            .join(Event, OddsSnapshot.event_id == Event.id)
+            .where(Event.external_ref == EVENT)
+        )
+    assert stored is not None
+    assert stored.bookmaker == "B" * 64
+    assert stored.selection == "S" * 64
+
+
 # ---------------------------------------------------------------------------
 # Pipeline-seam tests (fakes, no DB)
 # ---------------------------------------------------------------------------

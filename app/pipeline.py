@@ -74,6 +74,7 @@ def _record_poll(
     matches_found: int | None,
     snapshots_persisted: int | None = None,
     volume_picks: int = 0,
+    stale_candidates: int = 0,
 ) -> None:
     per_market: dict[str, int] = {}
     for snap in snapshots:
@@ -95,6 +96,11 @@ def _record_poll(
         # NEW odds rows appended to odds_snapshots this cycle (change-only).
         # None = persistence is off (no DB) or this cycle's write failed.
         "snapshots_persisted": snapshots_persisted,
+        # Value candidates silently lost to the odds-age gate this cycle:
+        # nonzero means the scrape outlasted MAX_ODDS_AGE_SECONDS — the
+        # cycle is too slow for its slate (trim markets/leagues, raise
+        # concurrency). Surfaced so a slate collapse is visible, not silent.
+        "stale_candidates": stale_candidates,
         # Listings parsed but ZERO odds rows: selector/DOM break or anti-bot
         # wall. finished_at alone would look healthy — flag it explicitly.
         "degraded": bool(matches_found) and not snapshots,
@@ -413,13 +419,27 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
 
+    # In-play gate: a listed match can kick off between page listing and its
+    # scrape (multi-minute cycles); OddsPortal then serves IN-PLAY prices.
+    # Those must never mint, upgrade, or re-alert picks — the operator
+    # cannot take a pre-match price on a started game.
+    started: set[str] = set()
+    if deps.directory is not None:
+        for event_id in {key[0] for key in grouped}:
+            teams = deps.directory.lookup(event_id)
+            if teams is not None and teams.starts_at is not None and teams.starts_at <= now:
+                started.add(event_id)
+
     picks: list[PickOut] = []
     n_volume = 0
+    n_stale = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
     # min() guards a deps-level inversion (Settings already validates the
     # ordering at startup) so a bad override can widen nothing.
     scan_min_edge = min(deps.value_volume_min_edge, deps.value_min_edge)
     for (event_id, market, detail), (prices, captured) in grouped.items():
+        if event_id in started:
+            continue  # kicked off: in-play odds never become picks/upgrades
         anchored = fair.get((event_id, market, detail))
         if anchored is None:
             continue  # no trustworthy fair value for this market
@@ -435,6 +455,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             cap = captured.get((v.selection, v.best_book))
             age = max((now - cap).total_seconds(), 0.0) if cap else 0.0
             if age > deps.gate_policy.max_odds_age_seconds:
+                n_stale += 1
                 continue
             tier = pick_tier(v.edge, deps.value_min_edge, deps.value_volume_min_edge)
             if tier is None:
@@ -563,6 +584,18 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         n_premium,
         n_volume,
     )
+    if n_stale:
+        # The silent failure mode of a too-slow cycle: candidates captured
+        # more than MAX_ODDS_AGE_SECONDS before the cycle ended are dropped
+        # — with a big slate that can be nearly EVERYTHING. Make it loud.
+        logger.warning(
+            "value pipeline %s: %d candidate(s) discarded by the odds-age gate "
+            "(captured >%.0fs before cycle end) — the scrape outlasted the "
+            "freshness window; trim markets/leagues or raise concurrency",
+            sport_key,
+            n_stale,
+            deps.gate_policy.max_odds_age_seconds,
+        )
     _record_poll(
         sport_key,
         snapshots,
@@ -570,6 +603,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         _loader_matches_found(deps.loader, sport_key),
         snapshots_persisted=persisted,
         volume_picks=n_volume,
+        stale_candidates=n_stale,
     )
     return picks
 

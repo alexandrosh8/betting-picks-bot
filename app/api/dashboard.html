@@ -1473,10 +1473,14 @@
 
       async function loadOnce() {
         const seq = ++LOAD_SEQ;
-        // The three endpoints fail INDEPENDENTLY: only /picks decides
-        // OFFLINE; /performance and /health degrade their own sections.
-        const [picksR, perfR, healthR] = await Promise.allSettled([
-          fetchWithTimeout("/picks?limit=200"),
+        // The endpoints fail INDEPENDENTLY: only /picks decides OFFLINE;
+        // /performance and /health degrade their own sections. /picks is
+        // fetched PER TIER: the volume shadow tier runs ~6x premium volume,
+        // so one unscoped latest-200 window would fill with volume rows and
+        // push open premium picks out of both the table and the cards.
+        const [premiumR, volumeR, perfR, healthR] = await Promise.allSettled([
+          fetchWithTimeout("/picks?limit=200&tier=premium"),
+          fetchWithTimeout("/picks?limit=200&tier=volume"),
           fetchWithTimeout("/performance"),
           fetchWithTimeout("/health"),
         ]);
@@ -1486,7 +1490,10 @@
           health = null,
           healthErr = null;
         try {
-          picks = await jsonOf(picksR);
+          picks = (await jsonOf(premiumR)).concat(await jsonOf(volumeR));
+          // Both windows are created_at-desc; the merged ALL-TIERS view
+          // must interleave them the same way.
+          picks.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         } catch (err) {
           picksErr = err;
         }

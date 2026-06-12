@@ -422,6 +422,78 @@ async def test_fetch_match_odds_no_matching_links_skips_scrape() -> None:
     assert await loader.fetch_match_odds("soccer", ["https://x/basketball/y/"]) == []
 
 
+async def test_fetch_match_odds_trims_markets_to_configured_intersection() -> None:
+    # Off-window revalidation passes only the markets its open picks need —
+    # each key costs one tab per match page. The trim may only SELECT from
+    # the validated configured list: unknown keys are dropped, and an empty
+    # intersection falls back to the full list (never worse coverage).
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[MATCH], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["all"])},
+        markets=("1x2", "over_under_2_5"),
+        scrape_fn=fake_scrape,
+        days_ahead=1,
+    )
+    link = "https://www.oddsportal.com/football/world/world-cup/a-vs-b/XYZ/"
+
+    await loader.fetch_match_odds("soccer", [link], markets=["1x2", "asian_handicap_-1_5"])
+    assert calls[-1]["markets"] == ["1x2"]  # unknown-to-config key dropped
+
+    await loader.fetch_match_odds("soccer", [link], markets=["not_configured"])
+    assert calls[-1]["markets"] == ["1x2", "over_under_2_5"]  # fallback: full list
+
+    await loader.fetch_match_odds("soccer", [link])  # no trim requested
+    assert calls[-1]["markets"] == ["1x2", "over_under_2_5"]
+
+
+def test_normalize_match_link_strips_inplay_segment() -> None:
+    from app.ingestion.oddsportal import normalize_match_link
+
+    # the live fork shape: same fixture, same #fragment, extra path segment
+    assert (
+        normalize_match_link(
+            "https://www.oddsportal.com/basketball/x/team-hjC2gcCJ/inplay-odds/#x4T1bBXi"
+        )
+        == "https://www.oddsportal.com/basketball/x/team-hjC2gcCJ/#x4T1bBXi"
+    )
+    assert (
+        normalize_match_link("https://www.oddsportal.com/football/a/b-vs-c/inplay-odds")
+        == "https://www.oddsportal.com/football/a/b-vs-c"
+    )
+    # only the exact path segment is stripped — never a slug containing it
+    untouched = "https://www.oddsportal.com/football/a/inplay-oddsmatch/b/"
+    assert normalize_match_link(untouched) == untouched
+
+
+async def test_inplay_url_fork_collapses_to_one_event() -> None:
+    """The same fixture listed under BOTH its pre-match URL and the
+    '/inplay-odds' fork must become ONE event under the pre-match ref —
+    two events meant double premium exposure, a forked snapshot history,
+    and a tier dedupe blind spot (live picks 2026-06-12)."""
+    base_link = "https://www.oddsportal.com/football/testland/alpha-beta/#frag1"
+    fork = dict(MATCH)
+    fork["match_link"] = (
+        "https://www.oddsportal.com/football/testland/alpha-beta/inplay-odds/#frag1"
+    )
+    base = dict(MATCH)
+    base["match_link"] = base_link
+
+    directory = EventDirectory()
+    loader = make_loader(directory, [base, fork])
+    snapshots = await loader.fetch_odds("soccer")
+
+    assert {s.event_id for s in snapshots} == {base_link}
+    assert len(snapshots) == 8  # the fork deduped at listing time, not doubled
+    assert loader.last_fetch_matches["soccer"] == 1
+    assert directory.lookup(base_link) is not None
+
+
 def _expected_market_and_outcomes(key: str) -> tuple[Market, int]:
     """Doctrine layout per market family: 2-way vs 3-way full outcome sets."""
     exact = {

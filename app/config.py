@@ -13,6 +13,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.edge.gates import GatePolicy
 from app.risk.staking import StakePolicy
 
+# leagues=all scrapes oddsportal's WORLDWIDE daily pages — typically 100-300+
+# matches/day vs a league's ~10 — and every market key costs one browser tab
+# per match page. Measured live (2026-06-12): ~73 s/match at 18 tabs and
+# concurrency 3, i.e. multi-hour cycles; everything captured more than
+# MAX_ODDS_AGE_SECONDS before a cycle ends is then discarded by the odds-age
+# gate, so only the scrape's tail survives. Cap the per-sport market list
+# whenever 'all' is configured: 4 tabs at concurrency 5 keeps a 300-400 match
+# slate inside a ~30-minute freshness window.
+ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET = 4
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -182,6 +192,33 @@ class Settings(BaseSettings):
                 "SAFETY VIOLATION: PICKS_ONLY, MANUAL_BETTING_ONLY and "
                 "READ_ONLY_MARKET_DATA must stay true (ADR-0002)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_all_leagues_market_budget(self) -> "Settings":
+        # 'all' leagues + a wide market list = multi-hour cycles whose slate
+        # the odds-age gate then almost entirely discards (see the budget
+        # constant above). The trim is mandatory, not advisory — fail fast
+        # like the pacing knobs do instead of scraping for hours and
+        # picking nothing.
+        for sport, leagues, markets in (
+            ("FOOTBALL", self.oddsportal_football_leagues, self.oddsportal_football_markets),
+            ("BASKETBALL", self.oddsportal_basketball_leagues, self.oddsportal_basketball_markets),
+        ):
+            slugs = [s.strip() for s in leagues.split(",") if s.strip()]
+            keys = [m.strip() for m in markets.split(",") if m.strip()]
+            # ["all"] is the loader's exact league-less sentinel (a list
+            # MIXING 'all' with slugs is not, and fails in the loader).
+            if slugs == ["all"] and len(keys) > ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET:
+                raise ValueError(
+                    f"ODDSPORTAL_{sport}_LEAGUES=all scrapes the worldwide daily page "
+                    f"(hundreds of matches; every market key adds one browser tab per "
+                    f"match): {len(keys)} markets configured, budget is "
+                    f"{ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET}. Trim "
+                    f"ODDSPORTAL_{sport}_MARKETS or scope the leagues — at ~73s/match "
+                    "with 18 tabs a cycle runs HOURS and the odds-age gate then "
+                    "silently discards almost the whole slate."
+                )
         return self
 
     @model_validator(mode="after")

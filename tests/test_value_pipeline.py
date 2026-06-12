@@ -397,6 +397,66 @@ async def test_value_pipeline_skips_stale_odds() -> None:
     assert sink.sent == []
 
 
+async def test_stale_age_gate_discards_are_counted_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The odds-age gate's failure mode is SILENT slate collapse: when a
+    scrape outlasts MAX_ODDS_AGE_SECONDS (live leagues=all incident,
+    2026-06-12: multi-hour cycles) nearly every candidate is dropped with no
+    trace. Discards must be counted into the poll record and warned about."""
+    import logging as _logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots(age_s=400.0)))
+    with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
+        await run_value_pipeline(deps, "soccer")
+    assert LAST_POLL["soccer"]["stale_candidates"] == 1
+    assert any("odds-age gate" in r.getMessage() for r in caplog.records)
+
+    # Fresh odds: explicit zero, and no warning noise.
+    caplog.clear()
+    deps2 = make_deps(sink, FakeLoader(market_snapshots()))
+    with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
+        await run_value_pipeline(deps2, "soccer")
+    assert LAST_POLL["soccer"]["stale_candidates"] == 0
+    assert not any("odds-age gate" in r.getMessage() for r in caplog.records)
+
+
+async def test_value_pipeline_skips_started_events() -> None:
+    """In-play gate: matches flip in-play between page listing and scrape
+    (long cycles); OddsPortal then serves in-play prices. A started event
+    must produce NO pick and NO alert — a pre-match price no longer exists
+    for the operator to take (live incident: a premium pick minted 76 min
+    after kickoff from the in-play URL fork)."""
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    assert deps.directory is not None
+    deps.directory.register(
+        "evt-1",
+        EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(minutes=20)),
+    )
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []
+    assert sink.sent == []
+    assert deps.ledger.used(datetime.now(tz=UTC).date()) == 0.0
+
+
+async def test_value_pipeline_keeps_future_kickoff_events() -> None:
+    # The gate keys on starts_at <= now: future kickoffs (and NULL — cannot
+    # prove the game started) keep flowing.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    assert deps.directory is not None
+    deps.directory.register(
+        "evt-1",
+        EventTeams(home="Home FC", away="Away FC", starts_at=NOW + timedelta(hours=3)),
+    )
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+
+
 async def test_value_pipeline_handles_future_captured_at() -> None:
     # Live scrapes stamp captured_at DURING the multi-minute fetch; a snapshot
     # "newer than now" must clamp to age 0, not crash PickOut validation.

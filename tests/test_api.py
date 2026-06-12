@@ -126,6 +126,25 @@ def test_dashboard_has_tier_filter_and_premium_scoped_cards() -> None:
     assert "innerHTML" not in text
 
 
+def test_picks_tier_param_is_validated() -> None:
+    # tier scopes the feed server-side (premium|volume); anything else must
+    # 422 before the handler ever touches the DB.
+    client = TestClient(make_app())
+    assert client.get("/picks?tier=bogus").status_code == 422
+    assert client.get("/picks?tier=").status_code == 422
+
+
+def test_dashboard_fetches_picks_per_tier() -> None:
+    """Volume-flood regression: one unscoped /picks?limit=200 window fills
+    with volume rows (~6x premium) and open premium picks vanish from both
+    the table and the headline cards. The dashboard must fetch each tier's
+    own window."""
+    text = TestClient(make_app()).get("/").text
+    assert "/picks?limit=200&tier=premium" in text
+    assert "/picks?limit=200&tier=volume" in text
+    assert '"/picks?limit=200"' not in text  # the unscoped fetch is gone
+
+
 def test_result_payload_validation_rejects_bad_outcome() -> None:
     client = TestClient(make_app())
     response = client.post(

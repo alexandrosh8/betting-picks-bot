@@ -57,8 +57,14 @@ async def health() -> dict[str, Any]:
 async def latest_picks(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    tier: Annotated[str | None, Query(pattern="^(premium|volume)$")] = None,
 ) -> list[dict[str, Any]]:
-    return await latest_picks_with_events(session, limit)
+    """Latest picks, newest first. `tier` scopes the window server-side —
+    the volume shadow tier runs ~6x premium volume, so an unscoped
+    latest-200 window would fill with volume rows and hide open premium
+    picks entirely (the dashboard fetches each tier separately).
+    None = both tiers (legacy feed)."""
+    return await latest_picks_with_events(session, limit, tier=tier)
 
 
 @router.get("/performance")

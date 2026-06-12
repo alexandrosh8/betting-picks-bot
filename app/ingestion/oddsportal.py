@@ -25,6 +25,21 @@ logger = logging.getLogger(__name__)
 
 ScrapeFn = Callable[..., Awaitable[Any]]
 
+# OddsPortal forks a fixture's URL once it goes live: the SAME match page is
+# also listed under an '/inplay-odds' path segment (identical trailing
+# #fragment). Event identity throughout the platform IS the match link, so
+# the fork must collapse to the pre-match URL — otherwise one game becomes
+# TWO events: double premium exposure, a forked odds-snapshot history, and a
+# tier dedupe/upgrade path that cannot see across the fork (observed live
+# 2026-06-12: two premium picks on one basketball fixture, one per URL).
+_INPLAY_SEGMENT_RE = re.compile(r"/inplay-odds(?=[/#?]|$)")
+
+
+def normalize_match_link(link: str) -> str:
+    """Collapse OddsPortal's in-play URL fork to the pre-match match link."""
+    return _INPLAY_SEGMENT_RE.sub("", link)
+
+
 # OddsHarvester market keys we can devig SOUNDLY (mutually-exclusive,
 # full-coverage outcomes). Each line of a totals/handicap family groups
 # separately via OddsSnapshotIn.market_detail. HALF-LINE Asian handicaps
@@ -520,11 +535,11 @@ class OddsPortalLoader:
             for match in getattr(result, "success", None) or []:
                 home = str(match.get("home_team") or "").strip()
                 away = str(match.get("away_team") or "").strip()
-                link = str(
-                    match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}"
+                link = normalize_match_link(
+                    str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
                 )
                 if link in seen_links:
-                    continue  # same fixture listed on adjacent date pages
+                    continue  # same fixture on adjacent date pages OR its in-play fork
                 seen_links.add(link)
                 matches.append(match)
 
@@ -570,22 +585,38 @@ class OddsPortalLoader:
         return str(cfg[0]) if cfg else None
 
     async def fetch_match_odds(
-        self, sport_key: str, match_links: Sequence[str]
+        self,
+        sport_key: str,
+        match_links: Sequence[str],
+        markets: Sequence[str] | None = None,
     ) -> list[OddsSnapshotIn]:
         """Scrape SPECIFIC match pages (open picks outside the dated window
         still need fresh prices). Links from other sports are filtered out
-        — oddsportal URLs embed the sport segment."""
+        — oddsportal URLs embed the sport segment.
+
+        `markets` optionally NARROWS the scrape to the submarkets the caller
+        actually needs (every market key costs one browser tab per match
+        page; the full configured list is 18-21 tabs). Narrowing only ever
+        selects from the validated configured list — unknown keys are
+        dropped, and an empty intersection falls back to the full list so a
+        trimmed request can never have WORSE coverage than no request."""
         if sport_key not in self._config:
             return []
         sport, _leagues = self._config[sport_key]
         links = [link for link in match_links if f"/{sport}/" in link]
         if not links:
             return []
+        requested = self._markets_for(sport_key)
+        if markets is not None:
+            wanted = set(markets)
+            trimmed = tuple(key for key in requested if key in wanted)
+            if trimmed:
+                requested = trimmed
         now = datetime.now(tz=UTC)
         result = await self._scrape(
             sport=sport,
             match_links=links,
-            markets=list(self._markets_for(sport_key)),
+            markets=list(requested),
             headless=self._headless,
             browser_timezone_id="UTC",  # see fetch_odds — host tz leaks otherwise
             browser_locale_timezone=self._locale,  # playwright locale (coherent fp)
@@ -594,11 +625,12 @@ class OddsPortalLoader:
         )
         snapshots: list[OddsSnapshotIn] = []
         for match in getattr(result, "success", None) or []:
-            snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))
+            snapshots.extend(self._convert_match(match, now, requested))
         logger.info(
-            "oddsportal %s match-link revalidation: %d links -> %d snapshots",
+            "oddsportal %s match-link revalidation: %d links x %d markets -> %d snapshots",
             sport_key,
             len(links),
+            len(requested),
             len(snapshots),
         )
         return snapshots
@@ -610,7 +642,10 @@ class OddsPortalLoader:
         away = str(match.get("away_team") or "").strip()
         if not home or not away:
             return []
-        event_id = str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
+        # In-play fork collapses to the pre-match URL — one fixture, one event.
+        event_id = normalize_match_link(
+            str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
+        )
         league = str(match.get("league_name") or "")
         self._directory.register(
             event_id,

@@ -28,12 +28,24 @@ class AlertSink(Protocol):
     async def send(self, alert: Alert) -> bool: ...
 
 
-def build_pick_alert(pick: PickOut, value_min_edge: float | None = None) -> Alert:
+def build_pick_alert(
+    pick: PickOut,
+    value_min_edge: float | None = None,
+    *,
+    model_name: str = "",
+    model_version: str = "",
+) -> Alert:
     """Render a pick into an alert with a stable idempotency key.
 
     The key deliberately EXCLUDES pick_id (a fresh uuid per cycle): the same
     market state must not re-alert every poll; a price change produces a new
     key and a fresh alert.
+
+    The key DOES include `model_name`/`model_version` (the strategy identity
+    from PipelineDeps): a strategy-version bump re-emits the same opportunity
+    as a genuinely new signal, and its alert must not be suppressed by a
+    stale Redis dedupe key left by the previous version. Empty strings
+    (legacy/model-strategy callers) keep the historical key shape.
 
     `value_min_edge` (the VALUE pipeline's premium threshold, passed from
     PipelineDeps) adds the execution line "Still +EV down to X.XX": the
@@ -43,7 +55,10 @@ def build_pick_alert(pick: PickOut, value_min_edge: float | None = None) -> Aler
     v.sharp_fair_prob there) — the model strategy must pass None, its edge
     (p_model - p_fair) does not shrink with the price the same way.
     """
-    raw_key = f"{pick.event_id}|{pick.bookmaker}|{pick.market}|{pick.selection}|{pick.decimal_odds}"
+    raw_key = (
+        f"{pick.event_id}|{pick.bookmaker}|{pick.market}|{pick.selection}"
+        f"|{pick.decimal_odds}|{model_name}|{model_version}"
+    )
     dedupe_key = hashlib.sha256(raw_key.encode()).hexdigest()[:32]
     title = f"+EV pick: {pick.event} — {pick.selection} @ {pick.decimal_odds:.2f}"
     still_ev_line: list[str] = []

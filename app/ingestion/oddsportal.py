@@ -489,6 +489,7 @@ class OddsPortalLoader:
         # parsed" is the selector-break/anti-bot signature — the pipeline
         # surfaces it as a degraded poll on /health.
         self.last_fetch_matches: dict[str, int] = {}
+        self.last_fetch_event_ids: dict[str, tuple[str, ...]] = {}
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
@@ -544,9 +545,22 @@ class OddsPortalLoader:
                 matches.append(match)
 
         snapshots: list[OddsSnapshotIn] = []
+        event_ids: list[str] = []
         for match in matches:
+            home = str(match.get("home_team") or "").strip()
+            away = str(match.get("away_team") or "").strip()
+            if home and away:
+                event_ids.append(
+                    normalize_match_link(
+                        str(
+                            match.get("match_link")
+                            or f"{home}|{away}|{match.get('match_date', '')}"
+                        )
+                    )
+                )
             snapshots.extend(self._convert_match(match, now, self._markets_for(sport_key)))
         self.last_fetch_matches[sport_key] = len(matches)
+        self.last_fetch_event_ids[sport_key] = tuple(dict.fromkeys(event_ids))
         # Per-market counts make scrape gaps visible: OddsPortal market-tab
         # navigation is DOM-fragile upstream, so secondary markets (btts/dnb/
         # AH/EH) intermittently come back empty while 1x2 succeeds — that is

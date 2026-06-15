@@ -134,6 +134,63 @@ def test_picks_tier_param_is_validated() -> None:
     assert client.get("/picks?tier=").status_code == 422
 
 
+def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
+    from app.pipeline import AVAILABLE_GAMES
+
+    AVAILABLE_GAMES["soccer"] = [
+        {
+            "sport": "soccer",
+            "sport_label": "Football",
+            "event_id": "evt-football",
+            "event": "Home FC vs Away FC",
+            "home": "Home FC",
+            "away": "Away FC",
+            "league": "EPL",
+            "starts_at": "2026-06-16T18:00:00+00:00",
+            "market_count": 1,
+            "markets": ["1x2"],
+            "bookmaker_count": 3,
+            "bookmakers": ["A", "B", "C"],
+            "snapshot_count": 9,
+            "first_captured_at": "2026-06-16T10:00:00+00:00",
+            "last_captured_at": "2026-06-16T10:01:00+00:00",
+            "updated_at": "2026-06-16T10:02:00+00:00",
+        }
+    ]
+    AVAILABLE_GAMES["basketball"] = [
+        {
+            "sport": "basketball",
+            "sport_label": "NBA",
+            "event_id": "evt-nba",
+            "event": "Home Hoops vs Away Hoops",
+            "home": "Home Hoops",
+            "away": "Away Hoops",
+            "league": "NBA",
+            "starts_at": "2026-06-16T20:00:00+00:00",
+            "market_count": 0,
+            "markets": [],
+            "bookmaker_count": 0,
+            "bookmakers": [],
+            "snapshot_count": 0,
+            "first_captured_at": None,
+            "last_captured_at": None,
+            "updated_at": "2026-06-16T10:02:00+00:00",
+        }
+    ]
+    try:
+        client = TestClient(make_app())
+        all_rows = client.get("/games").json()
+        assert [row["event_id"] for row in all_rows] == ["evt-football", "evt-nba"]
+        nba_rows = client.get("/games?sport=basketball").json()
+        assert len(nba_rows) == 1
+        assert nba_rows[0]["event"] == "Home Hoops vs Away Hoops"
+        assert nba_rows[0]["snapshot_count"] == 0
+        assert client.get("/games?sport=tennis").status_code == 422
+    finally:
+        AVAILABLE_GAMES.pop("soccer", None)
+        AVAILABLE_GAMES.pop("basketball", None)
+
+
 def test_dashboard_fetches_picks_per_tier() -> None:
     """Volume-flood regression: one unscoped /picks?limit=200 window fills
     with volume rows (~6x premium) and open premium picks vanish from both
@@ -143,6 +200,16 @@ def test_dashboard_fetches_picks_per_tier() -> None:
     assert "/picks?limit=200&tier=premium" in text
     assert "/picks?limit=200&tier=volume" in text
     assert '"/picks?limit=200"' not in text  # the unscoped fetch is gone
+
+
+def test_dashboard_fetches_and_renders_available_games() -> None:
+    text = TestClient(make_app()).get("/").text
+    assert 'id="games-table"' in text
+    assert 'id="f-game-sport"' in text
+    assert 'fetchWithTimeout("/games?limit=1000")' in text
+    assert "renderGames" in text
+    assert "NO GAMES LOADED" in text
+    assert "innerHTML" not in text
 
 
 def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # type: ignore[no-untyped-def]

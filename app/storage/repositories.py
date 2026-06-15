@@ -114,7 +114,11 @@ async def _get_or_create_model_version(
     session: AsyncSession, sport_id: int, name: str, version: str
 ) -> int:
     found = await session.scalar(
-        select(ModelVersion.id).where(ModelVersion.name == name, ModelVersion.version == version)
+        select(ModelVersion.id).where(
+            ModelVersion.sport_id == sport_id,
+            ModelVersion.name == name,
+            ModelVersion.version == version,
+        )
     )
     if found is not None:
         return found

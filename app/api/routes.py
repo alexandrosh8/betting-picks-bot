@@ -81,6 +81,27 @@ async def latest_picks(
     )
 
 
+@router.get("/games")
+async def available_games(
+    limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
+    sport: Annotated[str | None, Query(pattern="^(soccer|basketball)$")] = None,
+) -> list[dict[str, Any]]:
+    """Latest unrestricted football/NBA fixture list from odds ingestion.
+
+    This is a read-only visibility feed. It does not apply edge, odds-age,
+    exposure, tier, or pick-status gates; those remain exclusive to /picks.
+    """
+    from app.pipeline import AVAILABLE_GAMES
+
+    rows: list[dict[str, Any]] = []
+    for sport_key in sorted(AVAILABLE_GAMES):
+        if sport is not None and sport_key != sport and not sport_key.startswith(f"{sport}_"):
+            continue
+        rows.extend(AVAILABLE_GAMES[sport_key])
+    rows.sort(key=lambda row: (row["starts_at"] is None, row["starts_at"] or "", row["event"]))
+    return rows[:limit]
+
+
 @lru_cache(maxsize=1)
 def _ml_operating_point() -> float | None:
     """The configured value-filter manifest's frozen q* (None = no artifact).

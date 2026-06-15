@@ -47,6 +47,7 @@ class FakeLoader:
         self.snapshots = snapshots
         # Mirrors OddsPortalLoader's liveness contract read by _record_poll.
         self.last_fetch_matches: dict[str, int] = {}
+        self.last_fetch_event_ids: dict[str, tuple[str, ...]] = {}
 
     async def fetch_odds(self, sport_key: str) -> Sequence[OddsSnapshotIn]:
         self.last_fetch_matches[sport_key] = len({s.event_id for s in self.snapshots})
@@ -98,7 +99,7 @@ async def test_value_pipeline_records_poll_liveness() -> None:
     # dead showing day-old picks" — every cycle records itself, including
     # per-market snapshot counts and the loader's listing count so a selector
     # break (matches found, zero odds parsed) is visible, not silent.
-    from app.pipeline import LAST_POLL
+    from app.pipeline import AVAILABLE_GAMES, LAST_POLL
 
     sink = RecordingSink()
     await run_value_pipeline(make_deps(sink, FakeLoader(market_snapshots())), "soccer")
@@ -109,6 +110,42 @@ async def test_value_pipeline_records_poll_liveness() -> None:
     assert poll["matches_found"] == 1
     assert poll["per_market"] == {"h2h": 6}
     assert poll["degraded"] is False
+    games = AVAILABLE_GAMES["soccer"]
+    assert len(games) == 1
+    assert games[0]["event"] == "Home FC vs Away FC"
+    assert games[0]["snapshot_count"] == 6
+    assert games[0]["market_count"] == 1
+    assert games[0]["bookmaker_count"] == 2
+
+
+async def test_available_games_records_listed_fixture_with_zero_odds() -> None:
+    """The unrestricted games feed must show a listed fixture even when a
+    scraper gap leaves it with zero parsed odds rows."""
+    from app.pipeline import AVAILABLE_GAMES
+
+    loader = FakeLoader([])
+    loader.last_fetch_event_ids = {"basketball": ("evt-empty",)}
+    sink = RecordingSink()
+    deps = make_deps(sink, loader)
+    assert deps.directory is not None
+    deps.directory.register(
+        "evt-empty",
+        EventTeams(
+            home="Home Hoops",
+            away="Away Hoops",
+            league="NBA",
+            starts_at=NOW + timedelta(hours=2),
+        ),
+    )
+
+    await run_value_pipeline(deps, "basketball")
+
+    games = AVAILABLE_GAMES["basketball"]
+    assert len(games) == 1
+    assert games[0]["event"] == "Home Hoops vs Away Hoops"
+    assert games[0]["league"] == "NBA"
+    assert games[0]["snapshot_count"] == 0
+    assert games[0]["markets"] == []
 
 
 async def test_poll_record_flags_degraded_on_matches_without_snapshots() -> None:

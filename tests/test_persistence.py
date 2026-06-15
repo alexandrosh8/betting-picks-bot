@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
-from app.storage.models import Event, Pick
+from app.storage.models import Event, ModelVersion, Pick, Sport
 from app.storage.repositories import (
     latest_picks_with_events,
     persist_pick,
@@ -127,6 +127,40 @@ async def test_version_bump_supersedes_older_open_pick(session) -> None:  # type
         .all()
     )
     assert rows == ["superseded", "alerted"]
+
+
+async def test_shared_strategy_gets_per_sport_model_version_rows(session) -> None:  # type: ignore[no-untyped-def]
+    # The value strategy reuses ONE name/version ("value-sharp-vs-soft"/"v3")
+    # for soccer AND basketball. Keying the model_versions lookup on
+    # (name, version) alone gave the basketball pick the soccer row's
+    # sport_id (one shared, mis-tagged row); the (sport_id, name, version)
+    # key gives each sport its own correctly-tagged row.
+    #
+    # A test-unique strategy name isolates the assertion from the dev
+    # warehouse, which already holds committed value-sharp-vs-soft rows from
+    # live runs (and would otherwise leak into the count).
+    strategy = "test-shared-strategy-mv"
+    soccer_teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
+    bball_teams = EventTeams(home="Court Cats", away="Hoop Dogs", league="test-bball-persist")
+    soccer = make_pick("evt-mv-soccer")
+    bball = make_pick("evt-mv-bball").model_copy(
+        update={"sport": "basketball", "league": "test-bball-persist"}
+    )
+
+    await persist_pick(session, soccer, soccer_teams, strategy, "v3")
+    await persist_pick(session, bball, bball_teams, strategy, "v3")
+
+    rows = (
+        await session.execute(
+            select(ModelVersion.id, Sport.key)
+            .join(Sport, Sport.id == ModelVersion.sport_id)
+            .where(ModelVersion.name == strategy, ModelVersion.version == "v3")
+        )
+    ).all()
+    # Two distinct rows (not the soccer row reused), one per sport, each
+    # tagged with the sport that actually produced it (Sport.key == pick.sport).
+    assert len({mv_id for mv_id, _ in rows}) == 2
+    assert {sport for _, sport in rows} == {"soccer", "basketball"}
 
 
 async def test_volume_pick_persists_with_tier_and_serializes_it(session) -> None:  # type: ignore[no-untyped-def]

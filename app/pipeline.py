@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 # showing day-old picks" must be visible. In-memory; repopulated each cycle.
 LAST_POLL: dict[str, dict[str, Any]] = {}
 
+# Latest unrestricted fixture view, surfaced by GET /games and the dashboard.
+# It is intentionally separate from picks: games list what the read-only odds
+# poll saw; picks remain the post-edge-gate recommendation stream.
+AVAILABLE_GAMES: dict[str, list[dict[str, Any]]] = {}
+
 # --- change-only odds-snapshot persistence ----------------------------------
 # Last odds written to odds_snapshots per (event_ref, bookmaker, line-
 # qualified market, selection) -> (decimal_odds, last_seen UTC). Process-
@@ -113,6 +118,96 @@ def _record_poll(
         # wall. finished_at alone would look healthy — flag it explicitly.
         "degraded": bool(matches_found) and not snapshots,
     }
+
+
+def _loader_event_ids(loader: OddsLoader, sport_key: str) -> tuple[str, ...] | None:
+    """Event ids from the loader's last fetch when it reports them.
+
+    OddsPortal reports listed fixtures even when every requested odds market
+    parses empty, allowing /games to show "0 snapshots" rows instead of
+    pretending the slate vanished.
+    """
+    events = getattr(loader, "last_fetch_event_ids", None)
+    if not isinstance(events, dict):
+        return None
+    value = events.get(sport_key)
+    if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
+        return value
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    return None
+
+
+def _record_available_games(
+    sport_key: str,
+    snapshots: Sequence[OddsSnapshotIn],
+    loader: OddsLoader,
+    directory: EventDirectory | None,
+    default_league: str,
+    now: datetime,
+) -> None:
+    """Publish every listed game from the latest poll, independent of picks."""
+    snapshots_by_event: dict[str, list[OddsSnapshotIn]] = defaultdict(list)
+    for snap in snapshots:
+        snapshots_by_event[snap.event_id].append(snap)
+
+    event_ids = _loader_event_ids(loader, sport_key)
+    if event_ids is None:
+        event_ids = tuple(sorted(snapshots_by_event))
+
+    known = directory.snapshot() if directory is not None else {}
+    rows: list[dict[str, Any]] = []
+    for event_id in dict.fromkeys(event_ids):
+        snaps = snapshots_by_event.get(event_id, [])
+        teams = known.get(event_id)
+        if teams is not None:
+            event_label = f"{teams.home} vs {teams.away}"
+            league = teams.league or default_league or sport_key
+            starts_at = teams.starts_at
+            home = teams.home
+            away = teams.away
+        else:
+            event_label = event_id
+            league = default_league or sport_key
+            starts_at = None
+            home = None
+            away = None
+
+        markets = sorted({snap.market_detail or str(snap.market) for snap in snaps})
+        bookmakers = sorted({snap.bookmaker for snap in snaps})
+        captured = [snap.captured_at for snap in snaps]
+        rows.append(
+            {
+                "sport": sport_key,
+                "sport_label": (
+                    "Football"
+                    if sport_key.startswith("soccer")
+                    else "NBA"
+                    if sport_key.startswith("basketball")
+                    else sport_key
+                ),
+                "event_id": event_id,
+                "event": event_label,
+                "home": home,
+                "away": away,
+                "league": league,
+                "starts_at": starts_at.isoformat() if starts_at is not None else None,
+                "market_count": len(markets),
+                "markets": markets,
+                "bookmaker_count": len(bookmakers),
+                "bookmakers": bookmakers,
+                "snapshot_count": len(snaps),
+                "first_captured_at": min(captured).isoformat() if captured else None,
+                "last_captured_at": max(captured).isoformat() if captured else None,
+                "updated_at": now.isoformat(),
+            }
+        )
+
+    def sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
+        starts = row["starts_at"]
+        return (1 if starts is None else 0, starts or "", str(row["event"]))
+
+    AVAILABLE_GAMES[sport_key] = sorted(rows, key=sort_key)
 
 
 def _loader_matches_found(loader: OddsLoader, sport_key: str) -> int | None:
@@ -243,6 +338,9 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
     now = datetime.now(tz=UTC)
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
+        _record_available_games(
+            sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
+        )
         _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
         return []
 
@@ -340,6 +438,9 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             await deps.dispatcher.dispatch(build_pick_alert(pick))
 
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
+    _record_available_games(
+        sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
+    )
     _record_poll(
         sport_key,
         snapshots,
@@ -486,6 +587,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     now = datetime.now(tz=UTC)
     if not snapshots:
         logger.info("no snapshots for %s", sport_key)
+        _record_available_games(
+            sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
+        )
         _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
         return []
 
@@ -765,6 +869,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             n_stale,
             deps.gate_policy.max_odds_age_seconds,
         )
+    _record_available_games(
+        sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
+    )
     _record_poll(
         sport_key,
         snapshots,

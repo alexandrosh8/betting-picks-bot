@@ -1,9 +1,10 @@
 """Ingestion contracts. ALL loaders are READ-ONLY (GET) by design — no code
 in this package may write to any bookmaker, exchange, or odds provider."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Protocol
 
 from app.schemas.odds import OddsSnapshotIn
@@ -37,6 +38,10 @@ class EventDirectory:
 
     def lookup(self, event_id: str) -> EventTeams | None:
         return self._events.get(event_id)
+
+    def snapshot(self) -> Mapping[str, EventTeams]:
+        """Read-only event map for status/API views."""
+        return MappingProxyType(self._events)
 
     def __len__(self) -> int:
         return len(self._events)

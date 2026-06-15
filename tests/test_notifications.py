@@ -227,6 +227,35 @@ def test_pick_alert_still_ev_line_from_value_min_edge() -> None:
     assert plain.dedupe_key == alert.dedupe_key
 
 
+def test_strategy_version_bump_changes_dedupe_key() -> None:
+    # A strategy-version bump re-emits the same market state as a genuinely
+    # new signal: its alert must NOT collide with a stale Redis key from the
+    # previous version. Same pick, different model_version -> different key.
+    v3 = build_pick_alert(make_pick(), model_name="value-sharp-vs-soft", model_version="v3")
+    v4 = build_pick_alert(make_pick(), model_name="value-sharp-vs-soft", model_version="v4")
+    assert v3.dedupe_key != v4.dedupe_key
+
+
+def test_strategy_name_changes_dedupe_key() -> None:
+    # Two distinct strategies pricing the same market are independent signals.
+    value = build_pick_alert(make_pick(), model_name="value-sharp-vs-soft", model_version="v3")
+    model = build_pick_alert(make_pick(), model_name="football-dixon-coles", model_version="v3")
+    assert value.dedupe_key != model.dedupe_key
+
+
+def test_same_strategy_identity_same_dedupe_key() -> None:
+    # Stability within a version: identical pick + identical strategy id ->
+    # identical key, so a re-detection at unchanged odds is still suppressed.
+    a = build_pick_alert(make_pick(), model_name="value-sharp-vs-soft", model_version="v3")
+    b = build_pick_alert(make_pick(), model_name="value-sharp-vs-soft", model_version="v3")
+    assert a.dedupe_key == b.dedupe_key
+    # value_min_edge is a display-only arg: it must not perturb the key.
+    c = build_pick_alert(
+        make_pick(), value_min_edge=0.03, model_name="value-sharp-vs-soft", model_version="v3"
+    )
+    assert a.dedupe_key == c.dedupe_key
+
+
 def test_pick_alert_omits_still_ev_line_when_no_price_retains_edge() -> None:
     # fair prob at/below the threshold: the helper has no honest floor to
     # print, and the alert must not invent one.

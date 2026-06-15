@@ -129,7 +129,16 @@ class OddsSnapshot(Base):
 
 class ModelVersion(Base):
     __tablename__ = "model_versions"
-    __table_args__ = (UniqueConstraint("name", "version", name="uq_model_versions_name_version"),)
+    # Identity is (sport_id, name, version): the value strategy is sport-
+    # agnostic and reuses one name/version ("value-sharp-vs-soft"/"v3") for
+    # soccer AND basketball. Keying on (name, version) alone let the first
+    # sport's row win the sport_id and the second sport silently reuse it
+    # (wrong sport attribution). Per-sport models keep one row per sport.
+    __table_args__ = (
+        UniqueConstraint(
+            "sport_id", "name", "version", name="uq_model_versions_sport_name_version"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     name: Mapped[str] = mapped_column(String(128))  # e.g. "football-dixon-coles"

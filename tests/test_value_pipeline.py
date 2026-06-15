@@ -10,7 +10,7 @@ from app.edge.gates import GatePolicy
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import EventDirectory, EventTeams
 from app.models.base import NullModel
-from app.notifications.base import Alert
+from app.notifications.base import Alert, build_pick_alert
 from app.notifications.dedupe import InMemoryIdempotencyStore
 from app.notifications.dispatcher import AlertDispatcher
 from app.pipeline import PipelineDeps, run_value_pipeline
@@ -201,6 +201,24 @@ async def test_value_pipeline_produces_pick_and_alert() -> None:
     assert len(sink.sent) == 1
     assert "does not place bets" in sink.sent[0].body
     assert "value: Pinnacle fair" in pick.reason_summary
+
+
+async def test_value_pipeline_alert_key_includes_strategy_identity() -> None:
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.model_name = "value-sharp-vs-soft"
+    deps.model_version = "v4"
+
+    picks = await run_value_pipeline(deps, "soccer")
+
+    assert len(picks) == 1
+    expected = build_pick_alert(
+        picks[0],
+        deps.value_min_edge,
+        model_name=deps.model_name,
+        model_version=deps.model_version,
+    )
+    assert sink.sent[0].dedupe_key == expected.dedupe_key
 
 
 async def test_value_pipeline_tags_consensus_anchor_picks() -> None:

@@ -10,7 +10,7 @@ import pytest
 from app.edge.gates import GatePolicy
 from app.ingestion.base import EventDirectory, EventTeams
 from app.models.base import PredictedProbability
-from app.notifications.base import Alert
+from app.notifications.base import Alert, build_pick_alert
 from app.notifications.dedupe import InMemoryIdempotencyStore
 from app.notifications.dispatcher import AlertDispatcher
 from app.pipeline import PipelineDeps, run_pick_pipeline
@@ -100,6 +100,23 @@ async def test_pipeline_produces_pick_and_alert() -> None:
     assert pick.recommended_stake_fraction <= 0.02
     assert len(sink.sent) == 1
     assert "does not place bets" in sink.sent[0].body
+
+
+async def test_model_pipeline_alert_key_includes_strategy_identity() -> None:
+    sink = RecordingSink()
+    deps = make_deps(sink)
+    deps.model_name = "football-dixon-coles"
+    deps.model_version = "v4"
+
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+
+    assert len(picks) == 1
+    expected = build_pick_alert(
+        picks[0],
+        model_name=deps.model_name,
+        model_version=deps.model_version,
+    )
+    assert sink.sent[0].dedupe_key == expected.dedupe_key
 
 
 async def test_pipeline_rerun_suppresses_duplicate_alert() -> None:

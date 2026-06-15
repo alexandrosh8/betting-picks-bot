@@ -435,7 +435,13 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                 deps.ledger.release(now.date(), granted)
             else:  # inserted / upgraded / unpersisted (uncertainty = "new")
                 picks.append(pick)
-            await deps.dispatcher.dispatch(build_pick_alert(pick))
+            await deps.dispatcher.dispatch(
+                build_pick_alert(
+                    pick,
+                    model_name=deps.model_name,
+                    model_version=deps.model_version,
+                )
+            )
 
     logger.info("pipeline cycle for %s: %d picks", sport_key, len(picks))
     _record_available_games(
@@ -807,7 +813,14 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # value_min_edge adds the "Still +EV down to X.XX" execution
             # line (value-strategy semantics: model_probability holds the
             # sharp fair prob here — see build_pick_alert).
-            await deps.dispatcher.dispatch(build_pick_alert(pick, deps.value_min_edge))
+            await deps.dispatcher.dispatch(
+                build_pick_alert(
+                    pick,
+                    deps.value_min_edge,
+                    model_name=deps.model_name,
+                    model_version=deps.model_version,
+                )
+            )
 
     # Re-price every OPEN pick from this cycle's snapshots: CLV true-up +
     # current odds/edge ("still worth betting?") — no second scrape. Picks

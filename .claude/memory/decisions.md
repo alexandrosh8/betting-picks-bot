@@ -1,5 +1,31 @@
 # Decisions Log
 
+- 2026-06-16 (repo sweep #2 — "best repos for the project"; full report
+  `docs/research/repo-sweep-2026-06-16.md`) — 4-agent gated sweep, settled
+  repos excluded. NO new runtime dependency, but 3 clean-room takes that
+  DE-RISK the deferred cross-source CLV join. **CROSS-SOURCE MATCHER (the
+  actionable win):** USSoccerFederation/glass_onion (BSD-3 — deterministic
+  event JOIN: exact date+team_ids merge + ±3-day tolerance + matchday fallback;
+  SKIP its TF-IDF cosine fuzzy passes, forbidden), probberechts/soccerdata
+  (Apache-2.0, 1759★ — the `{alias→canonical}` dict + bidirectional
+  add_alt_team_names/add_standardized_team_name PATTERN), withqwerty/reep
+  (CC0 — 488K-people/45K-team alias DATA to seed it) → build a PURE
+  `app/resolution/` module (port the algorithm/data, do NOT pip-install; extend
+  app/settlement/results.py::normalize_team). **BACKTEST:** betcode-org/flumine
+  (MIT) PIQ queue-aware fill model = adopt-pattern clean-room into
+  app/backtesting/ (do NOT add flumine/betfairlightweight — live order
+  placement). **ARCADIA ROBUSTNESS:** pinnapi/pinnapi (MIT) typed
+  AuthError/RateLimitError + retry_after pattern for pinnacle_arcadia.py.
+  **DEVIG/CLV: NO gap** — penaltyblog already has all 7 methods; mberk/shin =
+  cross-check ref only; neeljshah/clvtrack = VAPORWARE (22-byte stub). **DATA
+  GATE unchanged:** still NO free sharp+close for tennis/NBA (all paid; hoopR is
+  ESPN-soft, no Pinnacle) → forward self-capture (shipped, ADR-0013) is the only
+  path. AUTOBET REJECTS: rozzac90/pinnacle, chrisgillam/polymarket_gambot. (See
+  also the detailed "GitHub discovery #2" Pinnacle-clients entry below.) DO NOT
+  re-evaluate: glass_onion, soccerdata, reep, flumine, pinnapi, mberk/shin,
+  clvtrack, p2w-math, pybettor, deltaray-io/kelly-criterion,
+  prediction-market-backtesting, polymarket_gambot, hoopR.
+
 - 2026-06-16 (Pinnacle arcadia capture — BUILT, ADR-0013) — the recommended
   clean-room job below is now SHIPPED: `app/ingestion/pinnacle_arcadia.py`
   (GET-only client + pure `parse_matchups`/`extract_moneyline_quotes` +
@@ -445,3 +471,43 @@
 - 2026-06-10 — Hooks design accepted: ADR-0003.
 - 2026-06-10 — Memory system: project-local markdown (this directory) +
   docs/adr/; external memory tools rejected — ADR-0001.
+
+- 2026-06-16 (GitHub discovery #2 — maintained Pinnacle clients + free
+  sharp+close tennis/NBA sweep) — NOTHING bindable; standing conclusions hold.
+  ROBUSTNESS REFERENCE for app/ingestion/pinnacle_arcadia.py:
+  **pinnapi/pinnapi** (MIT, pushed 2026-06-11, python/src/pinnapi/client.py)
+  = ADOPT-PATTERN (read-only REST/SSE client, NO autobet). Liftable ideas:
+  (a) typed error hierarchy PinnapiError->AuthError/RateLimitError carrying
+  HTTP status + parsed payload + retry_after (we currently raise a single
+  PinnacleArcadiaError on any non-200 — could split 401/403 vs 429 vs 5xx);
+  (b) explicit 429 handling that reads retry_after_ms and surfaces seconds-to-
+  reset (our tenacity backoff is blind to Retry-After); (c) SSE reconnect loop
+  that re-raises auth/plan errors immediately but backs off on transient
+  ConnectionError/Timeout/ChunkedEncodingError (only relevant if we ever add a
+  streaming feed). The pinnapi SERVICE itself FAILS the data gate (paid proxy,
+  $99/mo for streams, free tier 100 req/day, NO historical) — pattern-only.
+  Its README confirms Pinnacle CLOSED its public developer API on 2025-07-23;
+  our guest.api.arcadia.pinnacle.com path is the separate web-client backend.
+  REJECT (autobet): **rozzac90/pinnacle** (56*, MIT, pushed 2022-10-27) — the
+  most-starred Pinnacle client but endpoints/betting.py has place_bet()/
+  place_special_bet() POSTing /v2/bets/straight orders -> autobet_risk reject;
+  its marketdata/referencedata endpoints are the DEAD V1 API anyway.
+  REFERENCE-ONLY (fail data gate, not deps): cengizmandros/odds-arb-scanner
+  (no-license, the-odds-api wrapper, current-snapshot soft aggregator, no
+  Pinnacle-direct, no close/historical — roadmap lists CLV as TODO; redundant
+  with our odds_api.py); Danymcflyy/OddsTracker (MIT, Next.js/Supabase
+  closing-odds dashboard built on the PAID OddsPapi aggregator — a capture-
+  scheduling pattern at most, fails free+sharp gate). FREE sharp+close for
+  tennis/NBA: STILL NONE (exa sweep). Every source carrying BOTH a Pinnacle
+  anchor AND close is PAID: bettingiscool/PinBook/prop-line/SharpAPI (price-
+  redacted free tiers), Odds Warehouse ($79 one-time, consensus open/close not
+  Pinnacle). ParlayAPI's free 'pinnacle' rows are its OWN forward daily self-
+  capture (== what we already built), not a historical archive. hoopR
+  (sportsdataverse/hoopR, 137*, NOASSERTION license, pushed 2026-06-13)
+  espn_basketball_event_betting_helpers.R DOES expose home/away_team_odds_open
+  - \_close per provider, but the provider set is ESPN's SOFT books (no
+    Pinnacle) -> fails data-gate condition 1 (sharp anchor); same class as
+    nflverse consensus. CONCLUSION UNCHANGED: the only doctrine path for NBA/
+    tennis remains prospective self-captured Pinnacle arcadia snapshots (already
+    shipped). DO NOT re-evaluate: pinnapi, rozzac90/pinnacle, odds-arb-scanner,
+    Danymcflyy/OddsTracker, sportsdataverse/hoopR.

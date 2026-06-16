@@ -212,6 +212,18 @@ def test_dashboard_fetches_and_renders_available_games() -> None:
     assert "innerHTML" not in text
 
 
+def test_dashboard_has_mobile_table_card_layout() -> None:
+    text = TestClient(make_app()).get("/").text
+    assert "@media (max-width: 720px)" in text
+    assert "#picks-table td:nth-child(11)::before" in text
+    assert 'content: "Status"' in text
+    assert "#games-table td:nth-child(8)::before" in text
+    assert 'content: "Updated"' in text
+    assert "overflow-wrap: anywhere" in text
+    assert "td[colspan]::before" in text
+    assert "innerHTML" not in text
+
+
 def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """GET /performance carries the stratified live-evidence section — the
     instrument for the VALUE_ML_FILTER flip. DB reads are stubbed at the

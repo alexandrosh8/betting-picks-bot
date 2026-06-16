@@ -455,7 +455,11 @@ async def test_available_games_fallback_reads_current_warehouse_events(session) 
     )
     await session.flush()
 
-    rows = await latest_available_games_with_events(session, limit=50, sport="soccer", now=now)
+    # High limit so a POPULATED shared dev DB (the running app accumulates
+    # hundreds of soccer events ordered by kickoff before this now+3h fixture)
+    # can't truncate our fixture out of the top-N — the assertion is about
+    # PRESENCE in the unrestricted warehouse view, not top-50 ranking.
+    rows = await latest_available_games_with_events(session, limit=5000, sport="soccer", now=now)
     ours = [row for row in rows if row["event_id"] == "evt-games-fallback"]
     assert ours, "warehouse fallback did not include the current fixture"
     row = ours[0]

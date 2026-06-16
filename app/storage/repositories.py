@@ -751,6 +751,84 @@ async def closing_odds_from_snapshots(
     return snaps, last_capture
 
 
+async def resolve_pinnacle_close_snaps(
+    session: AsyncSession,
+    *,
+    pinnacle_sport_key: str,
+    pick_external_ref: str,
+    home: str,
+    away: str,
+    kickoff: datetime,
+    max_day_drift: int = 1,
+) -> list[OddsSnapshotIn]:
+    """Strict-match a pick's fixture to its `pinnacle_<sport>` ARCHIVE event and
+    return that event's CLOSE snapshots, re-keyed to the pick's event_id and
+    selection vocabulary (bookmaker stays "Pinnacle").
+
+    Returns [] when there is no UNAMBIGUOUS match or no Pinnacle coverage — a
+    wrong close corrupts CLV, so this never guesses. Matching is the pure
+    app.resolution matcher (exact normalized names + alias table + a small
+    kickoff window; NO fuzzy). Selections that cannot be mapped to the pick's
+    home/away/Draw outcome are dropped rather than mis-attached.
+    """
+    from app.resolution import EventCandidate, default_aliases, match_event, normalize_name
+
+    home_t, away_t = aliased(Team), aliased(Team)
+    window = timedelta(days=max_day_drift + 1)
+    rows = (
+        await session.execute(
+            select(Event.id, Event.external_ref, home_t.name, away_t.name, Event.starts_at)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(home_t, Event.home_team_id == home_t.id)
+            .join(away_t, Event.away_team_id == away_t.id)
+            .where(
+                Sport.key == pinnacle_sport_key,
+                Event.starts_at.is_not(None),
+                Event.starts_at >= kickoff - window,
+                Event.starts_at <= kickoff + window,
+            )
+        )
+    ).all()
+    if not rows:
+        return []
+    by_ref = {str(eid): (eid, ext, h, a, ko) for eid, ext, h, a, ko in rows}
+    candidates = [
+        EventCandidate(ref=str(eid), home=h, away=a, kickoff=ko) for eid, _ext, h, a, ko in rows
+    ]
+    matched = match_event(
+        home, away, kickoff, candidates, aliases=default_aliases(), max_day_drift=max_day_drift
+    )
+    if matched is None:
+        return []
+    pin_id, pin_ref, pin_home, pin_away, pin_kickoff = by_ref[matched.ref]
+    # Cap the close cutoff at the matched ARCADIA event's OWN kickoff: the match
+    # window allows +/- a day of drift, so the arcadia event may start earlier
+    # than the pick. Using the pick's kickoff would admit post-arcadia-kickoff
+    # (in-play) Pinnacle rows as "the close" -> corrupted CLV (the cardinal sin).
+    cutoff = pin_kickoff if pin_kickoff < kickoff else kickoff
+    snaps, _last = await closing_odds_from_snapshots(session, pin_id, pin_ref, cutoff)
+    # Cannot tell the two outcomes apart by name -> never risk mis-attributing a
+    # price to the wrong side; drop the whole close. (The matcher guards this for
+    # ordered events, but defend the re-key directly for the unordered path too.)
+    if normalize_name(pin_home) == normalize_name(pin_away):
+        return []
+    # Re-key arcadia selections (its own team names / "Draw") to the pick's
+    # selection vocabulary BY OUTCOME so the close groups with the pick's market.
+    selection_map = {normalize_name(pin_home): home, normalize_name(pin_away): away}
+    out: list[OddsSnapshotIn] = []
+    for snap in snaps:
+        if snap.selection == "Draw":
+            mapped_selection: str | None = "Draw"
+        else:
+            mapped_selection = selection_map.get(normalize_name(snap.selection))
+        if mapped_selection is None:
+            continue  # a selection we cannot confidently map -> drop (safe)
+        out.append(
+            snap.model_copy(update={"event_id": pick_external_ref, "selection": mapped_selection})
+        )
+    return out
+
+
 PickPersistOutcome = Literal["inserted", "upgraded", "duplicate"]
 
 

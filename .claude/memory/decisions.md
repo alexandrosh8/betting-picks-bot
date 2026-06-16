@@ -1,5 +1,26 @@
 # Decisions Log
 
+- 2026-06-16 (GitHub discovery — devig/Pinnacle repos) — **POTENTIAL
+  GAP-CLOSER found: a FREE, accountless, PRE-MATCH Pinnacle feed exists** via
+  the unofficial JSON API `guest.api.arcadia.pinnacle.com/0.1` (bulk
+  `/sports/{id}/markets/straight?primaryOnly=false`). Verified in two repos'
+  code. This is the first concrete artifact touching our documented biggest
+  gap (a free live Pinnacle sharp anchor) — it could populate
+  picks.anchor_type='pinnacle' (today mostly 'consensus') and enable FORWARD
+  CLV against a true sharp line. CAVEAT: direct Pinnacle scraping = high ToS
+  risk + DOM/endpoint fragility (same class as OddsPortal), guest x-api-key
+  rotates. RECOMMENDATION (not yet built): clean-room a GET-only, rate-gated
+  app/ingestion/pinnacle_arcadia.py forward-capture job (read-only,
+  ToS-risk-accepted). **All 3 repos are UNLICENSED → idea-only, NO code may
+  be copied:** ACHBIDHAN/Pinnacle_Football_Odds_Scraper (idea-only, top pick,
+  safety-clean GET-only — the Pinnacle mechanism); NateDeMoro/
+  prediction-market-ev-engine (**HARD REJECT bind — auto-places real bets,
+  RSA-signed orders, credential storage**; read-only refs only: its Shin/
+  bisection devig, the bulk arcadia endpoint shape, a calibration-haircut +
+  live-refetch-before-decision pattern); jjc256/devigger (reject — crude
+  devig, not an oracle). The free-Pinnacle endpoint logged in
+  free-odds-sources.md.
+
 - 2026-06-16 (NFL data gate + GitHub discovery) — **NFL = REJECT, now PROVEN
   by fetching the nflverse data (not just asserted).** nflverse games.csv
   (7.5k rows 1999-2026) has spread/total/ML odds but only ONE snapshot per

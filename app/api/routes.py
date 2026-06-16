@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,7 @@ from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import (
+    latest_available_games_with_events,
     latest_picks_with_events,
     live_evidence_rows,
     performance_report,
@@ -81,8 +82,25 @@ async def latest_picks(
     )
 
 
+async def _warehouse_available_games(
+    request: Request,
+    limit: int,
+    sport: str | None,
+) -> list[dict[str, Any]]:
+    session_factory = getattr(request.app.state, "session_factory", None)
+    if session_factory is None:
+        return []
+    try:
+        async with session_factory() as session:
+            return await latest_available_games_with_events(session, limit=limit, sport=sport)
+    except Exception as exc:
+        logger.warning("available games warehouse fallback failed: %s", type(exc).__name__)
+        return []
+
+
 @router.get("/games")
 async def available_games(
+    request: Request,
     limit: Annotated[int, Query(ge=1, le=2000)] = 1000,
     sport: Annotated[str | None, Query(pattern="^(soccer|basketball)$")] = None,
 ) -> list[dict[str, Any]]:
@@ -98,6 +116,8 @@ async def available_games(
         if sport is not None and sport_key != sport and not sport_key.startswith(f"{sport}_"):
             continue
         rows.extend(AVAILABLE_GAMES[sport_key])
+    if not rows:
+        rows = await _warehouse_available_games(request, limit=limit, sport=sport)
     rows.sort(key=lambda row: (row["starts_at"] is None, row["starts_at"] or "", row["event"]))
     return rows[:limit]
 

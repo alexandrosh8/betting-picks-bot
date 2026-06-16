@@ -4,7 +4,7 @@ Uses a savepoint-style rollback: each test runs in a transaction that is
 rolled back, so the warehouse is never mutated by the suite.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -15,8 +15,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
-from app.storage.models import Event, ModelVersion, Pick, Sport
+from app.storage.models import Event, ModelVersion, OddsSnapshot, Pick, Sport
 from app.storage.repositories import (
+    latest_available_games_with_events,
     latest_picks_with_events,
     persist_pick,
     refresh_event_kickoffs,
@@ -402,6 +403,74 @@ async def test_latest_picks_payload_carries_event_fields(session) -> None:  # ty
     # API payload is data-only; the safety reminder lives in alerts
     # (app/schemas/picks.py, safety_audit check 8) and the dashboard banner.
     assert "manual_betting_reminder" not in p
+
+
+async def test_available_games_fallback_reads_current_warehouse_events(session) -> None:  # type: ignore[no-untyped-def]
+    # Restart regression: /games used to read only the in-memory latest poll
+    # registry, so a process restart showed "NO GAMES LOADED" while /picks
+    # still rendered from Postgres. The fallback query rebuilds the current
+    # unrestricted football/NBA fixture view from events + odds_snapshots.
+    now = datetime.now(tz=UTC)
+    kickoff = now + timedelta(hours=3)
+    teams = EventTeams(
+        home="Games Fallback Home",
+        away="Games Fallback Away",
+        league="test-league-games",
+        starts_at=kickoff,
+    )
+    await persist_pick(
+        session,
+        make_pick("evt-games-fallback"),
+        teams,
+        "value-sharp-vs-soft",
+        "t-games",
+    )
+    event = await session.scalar(select(Event).where(Event.external_ref == "evt-games-fallback"))
+    assert event is not None
+    captured = now - timedelta(minutes=5)
+    session.add_all(
+        [
+            OddsSnapshot(
+                event_id=event.id,
+                bookmaker="Pinnacle",
+                market="h2h",
+                selection="Games Fallback Home",
+                decimal_odds=Decimal("2.1000"),
+                liquidity=None,
+                captured_at=captured,
+                ingested_at=captured + timedelta(seconds=10),
+            ),
+            OddsSnapshot(
+                event_id=event.id,
+                bookmaker="SoftBook",
+                market="totals",
+                selection="Over 2.5",
+                decimal_odds=Decimal("1.9500"),
+                liquidity=None,
+                captured_at=captured,
+                ingested_at=captured + timedelta(seconds=20),
+            ),
+        ]
+    )
+    await session.flush()
+
+    rows = await latest_available_games_with_events(session, limit=50, sport="soccer", now=now)
+    ours = [row for row in rows if row["event_id"] == "evt-games-fallback"]
+    assert ours, "warehouse fallback did not include the current fixture"
+    row = ours[0]
+    assert row["sport"] == "soccer"
+    assert row["sport_label"] == "Football"
+    assert row["event"] == "Games Fallback Home vs Games Fallback Away"
+    assert row["league"] == "test-league-games"
+    assert row["starts_at"] == kickoff.isoformat()
+    assert row["markets"] == ["h2h", "totals"]
+    assert row["bookmakers"] == ["Pinnacle", "SoftBook"]
+    assert row["market_count"] == 2
+    assert row["bookmaker_count"] == 2
+    assert row["snapshot_count"] == 2
+    assert row["first_captured_at"] == captured.isoformat()
+    assert row["last_captured_at"] == captured.isoformat()
+    assert row["updated_at"] == (captured + timedelta(seconds=20)).isoformat()
 
 
 async def test_latest_picks_tier_scope_protects_premium_window(session) -> None:  # type: ignore[no-untyped-def]

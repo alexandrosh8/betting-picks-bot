@@ -553,10 +553,11 @@
       }
       .evgroup td {
         color: var(--faint);
-        font-size: 10px;
-        letter-spacing: 0.12em;
+        font-size: 9px;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
-        padding-top: 6px;
+        padding: 5px 14px 1px 0;
+        border-bottom: 0;
       }
       .evinsuf {
         color: var(--dim);
@@ -1596,6 +1597,10 @@
       function renderEvidence(ev) {
         const panel = $("evidence-panel");
         if (!ev) {
+          panel.style.display = "none";
+          return;
+        }
+        if (!Number(ev.n_settled)) {
           panel.style.display = "none";
           return;
         }

@@ -8,7 +8,7 @@ re-poll of the same market state never duplicates rows.
 
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -213,6 +213,142 @@ async def latest_picks_with_events(
         }
         for p, home_name, away_name, league_name, starts_at in rows.all()
     ]
+
+
+def _sport_label(sport_key: str, sport_name: str) -> str:
+    if sport_key.startswith("soccer"):
+        return "Football"
+    if sport_key.startswith("basketball"):
+        return "NBA"
+    return sport_name
+
+
+async def latest_available_games_with_events(
+    session: AsyncSession,
+    limit: int = 1000,
+    sport: str | None = None,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Durable fallback for GET /games, rebuilt from the warehouse.
+
+    The live pipeline publishes the freshest poll slate in memory. After a
+    deploy/restart that registry is empty until the first poll, while the
+    dashboard can still show picks from Postgres. This query makes the games
+    table survive restarts by reading current football/NBA events and their
+    latest odds-snapshot coverage from the warehouse. It does not apply pick
+    status, edge, tier, exposure, or odds-age gates.
+    """
+    as_of = now or datetime.now(tz=UTC)
+    event_cutoff = as_of - timedelta(hours=12)
+    recent_odds_cutoff = as_of - timedelta(hours=24)
+
+    home = aliased(Team)
+    away = aliased(Team)
+    market_values = (
+        func.array_agg(OddsSnapshot.market.distinct())
+        .filter(OddsSnapshot.market.is_not(None))
+        .label("markets")
+    )
+    bookmaker_values = (
+        func.array_agg(OddsSnapshot.bookmaker.distinct())
+        .filter(OddsSnapshot.bookmaker.is_not(None))
+        .label("bookmakers")
+    )
+
+    stmt = (
+        select(
+            Sport.key,
+            Sport.name,
+            Event.external_ref,
+            home.name,
+            away.name,
+            League.name,
+            Event.starts_at,
+            func.count(OddsSnapshot.id).label("snapshot_count"),
+            func.min(OddsSnapshot.captured_at).label("first_captured_at"),
+            func.max(OddsSnapshot.captured_at).label("last_captured_at"),
+            func.max(OddsSnapshot.ingested_at).label("updated_at"),
+            market_values,
+            bookmaker_values,
+        )
+        .join(Sport, Event.sport_id == Sport.id)
+        .join(League, Event.league_id == League.id)
+        .join(home, Event.home_team_id == home.id)
+        .join(away, Event.away_team_id == away.id)
+        .outerjoin(OddsSnapshot, OddsSnapshot.event_id == Event.id)
+        .where(
+            (Event.starts_at >= event_cutoff) | (OddsSnapshot.ingested_at >= recent_odds_cutoff)
+        )
+        .group_by(
+            Sport.key,
+            Sport.name,
+            Event.external_ref,
+            home.name,
+            away.name,
+            League.name,
+            Event.starts_at,
+        )
+        .order_by(Event.starts_at.is_(None), Event.starts_at, home.name, away.name)
+        .limit(limit)
+    )
+    if sport is None:
+        stmt = stmt.where(
+            (Sport.key == "soccer")
+            | Sport.key.startswith("soccer_")
+            | (Sport.key == "basketball")
+            | Sport.key.startswith("basketball_")
+        )
+    else:
+        stmt = stmt.where((Sport.key == sport) | Sport.key.startswith(f"{sport}_"))
+
+    rows = await session.execute(stmt)
+    payload: list[dict[str, Any]] = []
+    for (
+        sport_key,
+        sport_name,
+        external_ref,
+        home_name,
+        away_name,
+        league_name,
+        starts_at,
+        snapshot_count,
+        first_captured_at,
+        last_captured_at,
+        updated_at,
+        markets_raw,
+        bookmakers_raw,
+    ) in rows.all():
+        markets = sorted(str(item) for item in (markets_raw or []) if item is not None)
+        bookmakers = sorted(str(item) for item in (bookmakers_raw or []) if item is not None)
+        payload.append(
+            {
+                "sport": sport_key,
+                "sport_label": _sport_label(sport_key, sport_name),
+                "event_id": external_ref,
+                "event": f"{home_name} vs {away_name}",
+                "home": home_name,
+                "away": away_name,
+                "league": league_name,
+                "starts_at": starts_at.isoformat() if starts_at is not None else None,
+                "market_count": len(markets),
+                "markets": markets,
+                "bookmaker_count": len(bookmakers),
+                "bookmakers": bookmakers,
+                "snapshot_count": int(snapshot_count or 0),
+                "first_captured_at": (
+                    first_captured_at.isoformat() if first_captured_at is not None else None
+                ),
+                "last_captured_at": (
+                    last_captured_at.isoformat() if last_captured_at is not None else None
+                ),
+                "updated_at": (
+                    (updated_at or last_captured_at or starts_at).isoformat()
+                    if (updated_at or last_captured_at or starts_at) is not None
+                    else None
+                ),
+            }
+        )
+    return payload
 
 
 async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, datetime]) -> int:

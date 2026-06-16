@@ -3,6 +3,7 @@
 import re
 from collections.abc import AsyncIterator
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -191,6 +192,73 @@ def test_games_endpoint_serves_unrestricted_latest_fixture_view() -> None:
         AVAILABLE_GAMES.pop("basketball", None)
 
 
+def test_games_endpoint_falls_back_to_warehouse_when_poll_registry_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import routes
+    from app.pipeline import AVAILABLE_GAMES
+
+    saved = dict(AVAILABLE_GAMES)
+    AVAILABLE_GAMES.clear()
+    fake_session = object()
+    calls: list[tuple[int, str | None]] = []
+
+    class FakeSessionFactory:
+        def __call__(self) -> "FakeSessionFactory":
+            return self
+
+        async def __aenter__(self) -> object:
+            return fake_session
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    async def fake_latest_available_games_with_events(
+        session: object,
+        limit: int,
+        sport: str | None,
+    ) -> list[dict[str, object]]:
+        assert session is fake_session
+        calls.append((limit, sport))
+        return [
+            {
+                "sport": "basketball",
+                "sport_label": "NBA",
+                "event_id": "evt-db-nba",
+                "event": "Restart Hawks vs Restart Bulls",
+                "home": "Restart Hawks",
+                "away": "Restart Bulls",
+                "league": "NBA",
+                "starts_at": "2026-06-16T20:00:00+00:00",
+                "market_count": 1,
+                "markets": ["h2h"],
+                "bookmaker_count": 2,
+                "bookmakers": ["A", "B"],
+                "snapshot_count": 6,
+                "first_captured_at": "2026-06-16T10:00:00+00:00",
+                "last_captured_at": "2026-06-16T10:01:00+00:00",
+                "updated_at": "2026-06-16T10:02:00+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(
+        routes,
+        "latest_available_games_with_events",
+        fake_latest_available_games_with_events,
+    )
+    app = make_app()
+    app.state.session_factory = FakeSessionFactory()
+    try:
+        body = TestClient(app).get("/games?sport=basketball").json()
+    finally:
+        AVAILABLE_GAMES.clear()
+        AVAILABLE_GAMES.update(saved)
+
+    assert calls == [(1000, "basketball")]
+    assert body[0]["event"] == "Restart Hawks vs Restart Bulls"
+    assert body[0]["snapshot_count"] == 6
+
+
 def test_dashboard_fetches_picks_per_tier() -> None:
     """Volume-flood regression: one unscoped /picks?limit=200 window fills
     with volume rows (~6x premium) and open premium picks vanish from both
@@ -271,6 +339,7 @@ def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
     text = TestClient(make_app()).get("/").text
     assert 'id="evidence-panel"' in text
     assert "renderEvidence" in text
+    assert "if (!Number(ev.n_settled))" in text
     assert "insufficient data (n<" in text  # explicit per-stratum state
     assert "Live evidence" in text
     # execution helper line in the odds column

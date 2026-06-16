@@ -852,10 +852,6 @@
       >
       <button id="logout" class="section-toggle" type="button">Log out</button>
     </header>
-    <div class="sub">
-      sharp-vs-soft value · fair price = devig(sharpest book) · CLV-tracked ·
-      odds ≥ 1.60 · times: Cyprus (Asia/Nicosia)
-    </div>
 
     <!-- compact status bar: poll age · verified window · ingestion · deps -->
     <div class="statusbar" role="status">
@@ -1028,12 +1024,6 @@
       <span class="stamp" id="stamp">loading…</span>
     </div>
 
-    <!-- inline legend: status + CLV semantics (textContent-populated in JS) -->
-    <div class="legend" id="picks-legend">
-      <span class="chip"><b>Status</b><span id="legend-status"></span></span>
-      <span class="chip"><b>CLV</b><span id="legend-clv"></span></span>
-    </div>
-
     <div class="tablewrap">
       <table id="picks-table">
         <thead>
@@ -1067,6 +1057,12 @@
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- legend moved here (page bottom): status + CLV semantics, JS-populated -->
+    <div class="legend" id="picks-legend">
+      <span class="chip"><b>Status</b><span id="legend-status"></span></span>
+      <span class="chip"><b>CLV</b><span id="legend-clv"></span></span>
     </div>
 
     <footer>
@@ -1294,7 +1290,20 @@
           rows.length + " shown / " + GAMES.length + " loaded";
         if (!rows.length) {
           const tr = document.createElement("tr");
-          const cell = td(tr, "NO GAMES LOADED", "empty");
+          const sportSel = $("f-game-sport").value;
+          let msg =
+            "NO GAMES LOADED — engine is still completing its first poll cycle, or no fixtures are listed yet.";
+          if (GAMES.length && sportSel === "tennis") {
+            msg =
+              "No tennis games — tennis polling is OFF by default (visibility-only, it did not clear the CLV backtest). " +
+              "Enable it by setting ODDSPORTAL_TENNIS_LEAGUES in .env.";
+          } else if (GAMES.length && sportSel === "basketball") {
+            msg =
+              "No NBA games right now — the NBA is off-season (Jun–Oct); only club competitions appear when listed.";
+          } else if (GAMES.length && sportSel) {
+            msg = "No games for this sport in the current slate.";
+          }
+          const cell = td(tr, msg, "empty");
           cell.colSpan = 5;
           tbody.appendChild(tr);
           return;
@@ -1789,24 +1798,48 @@
           if (STATUS_TAB === "settled") return p.status === "settled";
           return true;
         };
-        const rows = PICKS.filter(
-          (p) =>
-            matchesTab(p) &&
-            (!tier || tierOf(p) === tier) &&
-            (!q ||
-              [
-                p.event,
-                p.selection,
-                p.bookmaker,
-                p.league,
-                p.market,
-                MARKETS[p.market] || "", // searchable by the DISPLAYED label too
-                tierOf(p), // "premium" / "volume" are searchable words
-              ]
-                .join(" ")
-                .toLowerCase()
-                .includes(q)),
-        );
+        // tier+search scope (NOT tab-filtered) — used both for the tab counts
+        // and the visible rows, so the two never diverge.
+        const inScope = (p) =>
+          (!tier || tierOf(p) === tier) &&
+          (!q ||
+            [
+              p.event,
+              p.selection,
+              p.bookmaker,
+              p.league,
+              p.market,
+              MARKETS[p.market] || "", // searchable by the DISPLAYED label too
+              tierOf(p), // "premium" / "volume" are searchable words
+            ]
+              .join(" ")
+              .toLowerCase()
+              .includes(q));
+        const scoped = PICKS.filter(inScope);
+        // Tab counts so finished games awaiting a settle stay discoverable:
+        // a past-kickoff open pick keeps its settle button, but once it ages
+        // out of the verified window it moves LIVE -> UNVERIFIED. The count
+        // shows where those settle-able picks actually are.
+        const tabCounts = {
+          live: scoped.filter((p) => p.status === "alerted" && isVerified(p))
+            .length,
+          unverified: scoped.filter(
+            (p) => p.status === "alerted" && !isVerified(p),
+          ).length,
+          settled: scoped.filter((p) => p.status === "settled").length,
+        };
+        const TAB_LABELS = {
+          live: "LIVE",
+          unverified: "UNVERIFIED",
+          settled: "SETTLED",
+        };
+        for (const b of document.querySelectorAll(
+          "#status-tabs button[data-status]",
+        )) {
+          const k = b.dataset.status;
+          b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
+        }
+        const rows = scoped.filter(matchesTab);
 
         // Toggle the SETTLED column set: the class drives the mobile labels
         // (data-label) and lets CSS follow the active columns.

@@ -1,5 +1,28 @@
 # Decisions Log
 
+- 2026-06-16 (NFL data gate + GitHub discovery) — **NFL = REJECT, now PROVEN
+  by fetching the nflverse data (not just asserted).** nflverse games.csv
+  (7.5k rows 1999-2026) has spread/total/ML odds but only ONE snapshot per
+  market (no open/close columns), the source is unlabeled CONSENSUS (no
+  Pinnacle/sharp), closing_lines.csv ends 2018 with no book id, the only
+  opening file (initial_lines.csv) is 2021-only / single Australian book /
+  price-less, and ESPN's API is all soft books, current-only. So NFL clears
+  NEITHER gate condition (sharp anchor + close) — no backtest possible; only
+  forward self-capture of Pinnacle (regions=eu) would work, same as
+  NBA/tennis. nflfastR pbp is a rich FEATURE source but only for an
+  outcome-prediction model (out of our line-shopping/CLV doctrine). Other
+  named repos: Public-ESPN-API idea-only (soft, current-only), yfpy reject
+  (fantasy, no odds), unravelsports reject (tracking GNN, no odds), nflow
+  reject (unrelated workflow engine). GITHUB DISCOVERY (read-only sweep):
+  nothing bindable — golden-mane-labs/Sports-Betting-Demo (partial: an
+  odds-history open->close modal-extraction technique, mirrors OddsHarvester
+  scrape_odds_history), ianalloway/awesome-sports-betting (idea-only: a
+  free-data vetting checklist), iliyasone/ps3838api (reject-bind: Pinnacle V4
+  JSON-shape reference for a future forward-capture client); all others
+  reject. RECURRING CONCLUSION: the free historical sharp-anchor+CLOSE gap
+  cannot be closed by any repo; the only doctrine path for new sports is
+  prospective self-captured Pinnacle snapshots.
+
 - 2026-06-16 (repo-bind + NBA-backtestability re-check, 2nd ask) — **DO NOT
   re-evaluate these 4 repos again; verdicts unchanged from 2026-06-11.**
   kyleskom/NBA-ML = REJECT (still NO LICENSE; only a single SOFT book via

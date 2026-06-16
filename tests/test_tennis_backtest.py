@@ -60,6 +60,31 @@ def test_settle_side_respects_explicit_winner_idx() -> None:
     assert tb.settle_side(row, 0) is False
 
 
+# --- de-leak: outcome-independent side assignment --------------------------
+def test_assign_sides_no_swap_keeps_winner_first() -> None:
+    sharp, best, widx = tb.assign_sides((1.5, 2.6), (1.55, 2.7), swap=False)
+    assert sharp == (1.5, 2.6)
+    assert best == (1.55, 2.7)
+    assert widx == 0
+
+
+def test_assign_sides_swap_flips_odds_and_winner_index() -> None:
+    sharp, best, widx = tb.assign_sides((1.5, 2.6), (1.55, 2.7), swap=True)
+    assert sharp == (2.6, 1.5)  # loser's odds now sit on side 0
+    assert best == (2.7, 1.55)
+    assert widx == 1
+
+
+def test_assign_sides_removes_outcome_ordering_leak() -> None:
+    # The source lists the winner first; after a swap the winner sits on side 1,
+    # so a bet on side 0 must SETTLE AS A LOSS — proving side 0 is no longer a
+    # guaranteed win (the outcome-ordering leak Codex flagged).
+    sharp, best, widx = tb.assign_sides((1.5, 2.6), (1.55, 2.7), swap=True)
+    row = tb.TennisRow(match_id="m", sharp=sharp, best=best, winner_idx=widx, completed=True)
+    assert tb.settle_side(row, 0) is False
+    assert tb.settle_side(row, 1) is True
+
+
 # --- selection -------------------------------------------------------------
 def test_non_completed_match_yields_no_bet() -> None:
     row = _row("m", 1.5, 3.0, 2.0, 4.0, completed=False)

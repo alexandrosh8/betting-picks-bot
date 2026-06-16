@@ -217,6 +217,10 @@ dependencies = [
 backfill = [
     { name = "oddsharvester" },
 ]
+backtest = [
+    { name = "openpyxl" },
+    { name = "pandas" },
+]
 football = [
     { name = "penaltyblog" },
 ]
@@ -257,6 +261,8 @@ requires-dist = [
     { name = "nba-api", marker = "extra == 'nba'", specifier = ">=1.4" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "oddsharvester", marker = "extra == 'backfill'", specifier = "==0.3.0" },
+    { name = "openpyxl", marker = "extra == 'backtest'", specifier = ">=3.1" },
+    { name = "pandas", marker = "extra == 'backtest'", specifier = ">=2.2" },
     { name = "pandas", marker = "extra == 'ml'", specifier = ">=2.2" },
     { name = "penaltyblog", marker = "extra == 'football'", specifier = ">=1.11" },
     { name = "pyarrow", marker = "extra == 'ml'", specifier = ">=24.0.0" },
@@ -271,7 +277,7 @@ requires-dist = [
     { name = "xgboost", marker = "extra == 'ml'", specifier = ">=3.2" },
     { name = "xgboost", marker = "extra == 'models'", specifier = ">=2.0" },
 ]
-provides-extras = ["football", "nba", "models", "backfill", "ml"]
+provides-extras = ["football", "nba", "models", "backfill", "ml", "backtest"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -571,6 +577,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/60/8b/32f9823da46cde7df2087faa08cd98d01b908f8dcab982cdba9c84e85355/decorator-5.3.1.tar.gz", hash = "sha256:4cbcdd55a6efadb9dbea26b858f4fb3264567b52d69ca0d25b721b553f60ea82", size = 58084, upload-time = "2026-05-18T06:03:28.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl", hash = "sha256:f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c", size = 10365, upload-time = "2026-05-18T06:03:26.517Z" },
+]
+
+[[package]]
+name = "et-xmlfile"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/38/af70d7ab1ae9d4da450eeec1fa3918940a5fafb9055e934af8d6eb0c2313/et_xmlfile-2.0.0.tar.gz", hash = "sha256:dab3f4764309081ce75662649be815c4c9081e88f0837825f90fd28317d4da54", size = 17234, upload-time = "2024-10-25T17:25:40.039Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c1/8b/5fe2cc11fee489817272089c4203e679c63b570a5aaeb18d852ae3cbba6a/et_xmlfile-2.0.0-py3-none-any.whl", hash = "sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa", size = 18059, upload-time = "2024-10-25T17:25:39.051Z" },
 ]
 
 [[package]]
@@ -1485,6 +1500,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a6/ff/5dfd61f9792252ad33e7ad38d27ba45f172953991a78ed96614cd280d96a/oddsharvester-0.3.0.tar.gz", hash = "sha256:89636106e3cebc2c150b8b890d457165d63ba34878abe79e45c53d48984841cc", size = 86442, upload-time = "2026-05-20T15:26:16.706Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ce/c0/895fb81b9344b66e2aabdbc51103219e1fdb87cb3f3941dc893ec0dfae8b/oddsharvester-0.3.0-py3-none-any.whl", hash = "sha256:e3b95d589cac3f72aadd5c8fd5b1ef0fcfa6b4bcc44bd00e2a7397190b1706ac", size = 94092, upload-time = "2026-05-20T15:26:15.035Z" },
+]
+
+[[package]]
+name = "openpyxl"
+version = "3.1.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "et-xmlfile" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3d/f9/88d94a75de065ea32619465d2f77b29a0469500e99012523b91cc4141cd1/openpyxl-3.1.5.tar.gz", hash = "sha256:cf0e3cf56142039133628b5acffe8ef0c12bc902d2aadd3e0fe5878dc08d1050", size = 186464, upload-time = "2024-06-28T14:03:44.161Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/da/977ded879c29cbd04de313843e76868e6e13408a94ed6b987245dc7c8506/openpyxl-3.1.5-py2.py3-none-any.whl", hash = "sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2", size = 250910, upload-time = "2024-06-28T14:03:41.161Z" },
 ]
 
 [[package]]

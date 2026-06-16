@@ -313,9 +313,13 @@ class Settings(BaseSettings):
     # --- Tennis (VISIBILITY-ONLY / UNVALIDATED) ------------------------------
     # OddsHarvester 0.3.0 scrapes tennis (151 ATP/WTA league URLs) and the
     # loader now ingests the devig-sound tennis markets below. BUT tennis is
-    # NOT an alerting sport: the held-out value backtest (ATP n=1085, WTA
-    # n=1220 — scripts/sports/tennis_backtest.py) could not clear the doctrine
-    # gate. tennis-data.co.uk carries no Pinnacle/Max closing columns, so
+    # NOT an alerting sport: the held-out value backtest
+    # (scripts/sports/tennis_backtest.py) could not clear the doctrine gate.
+    # (Leak-corrected 2026-06-16: tennis-data.co.uk lists odds winner-first, so
+    # the loader now randomizes side order — see assign_sides. Leak-free held-out
+    # ROI is positive but NOT conclusive — ATP +4.9% [-1.4%,+10.5%], WTA +3.1%
+    # [-2.7%,+8.9%], both CIs crossing 0.) tennis-data.co.uk carries no
+    # Pinnacle/Max closing columns, so
     # incremental CLV vs the close is UNDEFINED for tennis and the >2 SE bar
     # cannot even be evaluated. Tennis therefore enters as VISIBILITY-ONLY:
     # scraped rows appear in the AVAILABLE GAMES view tagged unvalidated=true,
@@ -381,6 +385,35 @@ class Settings(BaseSettings):
     odds_api_key_1: str = ""
     odds_api_key_2: str = ""
     odds_api_key_3: str = ""
+
+    # --- Pinnacle arcadia sharp-line archive (read-only; opt-in, OFF) ---------
+    # Clean-room GET-only capture of Pinnacle's PUBLIC guest JSON API
+    # (guest.api.arcadia.pinnacle.com) — the free live-Pinnacle sharp anchor
+    # this project's biggest documented data gap needs (ADR-0013,
+    # docs/research/free-odds-sources.md). It runs as an INDEPENDENT capture job
+    # ALONGSIDE the active ODDS_SOURCE; it never replaces it and mints NO picks/
+    # alerts. Captured period-0 moneyline closes land under the isolated
+    # `pinnacle_<sport>` warehouse namespace (bookmaker="Pinnacle"), so they
+    # never pollute the live dashboard/pick path. ToS-grey + endpoint-fragile
+    # (treat scrape gaps as expected). The public guest key is NOT an account
+    # credential and is never a bookmaker login or order-placement path
+    # (ADR-0002). OFF by default — a fourth read-only feed across many leagues.
+    arcadia_enabled: bool = False
+    arcadia_base_url: str = "https://guest.api.arcadia.pinnacle.com/0.1"
+    # Public guest x-api-key (Pinnacle's own web-client constant). The endpoints
+    # used here require NONE, so the default is empty and nothing is committed;
+    # set in .env only if Pinnacle ever starts requiring it. Kept out of logs/
+    # exceptions like every other key.
+    arcadia_guest_key: str = ""
+    # csv of sport keys to archive (soccer,tennis,basketball,american_football).
+    arcadia_sports: str = "soccer,tennis,basketball"
+    # Only archive events kicking off within this horizon (bounds volume; the
+    # close is the last pre-kickoff observation regardless of horizon).
+    arcadia_horizon_hours: int = Field(default=72, ge=1)
+    # Capture cadence. Change-gated by Pinnacle's per-market version int, so a
+    # short interval just tracks repricings; near kickoff is what matters. The
+    # >=30s floor blocks hammering-by-typo on a free source.
+    arcadia_poll_interval_seconds: int = Field(default=120, ge=30)
 
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":

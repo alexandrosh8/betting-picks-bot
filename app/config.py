@@ -414,6 +414,13 @@ class Settings(BaseSettings):
     # short interval just tracks repricings; near kickoff is what matters. The
     # >=30s floor blocks hammering-by-typo on a free source.
     arcadia_poll_interval_seconds: int = Field(default=120, ge=30)
+    # When true, the settlement-time snapshot close ALSO injects the STRICT
+    # cross-source match's Pinnacle ARCHIVE close (app/resolution, ADR-0013), so
+    # incremental CLV anchors on a real sharp close. OFF by default: it changes
+    # anchor_type/CLV for matched picks, so enable only after validating the
+    # match rate — the matcher is strict (no fuzzy), but a wrong close would
+    # corrupt CLV. Requires ARCADIA_ENABLED so the archive exists to match.
+    clv_use_pinnacle_archive: bool = False
 
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":

@@ -1,0 +1,29 @@
+{
+  "_comment": "Starter cross-source club-name alias table. Format: {\"teams\": {\"canonical\": [\"alias\", ...]}}. Names are normalized on load (matching.normalize_name strips accents/FC-noise), so list human-readable forms. Expand from withqwerty/reep (CC0) data/names.csv + custom_aliases.json over time. Do NOT add men's/women's-conflating aliases.",
+  "teams": {
+    "Manchester United": ["Man Utd", "Man United", "Manchester Utd"],
+    "Manchester City": ["Man City"],
+    "Tottenham Hotspur": ["Tottenham", "Spurs"],
+    "Wolverhampton Wanderers": ["Wolves", "Wolverhampton"],
+    "Brighton and Hove Albion": ["Brighton"],
+    "Newcastle United": ["Newcastle"],
+    "West Ham United": ["West Ham"],
+    "Nottingham Forest": ["Nottm Forest", "Notts Forest"],
+    "Sheffield United": ["Sheffield Utd"],
+    "Leeds United": ["Leeds"],
+    "Internazionale": ["Inter", "Inter Milan"],
+    "AC Milan": ["Milan"],
+    "AS Roma": ["Roma"],
+    "SSC Napoli": ["Napoli"],
+    "Bayern Munich": ["Bayern Munchen", "Bayern", "FC Bayern"],
+    "Borussia Dortmund": ["Dortmund", "BVB"],
+    "Borussia Monchengladbach": ["Monchengladbach", "Gladbach"],
+    "Bayer Leverkusen": ["Leverkusen"],
+    "Paris Saint-Germain": ["PSG", "Paris SG"],
+    "Atletico Madrid": ["Atletico", "Atletico de Madrid", "Atl Madrid"],
+    "Real Betis": ["Betis"],
+    "Real Sociedad": ["Sociedad"],
+    "Sporting CP": ["Sporting Lisbon", "Sporting"],
+    "Wolverhampton Wanderers Women": ["Wolves Women"]
+  }
+}

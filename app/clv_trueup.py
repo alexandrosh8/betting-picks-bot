@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.orm import aliased
 
 from app.backtesting.clv import clv_log
 from app.edge.value import effective_odds
@@ -31,7 +32,7 @@ from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
 from app.schemas.odds import OddsSnapshotIn
 from app.settlement.engine import STALE_NULL_KICKOFF_AGE
-from app.storage.models import Event, Pick
+from app.storage.models import Event, Pick, Sport, Team
 from app.storage.repositories import closing_odds_from_snapshots
 
 if TYPE_CHECKING:
@@ -393,6 +394,8 @@ async def finalize_closing_from_snapshots(
     kickoff: datetime | None,
     devig_method: DevigMethod,
     max_gap: timedelta = SNAPSHOT_CLOSE_MAX_GAP,
+    *,
+    use_pinnacle_archive: bool = False,
 ) -> bool:
     """Recompute the pick's closing fair/CLV from our own odds_snapshots
     history instead of trusting the last pre-kickoff re-scrape write.
@@ -432,6 +435,18 @@ async def finalize_closing_from_snapshots(
             max_gap,
         )
         return False
+    if use_pinnacle_archive:
+        # Inject the matched Pinnacle ARCHIVE close (strict cross-source match)
+        # so a real sharp close anchors the fair (value.SHARP_BOOKS[0]=="pinnacle")
+        # for incremental CLV. No match -> [] -> behaviour unchanged.
+        extra = await _pinnacle_archive_close(session, pick, external_ref, kickoff)
+        if extra:
+            snaps = [*snaps, *extra]
+            logger.info(
+                "pick %d: injected %d Pinnacle archive close rows (strict match)",
+                pick.id,
+                len(extra),
+            )
     grouped = group_market_prices(snaps)
     fair_by_key: dict[tuple[str, str], float] = {}
     for (_event, market, _detail), (_anchor, fair_by_sel) in event_fair_probs(
@@ -473,6 +488,46 @@ async def finalize_closing_from_snapshots(
         len(books),
     )
     return True
+
+
+_ARCADIA_SPORTS = frozenset({"soccer", "tennis", "basketball", "american_football"})
+
+
+async def _pinnacle_archive_close(
+    session: "AsyncSession",
+    pick: Pick,
+    external_ref: str,
+    kickoff: datetime,
+) -> list[OddsSnapshotIn]:
+    """The matched Pinnacle ARCHIVE event's close snapshots for this pick, or []
+    (strict cross-source match; see repositories.resolve_pinnacle_close_snaps).
+    Looks up the pick event's sport + team names, derives the `pinnacle_<sport>`
+    namespace, and delegates the strict match."""
+    from app.storage.repositories import resolve_pinnacle_close_snaps
+
+    home_t, away_t = aliased(Team), aliased(Team)
+    info = (
+        await session.execute(
+            select(Sport.key, home_t.name, away_t.name)
+            .select_from(Event)
+            .join(Sport, Event.sport_id == Sport.id)
+            .join(home_t, Event.home_team_id == home_t.id)
+            .join(away_t, Event.away_team_id == away_t.id)
+            .where(Event.id == pick.event_id)
+        )
+    ).first()
+    if info is None:
+        return []
+    sport_key, home, away = info
+    base = sport_key if sport_key in _ARCADIA_SPORTS else sport_key.split("_", 1)[0]
+    return await resolve_pinnacle_close_snaps(
+        session,
+        pinnacle_sport_key=f"pinnacle_{base}",
+        pick_external_ref=external_ref,
+        home=home,
+        away=away,
+        kickoff=kickoff,
+    )
 
 
 async def true_up_clv(

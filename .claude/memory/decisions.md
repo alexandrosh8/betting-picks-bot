@@ -1,5 +1,27 @@
 # Decisions Log
 
+- 2026-06-16 (cross-source CLV matcher — BUILT, ADR-0014) — the deferred
+  ADR-0013 step is SHIPPED: a PURE `app/resolution/` strict matcher attaches the
+  Pinnacle ARCHIVE close to the matching OddsPortal pick. `match_event` =
+  exact-normalized names (+ alias table) AND kickoff within a small day window,
+  UNIQUE-or-None (NO fuzzy/containment/best-available; ambiguous->None;
+  women/youth markers PRESERVED so "Arsenal Women" never matches "Arsenal";
+  ordered=True rejects home/away swap; ordered=False for tennis). Clean-room
+  from glass_onion (join) + soccerdata (alias pattern) + reep CC0 (alias data) —
+  patterns/data only, ZERO code. `repositories.resolve_pinnacle_close_snaps`
+  re-keys the matched archive close to the pick's event_id + selection
+  vocabulary; `clv_trueup.finalize_closing_from_snapshots` injects it behind
+  `CLV_USE_PINNACLE_ARCHIVE` (DEFAULT OFF — changes anchor_type/CLV for matched
+  picks, evidence-gated; byte-identical when off). 25 tests (20 pure + 5 DB);
+  ruff/mypy/safety green. 3-agent adversarial review (clv-auditor + integration
+  - clean-room): integration/clean-room PASS; strictness found ONE MAJOR —
+    the close cutoff used the PICK's kickoff not the matched ARCADIA event's, so a
+    ±1-day-earlier arcadia fixture could admit a post-kickoff in-play price as the
+    close (cardinal sin) — FIXED (cutoff = min(pick_ko, arcadia_ko)) + regression
+    test; plus an unordered-degenerate guard made unconditional and a seed
+    no-collision test. NEXT: validate the soccer match rate on live data before
+    flipping the flag; then tennis (name-order) + NBA. v1 = soccer, moneyline.
+
 - 2026-06-16 (repo sweep #2 — "best repos for the project"; full report
   `docs/research/repo-sweep-2026-06-16.md`) — 4-agent gated sweep, settled
   repos excluded. NO new runtime dependency, but 3 clean-room takes that

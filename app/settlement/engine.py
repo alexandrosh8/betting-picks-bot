@@ -120,6 +120,7 @@ async def settle_open_picks(
     now: datetime,
     delay: timedelta = SETTLE_DELAY,
     devig_method: DevigMethod | None = None,
+    use_pinnacle_archive: bool = False,
 ) -> int:
     """Settle every alerted pick whose event finished and has a known score.
 
@@ -169,7 +170,12 @@ async def settle_open_picks(
             # final. A False return keeps the re-scrape close untouched.
             if devig_method is not None:
                 await finalize_closing_from_snapshots(
-                    session, pick, external_ref, starts_at, devig_method
+                    session,
+                    pick,
+                    external_ref,
+                    starts_at,
+                    devig_method,
+                    use_pinnacle_archive=use_pinnacle_archive,
                 )
     if settled:
         await session.flush()  # status flips visible to the caller's transaction
@@ -264,6 +270,7 @@ async def run_settlement_cycle(
     seasons: Sequence[str],
     now: datetime | None = None,
     devig_method: DevigMethod | None = None,
+    use_pinnacle_archive: bool = False,
 ) -> int:
     """One scheduler cycle: fetch scores for the configured leagues, settle.
 
@@ -297,7 +304,11 @@ async def run_settlement_cycle(
         return 0
     async with session_factory() as session:
         settled = await settle_open_picks(
-            session, ScoreBook(scores), now, devig_method=devig_method
+            session,
+            ScoreBook(scores),
+            now,
+            devig_method=devig_method,
+            use_pinnacle_archive=use_pinnacle_archive,
         )
         await session.commit()
     return settled

@@ -369,6 +369,7 @@ def build_scheduler(
                 session_factory,
                 slugs=_csv(settings.oddsportal_football_leagues),
                 seasons=_csv(settings.footballdata_seasons),
+                use_pinnacle_archive=settings.clv_use_pinnacle_archive,
             )
         except Exception as exc:
             logger.error("settle_results failed: %s", type(exc).__name__)

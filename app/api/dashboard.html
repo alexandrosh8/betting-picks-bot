@@ -857,6 +857,7 @@
     <div class="statusbar" role="status">
       <span class="chip" id="chip-poll">poll: —</span>
       <span class="chip" id="chip-window">verified ≤ 45m</span>
+      <span class="chip" id="chip-sports">football — · nba — · tennis —</span>
       <span class="chipset" id="ing-chips"></span>
       <span class="chip" id="chip-deps" style="display: none"></span>
     </div>
@@ -933,7 +934,6 @@
       </button>
     </div>
     <!-- purpose line set via textContent in JS (no untrusted markup) -->
-    <div class="sub" id="games-purpose"></div>
     <div id="games-panel" hidden>
       <div class="controls">
         <select id="f-game-sport" aria-label="Filter games by sport">
@@ -1060,9 +1060,10 @@
     </div>
 
     <!-- legend moved here (page bottom): status + CLV semantics, JS-populated -->
-    <div class="legend" id="picks-legend">
-      <span class="chip"><b>Status</b><span id="legend-status"></span></span>
-      <span class="chip"><b>CLV</b><span id="legend-clv"></span></span>
+    <!-- plain footer-style legend (not boxed chips) -->
+    <div class="sub" id="picks-legend">
+      <b>Status</b><span id="legend-status"></span> &nbsp;·&nbsp; <b>CLV</b
+      ><span id="legend-clv"></span>
     </div>
 
     <footer>
@@ -1253,6 +1254,20 @@
 
       function renderGames() {
         const tbody = $("game-rows");
+        // Per-sport fetched-match counts in the status bar (total loaded, not
+        // the filtered view): how many football / NBA / tennis we are pricing.
+        const sc = { soccer: 0, basketball: 0, tennis: 0 };
+        for (const g of GAMES) {
+          const k = String(g.sport).split("_")[0];
+          if (k in sc) sc[k] += 1;
+        }
+        $("chip-sports").textContent =
+          "football " +
+          sc.soccer +
+          " · nba " +
+          sc.basketball +
+          " · tennis " +
+          sc.tennis;
         const sport = $("f-game-sport").value;
         const q = $("f-game-search").value.trim().toLowerCase();
         const rows = GAMES.filter(
@@ -1295,8 +1310,7 @@
             "NO GAMES LOADED — engine is still completing its first poll cycle, or no fixtures are listed yet.";
           if (GAMES.length && sportSel === "tennis") {
             msg =
-              "No tennis games — tennis polling is OFF by default (visibility-only, it did not clear the CLV backtest). " +
-              "Enable it by setting ODDSPORTAL_TENNIS_LEAGUES in .env.";
+              "Tennis is off (visibility-only) — set ODDSPORTAL_TENNIS_LEAGUES in .env to enable.";
           } else if (GAMES.length && sportSel === "basketball") {
             msg =
               "No NBA games right now — the NBA is off-season (Jun–Oct); only club competitions appear when listed.";
@@ -2693,10 +2707,6 @@
           " CLV +x% = your price beat the de-vigged closing sharp line by " +
           "x%. Consistently positive CLV is the only proof of real edge — " +
           "not a profit guarantee.";
-        $("games-purpose").textContent =
-          "Read-only coverage view — every match we are currently pricing " +
-          "across books. Actionable picks (with confidence + edge) are in " +
-          "the table below; this list is just the data we hold.";
       }
       fillStaticCopy();
       setGamesOpen(false);

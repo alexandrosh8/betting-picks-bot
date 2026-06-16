@@ -248,7 +248,6 @@ class PipelineDeps:
     ledger: DailyExposureLedger
     bankroll: Decimal
     devig_method: DevigMethod = DevigMethod.POWER
-    sport: str = "soccer"
     league: str = ""
     directory: EventDirectory | None = None  # resolves event_id -> readable "Home vs Away"
     session_factory: "async_sessionmaker | None" = None  # set => persist picks to DB
@@ -383,7 +382,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
         _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
         return []
 
-    persisted = await _persist_snapshots(deps, snapshots, deps.sport, deps.league or sport_key, now)
+    persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)
     fair = _fair_probabilities(snapshots, deps.devig_method)
     picks: list[PickOut] = []
 
@@ -427,7 +426,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
 
             pick = PickOut(
                 pick_id=str(uuid.uuid4()),
-                sport=deps.sport,
+                sport=sport_key,
                 league=deps.league or sport_key,
                 event=event_label,
                 event_id=snap.event_id,

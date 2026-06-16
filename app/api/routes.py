@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import insert, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import (
@@ -472,15 +473,25 @@ async def record_result(
             notes=payload.notes,
         )
     )
-    await session.execute(
-        insert(ResultTracking).values(
-            pick_id=pick_id,
-            outcome=str(payload.outcome),
-            pnl=pnl,
-            roi=roi,
-            settled_at=payload.settled_at,
-        )
+    # Idempotent: re-posting a result (a correction or a duplicate submit) must
+    # UPDATE the existing row, not 500 on the unique (pick_id) constraint.
+    result_stmt = pg_insert(ResultTracking).values(
+        pick_id=pick_id,
+        outcome=str(payload.outcome),
+        pnl=pnl,
+        roi=roi,
+        settled_at=payload.settled_at,
     )
+    result_stmt = result_stmt.on_conflict_do_update(
+        constraint="uq_result_tracking_pick",
+        set_={
+            "outcome": result_stmt.excluded.outcome,
+            "pnl": result_stmt.excluded.pnl,
+            "roi": result_stmt.excluded.roi,
+            "settled_at": result_stmt.excluded.settled_at,
+        },
+    )
+    await session.execute(result_stmt)
     await session.execute(update(Pick).where(Pick.id == pick_id).values(status="settled"))
     await session.commit()
     return {"status": "recorded", "outcome": str(payload.outcome)}

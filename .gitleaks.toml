@@ -1,0 +1,24 @@
+# gitleaks configuration.
+#
+# The workspace check `gitleaks dir . --no-banner` (security checklist) scans the
+# FILESYSTEM, which includes the gitignored, mode-0600 runtime `.env`. That file
+# is intentionally local-only and NEVER committed — the `gitleaks git`
+# pre-commit hook and the CI `gitleaks-action` scan all TRACKED/committed
+# content, which is what protects the repository. Without this config the dir
+# scan goes red the moment dashboard auth is configured (a DASHBOARD_SESSION_
+# SECRET in `.env`), even though nothing is leaked into git.
+#
+# Policy: keep the full default ruleset, and allowlist ONLY the local `.env`
+# (and local `.env.<variant>`) PATHS from the scan. `.env.example` and every
+# other tracked file are still scanned, so a secret accidentally committed to a
+# tracked file is still caught.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local runtime secrets live in the gitignored 0600 .env (never committed). Exclude only that path from the scan; .env.example and all tracked files remain scanned."
+paths = [
+  '''(^|/)\.env$''',
+  '''(^|/)\.env\.(local|dev|development|prod|production|staging|test)$''',
+]

@@ -131,6 +131,26 @@ async def test_pipeline_rerun_suppresses_duplicate_alert() -> None:
     assert len(sink.sent) == 1
 
 
+async def test_model_pipeline_stamps_polled_sport_not_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: run_pick_pipeline stamped persisted snapshots + picks with the
+    # (now removed) deps.sport default "soccer" even for a basketball poll.
+    import app.pipeline as pl
+
+    captured: dict[str, str] = {}
+
+    async def spy_persist(deps, snapshots, sport, league, now):  # type: ignore[no-untyped-def]
+        captured["sport"] = sport
+        return 0
+
+    monkeypatch.setattr(pl, "_persist_snapshots", spy_persist)
+    picks = await run_pick_pipeline(make_deps(RecordingSink()), "basketball")
+    assert captured["sport"] == "basketball"  # the warehouse persist arg
+    assert len(picks) == 1
+    assert picks[0].sport == "basketball"  # PickOut.sport
+
+
 class FakeSessionFactory:
     """Minimal async-contextmanager session for the persistence seam."""
 

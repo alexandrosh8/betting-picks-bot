@@ -78,6 +78,33 @@ async def session():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
+@pytest.fixture
+async def committing_session():  # type: ignore[no-untyped-def]
+    """Savepoint-isolated session that CONTAINS commits — for code under test
+    that calls session.commit() (e.g. record_result). The outer transaction is
+    rolled back at teardown, so a committing handler never leaks into the shared
+    dev DB (unlike the plain `session` fixture, which only rolls back UNcommitted
+    work)."""
+    engine = create_async_engine(DB_URL)
+    try:
+        async with engine.connect() as probe:
+            await probe.exec_driver_sql("SELECT 1")
+    except Exception:
+        await engine.dispose()
+        pytest.skip("compose Postgres not reachable on :5433")
+    async with engine.connect() as conn:
+        trans = await conn.begin()
+        maker = async_sessionmaker(
+            bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
+        )
+        async with maker() as s:
+            try:
+                yield s
+            finally:
+                await trans.rollback()
+    await engine.dispose()
+
+
 async def test_persist_pick_inserts_then_dedupes(session) -> None:  # type: ignore[no-untyped-def]
     teams = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
 
@@ -673,6 +700,48 @@ async def test_open_pick_has_null_outcome_and_pnl(session) -> None:  # type: ign
     assert ours
     assert ours[0]["outcome"] is None
     assert ours[0]["pnl"] is None
+
+
+async def test_record_result_repost_is_idempotent(committing_session) -> None:  # type: ignore[no-untyped-def]
+    # P2a regression: re-posting a manual result (a correction or duplicate
+    # submit) must UPDATE the existing row, not 500 on the unique pick_id
+    # constraint (uq_result_tracking_pick). Uses the savepoint-isolated session
+    # because record_result COMMITS — the plain `session` fixture would leak it.
+    from app.api.routes import record_result
+    from app.schemas.base import Outcome
+    from app.schemas.events import ResultIn
+    from app.storage.models import ResultTracking
+
+    session = committing_session
+    teams = EventTeams(home="Repost Home", away="Repost Away", league="test-repost")
+    await persist_pick(
+        session, make_pick("evt-repost", league="test-repost"), teams, "value-sharp-vs-soft", "t-rp"
+    )
+    pick = await session.scalar(
+        select(Pick)
+        .join(Event, Pick.event_id == Event.id)
+        .where(Event.external_ref == "evt-repost")
+    )
+    assert pick is not None
+    now = datetime.now(tz=UTC)
+
+    first = await record_result(
+        pick.id, ResultIn(pick_id=str(pick.id), outcome=Outcome.WON, settled_at=now), session
+    )
+    assert first["outcome"] == "won"
+    # re-post a CORRECTED outcome: must not raise, must update the row in place
+    second = await record_result(
+        pick.id, ResultIn(pick_id=str(pick.id), outcome=Outcome.LOST, settled_at=now), session
+    )
+    assert second["outcome"] == "lost"
+
+    rows = (
+        (await session.execute(select(ResultTracking).where(ResultTracking.pick_id == pick.id)))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1  # ONE result row, updated (no duplicate, no crash)
+    assert rows[0].outcome == "lost"
 
 
 async def test_available_games_fallback_includes_tennis_with_unvalidated_flag(session) -> None:  # type: ignore[no-untyped-def]

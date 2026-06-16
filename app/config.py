@@ -313,9 +313,13 @@ class Settings(BaseSettings):
     # --- Tennis (VISIBILITY-ONLY / UNVALIDATED) ------------------------------
     # OddsHarvester 0.3.0 scrapes tennis (151 ATP/WTA league URLs) and the
     # loader now ingests the devig-sound tennis markets below. BUT tennis is
-    # NOT an alerting sport: the held-out value backtest (ATP n=1085, WTA
-    # n=1220 — scripts/sports/tennis_backtest.py) could not clear the doctrine
-    # gate. tennis-data.co.uk carries no Pinnacle/Max closing columns, so
+    # NOT an alerting sport: the held-out value backtest
+    # (scripts/sports/tennis_backtest.py) could not clear the doctrine gate.
+    # (Leak-corrected 2026-06-16: tennis-data.co.uk lists odds winner-first, so
+    # the loader now randomizes side order — see assign_sides. Leak-free held-out
+    # ROI is positive but NOT conclusive — ATP +4.9% [-1.4%,+10.5%], WTA +3.1%
+    # [-2.7%,+8.9%], both CIs crossing 0.) tennis-data.co.uk carries no
+    # Pinnacle/Max closing columns, so
     # incremental CLV vs the close is UNDEFINED for tennis and the >2 SE bar
     # cannot even be evaluated. Tennis therefore enters as VISIBILITY-ONLY:
     # scraped rows appear in the AVAILABLE GAMES view tagged unvalidated=true,

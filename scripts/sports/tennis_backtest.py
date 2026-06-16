@@ -14,6 +14,11 @@ Methodology (review-corrected, identical spirit to scripts/value_backtest.py):
   - Settlement uses the REAL result (Winner/Loser). Only Comment == "Completed"
     matches settle; Retired / Walkover / Awarded are quarantined (logged count)
     because the staked market would void or resolve ambiguously.
+  - LEAK GUARD: the source lists every odds column winner-first (PSW/PSL,
+    MaxW/MaxL). The loader randomizes (SEEDED, per tour-year) which side the
+    winner sits on (assign_sides), so the selector never sees an outcome-ordered
+    layout — a side-0 pick is NOT a guaranteed win. Without this the held-out
+    ROI is outcome-leaked.
   - The verdict is COMPUTED from held-out numbers, never hardcoded.
 
 CRITICAL DATA TRUTH — tennis-data.co.uk has NO closing columns.
@@ -29,9 +34,11 @@ Bootstrap CIs are CLUSTERED BY MATCH: each match contributes at most one bet,
 so the cluster == the bet here, but we keep the clustered resampler so the
 helper is correct if the market set is ever widened (e.g. set/games totals).
 
-    uv run python scripts/sports/tennis_backtest.py
-    uv run python scripts/sports/tennis_backtest.py --tours atp,wta \\
+    uv run --extra backtest python scripts/sports/tennis_backtest.py
+    uv run --extra backtest python scripts/sports/tennis_backtest.py --tours atp,wta \\
         --train-years 2019,2020,2021,2022,2023 --test-years 2024,2025,2026
+
+The `backtest` extra supplies pandas + the openpyxl .xlsx reader this loader needs.
 
 Decision-support only — nothing here places bets.
 """
@@ -75,14 +82,36 @@ def _f(x: object) -> float | None:
     return v if v > 1.0 else None
 
 
+def assign_sides(
+    sharp_wl: tuple[float | None, float | None],
+    best_wl: tuple[float | None, float | None],
+    *,
+    swap: bool,
+) -> tuple[tuple[float | None, float | None], tuple[float | None, float | None], int]:
+    """Map source (winner, loser)-ordered odds onto an outcome-INDEPENDENT side
+    order; returns (sharp, best, winner_idx).
+
+    tennis-data.co.uk lists every odds column winner-first (PSW/PSL, MaxW/MaxL),
+    so a fixed [winner, loser] layout makes the eventual winner ALWAYS side 0 —
+    select_bet would then settle any side-0 pick as a guaranteed win, leaking
+    the outcome into the held-out ROI. The caller flips a SEEDED coin per match:
+    swap=False keeps [winner, loser] (winner_idx=0); swap=True flips to
+    [loser, winner] (winner_idx=1). The selector then sees odds in an order
+    uncorrelated with the result, so a side-0 bet wins only when it actually won.
+    """
+    if swap:
+        return (sharp_wl[1], sharp_wl[0]), (best_wl[1], best_wl[0]), 1
+    return sharp_wl, best_wl, 0
+
+
 @dataclass(frozen=True)
 class TennisRow:
     """One match, pre-parsed to the fields the backtest needs.
 
-    `winner_idx` is the outcome index that actually won in [winner, loser]
-    order: it is always 0 because the source already labels the winner first.
-    We keep it explicit so settlement is auditable and so the settle helper is
-    testable on synthetic rows where the winning side may be index 1.
+    `winner_idx` is the side index (0 or 1) that actually won AFTER the seeded
+    side-randomization in `_load_year` (see `assign_sides`). It is NOT fixed at
+    0: the source lists odds winner-first, so leaving the winner permanently on
+    side 0 would leak the outcome into selection. Settlement reads this field.
     """
 
     match_id: str
@@ -302,19 +331,24 @@ def _load_year(tour: str, year: int) -> list[TennisRow]:  # pragma: no cover
     df = pd.read_excel(path)
     rows: list[TennisRow] = []
     quarantined = 0
+    # Deterministic per tour-year (a str seed is stable across processes,
+    # unlike hash()): randomize which side the winner sits on so the source's
+    # winner-first column order cannot leak into selection (see assign_sides).
+    rng = random.Random(f"tennis-side-{tour}-{year}")
     for idx, r in df.iterrows():
         comment = str(r.get("Comment", "")).strip()
         completed = comment == "Completed"
         if not completed:
             quarantined += 1
-        sharp = (_f(r.get(SHARP_COLS[0])), _f(r.get(SHARP_COLS[1])))
-        best = (_f(r.get(MAX_COLS[0])), _f(r.get(MAX_COLS[1])))
+        sharp_wl = (_f(r.get(SHARP_COLS[0])), _f(r.get(SHARP_COLS[1])))
+        best_wl = (_f(r.get(MAX_COLS[0])), _f(r.get(MAX_COLS[1])))
+        sharp, best, winner_idx = assign_sides(sharp_wl, best_wl, swap=rng.random() < 0.5)
         rows.append(
             TennisRow(
                 match_id=f"{tour}-{year}-{idx}",
                 sharp=sharp,
                 best=best,
-                winner_idx=0,  # source lists the winner first
+                winner_idx=winner_idx,
                 completed=completed,
             )
         )

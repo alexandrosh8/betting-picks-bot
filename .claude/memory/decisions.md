@@ -22,6 +22,24 @@
   picks (fuzzy joins FORBIDDEN — wrong close = corrupted CLV) and (b) pick
   generation for those sports — both deferred. v1 = moneyline only.
 
+- 2026-06-16 (tennis backtest OUTCOME-LEAK fixed — Codex review of PR #4) —
+  scripts/sports/tennis_backtest.py loaded PSW/PSL + MaxW/MaxL with a FIXED
+  `winner_idx=0` (the source lists odds winner-first), so the eventual winner
+  was ALWAYS side 0 at selection time → any side-0 pick settled as a guaranteed
+  win → held-out ROI was OUTCOME-LEAKED. FIX: new pure `assign_sides()` +
+  a seeded per-tour-year coin in `_load_year` randomize which side the winner
+  sits on, so the selector sees an order uncorrelated with the result
+  (3 regression tests, incl. "side 0 is no longer a guaranteed win"). Leak-free
+  re-run (train 2021-23 / test 2024-25, power devig thr 0.01): ATP held-out
+  n=1073 ROI +4.9% [-1.4%,+10.5%], WTA n=1193 ROI +3.1% [-2.7%,+8.9%] — both
+  CIs CROSS 0 (not conclusively profitable). VERDICT UNCHANGED: tennis has no
+  closing line → CLV gate unevaluable → VISIBILITY-ONLY / 0 picks regardless of
+  ROI; the leak only inflated the reported ROI, never the operational decision.
+  Also fixed in the same PR: tennis_backtest now declared under a `backtest`
+  extra (pandas + openpyxl for .xlsx); `POST /login` offloads the 600k-iter
+  PBKDF2 to a worker thread (asyncio.to_thread) so a login burst can't stall
+  the event loop + scheduler (Codex PR #3).
+
 - 2026-06-16 (GitHub discovery — devig/Pinnacle repos) — **POTENTIAL
   GAP-CLOSER found: a FREE, accountless, PRE-MATCH Pinnacle feed exists** via
   the unofficial JSON API `guest.api.arcadia.pinnacle.com/0.1` (bulk

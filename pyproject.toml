@@ -42,6 +42,10 @@ ml = [
     # pandas-3.0 compat (we run pandas 3.0.3).
     "xgboost>=3.2",
 ]
+# scripts/sports/tennis_backtest.py reads tennis-data.co.uk .xlsx files, which
+# need pandas + the openpyxl engine. Declared so `uv run --extra backtest ...`
+# works on a base install (pandas otherwise only arrives via ml/football).
+backtest = ["pandas>=2.2", "openpyxl>=3.1"]
 
 [dependency-groups]
 dev = [

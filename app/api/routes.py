@@ -5,6 +5,7 @@ records what THEY did (bet placed or not, stake, outcome). Nothing here can
 place a bet.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -214,7 +215,10 @@ async def login_submit(payload: _LoginIn) -> Response:
     from app.config import get_settings
 
     settings = get_settings()
-    if not authenticate(payload.username, payload.password):
+    # authenticate() runs a 600k-iteration PBKDF2 hash — offload it to a worker
+    # thread so a burst of login attempts can't block the event loop (and with
+    # it every other request + the scheduler) until the hashes finish.
+    if not await asyncio.to_thread(authenticate, payload.username, payload.password):
         return JSONResponse({"detail": "invalid credentials"}, status_code=401)
     token = sign_session(
         settings.dashboard_auth_username,

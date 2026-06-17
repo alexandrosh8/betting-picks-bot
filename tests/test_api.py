@@ -397,6 +397,18 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     assert sport["match_rate"] == pytest.approx(1 / 3)
 
 
+def test_dashboard_has_onboarding_clv_explainer() -> None:
+    """A dismissible, plain-language explainer frames CLV + confidence stars
+    BEFORE the data (not just the footer): CLV is proof of edge — not a profit
+    guarantee; stars are edge-confidence, not win probability; manual review
+    always. Keeps the picks-only framing prominent."""
+    text = TestClient(make_app()).get("/").text
+    assert 'id="intro"' in text
+    assert 'id="intro-dismiss"' in text
+    assert "proof of edge" in text
+    assert "not" in text and "profit guarantee" in text
+
+
 def test_dashboard_has_archive_coverage_panel() -> None:
     """The dashboard surfaces the Pinnacle-archive match-rate dial (the
     readiness signal for CLV_USE_PINNACLE_ARCHIVE) as a collapsed, lazy-loaded

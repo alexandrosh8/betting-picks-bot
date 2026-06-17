@@ -972,6 +972,44 @@
       </div>
     </div>
 
+    <!-- Pinnacle archive coverage: strict cross-source match rate of picks to
+         the captured Pinnacle sharp-close archive (ADR-0014). The readiness
+         dial for CLV_USE_PINNACLE_ARCHIVE — shadow-only, changes NO pick.
+         Lazy-loaded on expand (the query scans picks + archive) so it never
+         taxes the 60s refresh loop. -->
+    <div class="games-head">
+      <div class="evtitle">Pinnacle archive coverage</div>
+      <span class="stamp" id="archive-count">—</span>
+      <button
+        id="toggle-archive"
+        class="section-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="archive-panel"
+      >
+        Show
+      </button>
+    </div>
+    <div id="archive-panel" hidden>
+      <div class="sub" id="archive-purpose"></div>
+      <div class="tablewrap gameswrap">
+        <table id="archive-table">
+          <thead>
+            <tr>
+              <th>Sport</th>
+              <th>Matched</th>
+              <th>Rate</th>
+            </tr>
+          </thead>
+          <tbody id="archive-rows">
+            <tr>
+              <td colspan="3"><div class="skelbar"></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="controls">
       <!-- segmented status control (replaces the old status <select>):
            LIVE = verified open · UNVERIFIED = open awaiting re-price ·
@@ -1079,6 +1117,12 @@
       let GAMES = [];
       let GAMES_ERR = null;
       let GAMES_OPEN = false;
+      // Pinnacle archive coverage panel (lazy: fetched on first expand, not in
+      // the 60s loop). ARCHIVE = last GET /resolution/match-rate payload.
+      let ARCHIVE = null;
+      let ARCHIVE_OPEN = false;
+      let ARCHIVE_LOADED = false;
+      let ARCHIVE_LOADING = false;
       // Active status tab: "live" | "unverified" | "settled" (replaces the
       // old #f-status select). Default = LIVE (verified open premium picks).
       let STATUS_TAB = "live";
@@ -1240,6 +1284,112 @@
         $("games-panel").hidden = !GAMES_OPEN;
         $("toggle-games").setAttribute("aria-expanded", String(GAMES_OPEN));
         $("toggle-games").textContent = GAMES_OPEN ? "Hide" : "Show";
+      }
+
+      // --- Pinnacle archive coverage (lazy) --------------------------------
+      const ratePct = (r) =>
+        r === null || r === undefined
+          ? "n/a"
+          : (Number(r) * 100).toFixed(1) + "%";
+
+      function setArchiveOpen(open) {
+        ARCHIVE_OPEN = !!open;
+        $("archive-panel").hidden = !ARCHIVE_OPEN;
+        $("toggle-archive").setAttribute("aria-expanded", String(ARCHIVE_OPEN));
+        $("toggle-archive").textContent = ARCHIVE_OPEN ? "Hide" : "Show";
+        // Fetch only on first expand — the query scans picks + archive, so it
+        // stays off the 60s refresh loop.
+        if (ARCHIVE_OPEN && !ARCHIVE_LOADED && !ARCHIVE_LOADING) loadArchive();
+      }
+
+      async function loadArchive() {
+        ARCHIVE_LOADING = true;
+        $("archive-count").classList.remove("err");
+        $("archive-count").textContent = "loading…";
+        try {
+          const res = await fetchWithTimeout("/resolution/match-rate?days=180");
+          if (res.status === 401) {
+            window.location.assign("/login");
+            return;
+          }
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          ARCHIVE = await res.json();
+          ARCHIVE_LOADED = true;
+          renderArchive();
+        } catch (err) {
+          $("archive-count").classList.add("err");
+          $("archive-count").textContent = "coverage unavailable";
+          const tbody = $("archive-rows");
+          tbody.replaceChildren();
+          const tr = document.createElement("tr");
+          const cell = td(
+            tr,
+            "GET /resolution/match-rate failed — " + errLabel(err),
+            "empty",
+          );
+          cell.colSpan = 3;
+          tbody.appendChild(tr);
+        } finally {
+          ARCHIVE_LOADING = false;
+        }
+      }
+
+      function renderArchive() {
+        const a = ARCHIVE;
+        if (!a) return;
+        const total = Number(a.total) || 0;
+        $("archive-count").classList.remove("err");
+        $("archive-count").textContent =
+          a.matched + " / " + total + " matched · " + ratePct(a.match_rate);
+        $("archive-purpose").textContent =
+          "Strict cross-source match of picks (known kickoff, last 180d) to the " +
+          "captured Pinnacle sharp-close archive — the readiness dial for the " +
+          "CLV_USE_PINNACLE_ARCHIVE flip. Shadow-only: it changes no pick. Of " +
+          total +
+          " picks, " +
+          (a.no_archive_candidates || 0) +
+          " have no Pinnacle event in window (coverage gap — accrues as capture " +
+          "runs) and " +
+          (a.unmatched_with_candidates || 0) +
+          " have one but no name match (alias gap). Enable the archive in CLV " +
+          "only after a healthy rate AND a held-out CLV backtest.";
+        const tbody = $("archive-rows");
+        tbody.replaceChildren();
+        if (!total) {
+          const tr = document.createElement("tr");
+          const cell = td(
+            tr,
+            "No picks with a known kickoff to evaluate yet.",
+            "empty",
+          );
+          cell.colSpan = 3;
+          tbody.appendChild(tr);
+          return;
+        }
+        const bySport = a.by_sport || [];
+        if (!bySport.length) {
+          const tr = document.createElement("tr");
+          const cell = td(
+            tr,
+            "Archive empty — enable ARCADIA_ENABLED to start capturing Pinnacle closes.",
+            "empty",
+          );
+          cell.colSpan = 3;
+          tbody.appendChild(tr);
+          return;
+        }
+        bySport.forEach((g) => {
+          const tr = document.createElement("tr");
+          td(tr, SPORT_LABELS[g.key] || g.key);
+          td(tr, g.matched + " / " + g.total);
+          const rateCell = td(tr, ratePct(g.match_rate));
+          if (g.match_rate !== null && g.match_rate !== undefined) {
+            const r = Number(g.match_rate);
+            rateCell.style.color =
+              r >= 0.5 ? "var(--pos)" : r > 0 ? "var(--warn)" : "var(--neg)";
+          }
+          tbody.appendChild(tr);
+        });
       }
 
       // Resolve a real http(s) URL for the Match external-link icon. Prefers
@@ -2680,6 +2830,9 @@
       $("toggle-games").addEventListener("click", () =>
         setGamesOpen(!GAMES_OPEN),
       );
+      $("toggle-archive").addEventListener("click", () =>
+        setArchiveOpen(!ARCHIVE_OPEN),
+      );
       $("f-game-sport").addEventListener("change", renderGames);
       $("f-game-search").addEventListener("input", renderGames);
       $("refresh").addEventListener("click", load);
@@ -2710,6 +2863,7 @@
       }
       fillStaticCopy();
       setGamesOpen(false);
+      setArchiveOpen(false);
       load();
       setInterval(load, 60000);
     </script>

@@ -397,6 +397,18 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     assert sport["match_rate"] == pytest.approx(1 / 3)
 
 
+def test_dashboard_has_archive_coverage_panel() -> None:
+    """The dashboard surfaces the Pinnacle-archive match-rate dial (the
+    readiness signal for CLV_USE_PINNACLE_ARCHIVE) as a collapsed, lazy-loaded
+    panel that reads GET /resolution/match-rate. Honest framing: shadow-only,
+    never presented as changing a pick."""
+    text = TestClient(make_app()).get("/").text
+    assert "Pinnacle archive coverage" in text
+    assert 'id="archive-panel"' in text
+    assert 'id="toggle-archive"' in text
+    assert "/resolution/match-rate" in text
+
+
 def test_dashboard_has_live_evidence_panel_and_min_odds_helper() -> None:
     """Live-evidence panel + execution helper on the dashboard: honest-n
     insufficient states, hidden-until-served panel, the 'ok >=' odds-floor

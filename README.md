@@ -16,39 +16,91 @@ results, ROI, and Closing Line Value (CLV).
 > auto-betting flag — by design. All market-data integrations are read-only.
 > Betting involves risk; nothing here is a guarantee of profit.
 
-## Running it
+## Install & run — pick one
 
-### Local dev (Mac)
+Two supported ways to run it. Both run the **same code** and serve the picks
+dashboard at **http://localhost:8000/**.
 
-The app runs on the host; only postgres/redis are containerized:
+### Option 1 — Your own PC (Windows or Mac)
+
+Easiest path: **Docker Desktop** runs the whole stack (app + Postgres + Redis)
+with one command — no Python, no database to install.
+
+1. Install **[Docker Desktop](https://www.docker.com/products/docker-desktop/)**
+   (Windows or Mac) and start it.
+2. Get the code and a config file:
+
+   **Mac:**
+
+   ```bash
+   git clone https://github.com/alexandrosh8/betting-picks-bot.git
+   cd betting-picks-bot
+   cp .env.example .env
+   ```
+
+   **Windows (PowerShell):**
+
+   ```powershell
+   git clone https://github.com/alexandrosh8/betting-picks-bot.git
+   cd betting-picks-bot
+   Copy-Item .env.example .env
+   ```
+
+3. Build and start (the first build downloads Chromium — a few minutes):
+
+   ```bash
+   docker compose --profile prod up -d --build
+   ```
+
+4. Open **http://localhost:8000/**.
+
+Stop it with `docker compose --profile prod down` (your data is kept in a
+Docker volume); start again later with `docker compose --profile prod up -d`.
+Logs: `docker compose --profile prod logs -f app`.
+
+Optional: edit `.env` and set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` for
+pick alerts — leaving them blank just disables alerts, the dashboard still
+works. Local (loopback) use needs **no login**.
+
+### Option 2 — OpenClaw / Ubuntu VPS (always-on, 24/7)
+
+The same Docker stack on a server, with `restart: unless-stopped` so it
+survives reboots and crashes, plus a dashboard login before any public access:
 
 ```bash
-git clone <repo>
-cd betting-ai
+sudo apt install -y docker.io docker-compose-v2 git      # if Docker is missing
+sudo git clone https://github.com/alexandrosh8/betting-picks-bot.git /opt/betting-ai
+sudo chown -R $USER /opt/betting-ai
+cd /opt/betting-ai
 cp .env.example .env
+chmod 600 .env
+# edit .env: uncomment COMPOSE_PROFILES=prod, set TELEGRAM_*, and — for a public
+# IP — enable DASHBOARD_AUTH_* + APP_HOST_BIND=0.0.0.0 (see the runbook)
+docker compose up -d --build
+```
+
+Reach the dashboard over an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <vps>`,
+then open http://localhost:8000/), or on the VPS IP once dashboard auth is on.
+Full step-by-step — prerequisites, every `.env` key, public-IP hardening,
+logs, updates, backups, troubleshooting:
+**[`docs/deployment/openclaw-ubuntu.md`](docs/deployment/openclaw-ubuntu.md)**.
+
+### Developer mode (Mac / Linux, host Python)
+
+Hot-reload for development — the app runs on the host, only Postgres/Redis are
+containerized:
+
+```bash
 docker compose up -d postgres redis
 uv sync --extra football --extra backfill
 uv run playwright install chromium
 uv run alembic upgrade head
-uv run uvicorn app.main:app
+uv run uvicorn app.main:app --reload
 ```
 
-(Or `bash scripts/run_app.sh` — frees port 8000 first. Mac dev only.)
-
-### Server (Ubuntu/OpenClaw)
-
-The whole platform runs as the Docker Compose stack — the app service builds
-its own image (Chromium baked in), runs migrations on every boot, and
-`restart: unless-stopped` keeps it alive across crashes and reboots:
-
-```bash
-cd /opt/betting-ai
-# one-time: create .env (0600) and uncomment COMPOSE_PROFILES=prod in it
-docker compose up -d --build
-```
-
-Full step-by-step (prereqs, .env keys, verify, logs, updates, backups,
-troubleshooting): **`docs/deployment/openclaw-ubuntu.md`**.
+(Or `bash scripts/run_app.sh` — frees port 8000 first.) New here?
+**`docs/HOW_TO_RUN.md`** has the exact verify-the-backtest and live-picks
+commands.
 
 ## The pick finder that actually works (backtested positive CLV)
 

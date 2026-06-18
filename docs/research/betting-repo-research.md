@@ -125,3 +125,30 @@ Acted on instead (doctrine-safe, ships now): the dashboard **CLOSED tab** (the
 proof-of-edge ledger — every kicked-off pick with its close + CLV) + a **CLV
 scorecard** (% beat the close, mean CLV). Real OddsHarvester closes would plug
 straight into it once the probe passes.
+
+### PROBE RESULT (2026-06-19, `scripts/research/probe_historic_odds.py`)
+
+Ran a bounded read-only HISTORIC scrape — England Premier League 2023-2024,
+1 results page, market `1x2`, OddsHarvester's own pacing (no anti-bot bypass).
+Outcome:
+
+- **HISTORIC mode works** — 50 matches returned, all 50 with per-bookmaker 1X2
+  **closing** odds (`period: FullTime`). So free real closing lines DO exist.
+- **Pinnacle is ABSENT.** The 8 books returned were `1xBet, 22Bet, 888sport,
+BetInAsia, Betsson, GGBET, N1 Bet, bet365` — the soft books we already pick
+  from, **no Pinnacle / no recognized sharp**.
+- `odds_history` (opening odds) not exercised in this pass (closing-only run).
+
+**Verdict — the data gate is NOT cleared.** OddsHarvester HISTORIC gives a free
+real **closing line at the same soft books we bet** (genuinely useful: grade a
+pick against its book's _actual_ close instead of our re-priced proxy), but it
+does **not** surface a free **sharp (Pinnacle) anchor** for past matches — the
+project's biggest gap stays open. A full historic backfill is therefore **not
+worth building for edge**; its only payoff is better soft-book close grading,
+which the live re-price loop already approximates. NOT building it.
+
+Residual uncertainty (didn't chase, to avoid more ToS-sensitive load): the run
+used the default results-list book set; a per-match-detail scrape or an
+explicit `target_bookmaker="Pinnacle"` / `bookies_filter` pass _might_ surface
+Pinnacle. First-pass strongly suggests it isn't in the easy/default path. Probe
+kept (`scripts/research/probe_historic_odds.py`) so the follow-up is one command.

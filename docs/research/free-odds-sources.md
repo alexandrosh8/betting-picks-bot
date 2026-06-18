@@ -72,7 +72,8 @@ forward capture, taking only the repo's API _facts_ (endpoints, sport ids,
 market `key` scheme, American→decimal) and zero code from the unlicensed repo.
 Verified live across tennis/soccer/basketball (245/101/28 period-0 moneyline
 quotes from one read). Persists `bookmaker="Pinnacle"` closes under the
-isolated `pinnacle_<sport>` namespace; opt-in via `ARCADIA_ENABLED` (OFF).
+isolated `pinnacle_<sport>` namespace; via `ARCADIA_ENABLED` (ON by default
+since 2026-06-18; set false to disable).
 This builds the sharp-line ARCHIVE (the irreplaceable asset). Turning it into
 NBA/tennis CLV validation still needs (a) strict cross-source event resolution
 to attach closes to OddsPortal picks and (b) pick generation for those sports —

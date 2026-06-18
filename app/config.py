@@ -288,54 +288,45 @@ class Settings(BaseSettings):
     # "oddsportal" = free OddsPortal odds via OddsHarvester (default, no key);
     # "odds_api"   = The Odds API (needs keys below).
     odds_source: str = "oddsportal"
-    oddsportal_football_leagues: str = "england-premier-league"  # csv of slugs
-    # Devig-sound markets only: full mutually-exclusive outcome sets. Asian
-    # handicaps are HALF-LINES only (integer/quarter lines carry pushes and
-    # are rejected by the loader); European handicap is 3-way and devig-sound
-    # at any integer line. 1x2+ou25 are backtest-validated; the rest use the
-    # identical mechanism on thinner evidence. Every extra market adds one
-    # scrape tab per match — each line below is a deliberate liquidity call.
+    # Default "all" = OddsPortal's worldwide dated daily page (every league
+    # that day, no slug filter); off-season leagues simply yield no events.
+    # Matches the reference deployment so a fresh committed deploy is wide.
+    oddsportal_football_leagues: str = "all"  # csv of slugs, or "all" sentinel
+    # Devig-sound markets only. With leagues="all" (the default) the budget
+    # validator caps this at ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET (4) keys —
+    # every key is one browser tab per match on a 100-300+ match daily page,
+    # so the worldwide scrape stays under an hour. This 4-key set is the
+    # backtest-validated 1x2+ou25 plus btts/double_chance, matching the
+    # reference deployment.
     #
-    # This default is every devig-sound market FAMILY oddsharvester 0.3.0
-    # supports, with lines trimmed to the liquid band: football OU 0.5 and
-    # 5.5+ plus EH ±3/±4 are dead-liquidity tabs that only add scrape time
-    # and gap-noise. FULL upstream-supported sets for future tuning
-    # (.venv/.../oddsharvester/utils/sport_market_constants.py is the
-    # documentation of record):
+    # To run the FULL devig-sound families instead, SCOPE the leagues (set
+    # ODDSPORTAL_FOOTBALL_LEAGUES to specific slugs, not "all") and widen this
+    # in .env. Asian handicaps are HALF-LINES only (integer/quarter lines push
+    # and are loader-rejected); European handicap is 3-way devig-sound at any
+    # integer line. FULL upstream-supported sets (oddsharvester 0.3.0
+    # utils/sport_market_constants.py is the documentation of record):
     #   OU (FootballOverUnderMarket): 0_5..8_5 in quarter steps — only the
     #     half-lines (_5) are devig-sound; integer/quarter lines push.
     #   AH (FootballAsianHandicapMarket): -4..+2 in quarter steps — only
     #     half-lines (-3_5..+1_5) are devig-sound here.
     #   EH (FootballEuropeanHandicapMarket): -4..-1, +1..+4 (all integer,
     #     all 3-way devig-sound).
-    oddsportal_football_markets: str = (
-        "1x2,btts,double_chance,dnb,"
-        "over_under_1_5,over_under_2_5,over_under_3_5,over_under_4_5,"
-        "asian_handicap_-3_5,asian_handicap_-2_5,asian_handicap_-1_5,"
-        "asian_handicap_-0_5,asian_handicap_+0_5,asian_handicap_+1_5,"
-        "european_handicap_-2,european_handicap_-1,european_handicap_+1,european_handicap_+2"
-    )
+    oddsportal_football_markets: str = "1x2,over_under_2_5,btts,double_chance"
     # Basketball (club competitions only — OddsHarvester maps no national-team
-    # events like EuroBasket). Empty leagues = basketball polling off.
-    # Totals/AH lines are per-game; the band covers modern NBA/Euroleague
-    # totals (200.5-245.5) and spreads (±10.5). FULL upstream sets are
-    # 161 OU tabs (BasketballOverUnderMarket: 100_5..260_5, every half
-    # point) and 52 AH tabs (BasketballAsianHandicapMarket: -25_5..+25_5,
-    # all half-lines) — scraping them all only adds cycle time on tabs
-    # OddsPortal rarely prices.
+    # events like EuroBasket). With leagues="all" the budget validator caps
+    # markets at 4 keys; this set is moneyline + the liquid NBA/Euroleague
+    # totals band (220.5-230.5) and matches the reference deployment. SCOPE
+    # the leagues in .env to widen. FULL upstream sets are 161 OU tabs
+    # (BasketballOverUnderMarket: 100_5..260_5, every half point) and 52 AH
+    # tabs (BasketballAsianHandicapMarket: -25_5..+25_5, all half-lines) —
+    # scraping them all only adds cycle time on tabs OddsPortal rarely prices.
     oddsportal_basketball_markets: str = (
-        "home_away,"
-        "over_under_games_200_5,over_under_games_205_5,over_under_games_210_5,"
-        "over_under_games_215_5,over_under_games_220_5,over_under_games_225_5,"
-        "over_under_games_230_5,over_under_games_235_5,over_under_games_240_5,"
-        "over_under_games_245_5,"
-        "asian_handicap_games_-10_5_games,asian_handicap_games_-7_5_games,"
-        "asian_handicap_games_-5_5_games,asian_handicap_games_-3_5_games,"
-        "asian_handicap_games_-1_5_games,asian_handicap_games_+1_5_games,"
-        "asian_handicap_games_+3_5_games,asian_handicap_games_+5_5_games,"
-        "asian_handicap_games_+7_5_games,asian_handicap_games_+10_5_games"
+        "home_away,over_under_games_220_5,over_under_games_225_5,over_under_games_230_5"
     )
-    oddsportal_basketball_leagues: str = "nba,euroleague"
+    # Default "all" = worldwide basketball daily page; off-season (NBA and
+    # Euroleague both done) simply yields no events. Matches the reference
+    # deployment. Empty leagues = basketball polling off.
+    oddsportal_basketball_leagues: str = "all"
     # --- Tennis (VISIBILITY-ONLY / UNVALIDATED) ------------------------------
     # OddsHarvester 0.3.0 scrapes tennis (151 ATP/WTA league URLs) and the
     # loader now ingests the devig-sound tennis markets below. BUT tennis is
@@ -352,22 +343,18 @@ class Settings(BaseSettings):
     # and the pipeline mints NO picks and sends NO alerts for it (enforced in
     # app/scheduler.py + app/pipeline.py, not just by config).
     #
-    # Empty leagues = tennis polling OFF (the default). It is OFF because a
-    # third sport across 151 leagues materially grows cycle time; enable in
-    # .env only when the operator wants the unvalidated visibility feed.
-    # Markets are the devig-sound tennis set: match_winner (2-way ML), totals
-    # half-lines on BOTH axes (sets _5 and games _5), and AH HALF-lines on
-    # both axes (integer/zero AH lines push and are rejected by the loader;
-    # correct_score is many-outcome and has no pairwise devig path).
-    oddsportal_tennis_leagues: str = ""  # csv of atp-/wta- slugs; empty = OFF
-    oddsportal_tennis_markets: str = (
-        "match_winner,"
-        "over_under_sets_2_5,over_under_sets_3_5,"
-        "over_under_games_21_5,over_under_games_22_5,over_under_games_23_5,"
-        "asian_handicap_-1_5_sets,asian_handicap_+1_5_sets,"
-        "asian_handicap_-3_5_games,asian_handicap_-2_5_games,"
-        "asian_handicap_+2_5_games,asian_handicap_+3_5_games"
-    )
+    # Default = the current in-season slugs (grass), matching the reference
+    # deployment so a fresh deploy shows the same visibility feed. These slugs
+    # are SEASONAL — rotate them in .env as the tour moves (grass->hard->clay);
+    # set empty to turn tennis polling OFF entirely. Market is match_winner
+    # only (the 2-way ML, devig-sound) to keep the multi-tournament scrape
+    # light; the full devig-sound tennis set (totals/AH half-lines on both the
+    # sets and games axes) can be set in .env for scoped tuning.
+    oddsportal_tennis_leagues: str = (
+        "atp-halle,atp-london,atp-eastbourne,atp-mallorca,atp-wimbledon,"
+        "wta-berlin,wta-birmingham,wta-eastbourne,wta-bad-homburg,wta-wimbledon"
+    )  # csv of atp-/wta- slugs (seasonal); empty = OFF
+    oddsportal_tennis_markets: str = "match_winner"
     # --- American football / NFL (REJECTED — no live code) -------------------
     # The loader supports NFL markets config-only (same home_away/over_under_/
     # asian_handicap_ keys as football/basketball), BUT the NFL value backtest
@@ -423,8 +410,11 @@ class Settings(BaseSettings):
     # never pollute the live dashboard/pick path. ToS-grey + endpoint-fragile
     # (treat scrape gaps as expected). The public guest key is NOT an account
     # credential and is never a bookmaker login or order-placement path
-    # (ADR-0002). OFF by default — a fourth read-only feed across many leagues.
-    arcadia_enabled: bool = False
+    # (ADR-0002). ON by default — a fourth READ-ONLY feed that builds the free
+    # live-Pinnacle sharp-line ARCHIVE (the irreplaceable line-shopping anchor).
+    # GET-only; still mints NO picks/alerts. CLV_USE_PINNACLE_ARCHIVE stays OFF
+    # until the cross-source match rate is validated. Set false to disable.
+    arcadia_enabled: bool = True
     arcadia_base_url: str = "https://guest.api.arcadia.pinnacle.com/0.1"
     # Public guest x-api-key (Pinnacle's own web-client constant). The endpoints
     # used here require NONE, so the default is empty and nothing is committed;

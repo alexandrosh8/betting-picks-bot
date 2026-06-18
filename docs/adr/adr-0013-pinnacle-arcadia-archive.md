@@ -37,7 +37,9 @@ Architecture (the load-bearing choices):
 - **Independent capture job, never an `ODDS_SOURCE`.** `ODDS_SOURCE` is
   single-select; making arcadia a source would _replace_ OddsPortal and leave
   nothing to line-shop against. Instead `build_scheduler` registers a separate
-  `IntervalTrigger` job (gated by `ARCADIA_ENABLED`, OFF by default) that runs
+  `IntervalTrigger` job (gated by `ARCADIA_ENABLED`; default flipped OFF→ON on
+  2026-06-18 for deployment parity — capture is read-only and mints nothing, so
+  on-by-default is safe; `CLV_USE_PINNACLE_ARCHIVE` stays OFF) that runs
   ALONGSIDE the active source and mints **no picks/alerts**.
 - **Isolated `pinnacle_<sport>` warehouse namespace.** Captured period-0
   moneyline closes persist via the normal `persist_odds_snapshots` path with

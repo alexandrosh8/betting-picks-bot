@@ -181,15 +181,23 @@ def test_equal_tier_floors_disable_volume_cleanly() -> None:
 
 
 def test_all_leagues_with_wide_market_list_is_fatal() -> None:
-    """leagues=all + the full devig-sound market list = multi-hour cycles
-    (live-measured ~73s/match at 18 tabs) whose slate the odds-age gate then
-    almost entirely discards — the trim is mandatory, so refuse to start."""
-    # class-default market lists are fine for SCOPED leagues (the defaults)
-    # but exceed the budget the moment the worldwide sentinel is set.
+    """leagues=all + a market list OVER the budget = multi-hour cycles
+    (live-measured ~73s/match) whose slate the odds-age gate then almost
+    entirely discards — the trim is mandatory, so refuse to start. The
+    committed DEFAULT markets are within budget (see
+    test_default_leagues_are_all_within_market_budget), so this drives the
+    guard with an explicit over-budget override."""
+    wide_football = "1x2,btts,double_chance,dnb,over_under_2_5"  # 5 > budget 4
+    wide_basketball = (
+        "home_away,over_under_games_220_5,over_under_games_225_5,"
+        "over_under_games_230_5,over_under_games_235_5"  # 5 > budget 4
+    )
     with pytest.raises(ValidationError, match="ODDSPORTAL_FOOTBALL_MARKETS"):
-        make_settings(oddsportal_football_leagues="all")
+        make_settings(oddsportal_football_leagues="all", oddsportal_football_markets=wide_football)
     with pytest.raises(ValidationError, match="ODDSPORTAL_BASKETBALL_MARKETS"):
-        make_settings(oddsportal_basketball_leagues="all")
+        make_settings(
+            oddsportal_basketball_leagues="all", oddsportal_basketball_markets=wide_basketball
+        )
 
 
 def test_all_leagues_within_market_budget_passes() -> None:
@@ -204,12 +212,31 @@ def test_all_leagues_within_market_budget_passes() -> None:
     assert len(s.oddsportal_football_markets.split(",")) <= ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET
 
 
-def test_scoped_leagues_keep_the_full_market_list() -> None:
-    # The budget binds ONLY on the exact ["all"] sentinel — scoped-league
-    # configs (and lists mixing 'all' with slugs, which the loader rejects
-    # as an unknown league) keep the full devig-sound default lists.
-    s = make_settings()  # defaults: scoped leagues + 18/21-key lists
+def test_scoped_leagues_allow_a_wide_market_list() -> None:
+    # The budget binds ONLY on the exact ["all"] sentinel — a SCOPED-league
+    # config (specific slugs, not "all") keeps the full devig-sound market
+    # families. (Lists mixing 'all' with slugs are rejected by the loader as
+    # an unknown league, so they never reach a wide-market scrape.)
+    s = make_settings(
+        oddsportal_football_leagues="england-premier-league",
+        oddsportal_football_markets=(
+            "1x2,btts,double_chance,dnb,over_under_1_5,over_under_2_5,over_under_3_5"
+        ),
+    )
     assert len(s.oddsportal_football_markets.split(",")) > 4
+
+
+def test_default_leagues_are_all_within_market_budget() -> None:
+    # The committed default matches the reference deployment: worldwide
+    # ("all") leagues with the market list trimmed to the budget, so a bare
+    # Settings() constructs and a fresh deploy stays under an hour per cycle.
+    from app.config import ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET
+
+    s = make_settings()
+    assert s.oddsportal_football_leagues == "all"
+    assert s.oddsportal_basketball_leagues == "all"
+    assert len(s.oddsportal_football_markets.split(",")) <= ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET
+    assert len(s.oddsportal_basketball_markets.split(",")) <= ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET
 
 
 # --- premium-tier adjustment knobs (2026-06 research): default OFF -----------

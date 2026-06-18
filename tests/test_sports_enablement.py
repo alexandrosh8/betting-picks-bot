@@ -62,9 +62,14 @@ def make_settings(**overrides: object) -> Settings:
 # ---------------------------------------------------------------------------
 
 
-def test_tennis_polling_off_by_default() -> None:
-    # Visibility-only AND a third sport across 151 leagues -> OFF by default.
-    assert make_settings().oddsportal_tennis_leagues == ""
+def test_tennis_polling_on_by_default() -> None:
+    # Tennis ships ON by default now (in-season atp-/wta- slugs) so a fresh
+    # committed deploy matches the reference .env's visibility feed. It stays
+    # VISIBILITY-ONLY — mints NO picks/alerts (enforced in scheduler+pipeline);
+    # this only asserts the polling default is non-empty and slug-shaped.
+    slugs = [s for s in make_settings().oddsportal_tennis_leagues.split(",") if s]
+    assert slugs  # non-empty: tennis polling on by default
+    assert all(s.startswith(("atp-", "wta-")) for s in slugs)
 
 
 def test_default_tennis_markets_are_devig_sound() -> None:
@@ -361,9 +366,11 @@ async def test_scheduler_omits_tennis_when_leagues_unset() -> None:
     from app.scheduler import build_scheduler
 
     redis = fakeredis.FakeRedis()
+    # Tennis is ON by default now, so set it empty explicitly to exercise the
+    # leagues-unset path: the poll job still exists, tennis just isn't polled.
+    settings = make_settings(oddsportal_tennis_leagues="")
     async with httpx.AsyncClient() as client:
-        scheduler = build_scheduler(make_settings(), client, redis)
-    # The poll job exists, but tennis is not configured anywhere.
+        scheduler = build_scheduler(settings, client, redis)
     assert any(job.id == "poll_odds" for job in scheduler.get_jobs())
 
 

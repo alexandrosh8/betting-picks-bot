@@ -173,41 +173,6 @@
 
       /* onboarding explainer — frames CLV/stars before the data; dismissible
          and remembered (localStorage) so it never re-nags. */
-      .intro {
-        display: flex;
-        align-items: flex-start;
-        gap: 10px;
-        margin: 0 0 14px;
-        padding: 9px 12px;
-        border: 1px solid rgba(106, 215, 255, 0.28);
-        border-radius: 4px;
-        background: rgba(106, 215, 255, 0.05);
-        font-size: 11px;
-        line-height: 1.55;
-        color: var(--text);
-      }
-      .intro b {
-        color: var(--info);
-        font-weight: 700;
-      }
-      .intro-txt {
-        flex: 1;
-      }
-      .intro-x {
-        width: auto;
-        border: 0;
-        background: transparent;
-        color: var(--dim);
-        font-size: 16px;
-        line-height: 1;
-        padding: 0 4px;
-        cursor: pointer;
-      }
-      .intro-x:hover {
-        color: var(--info);
-        background: transparent;
-        border-color: transparent;
-      }
 
       /* --- summary cards -------------------------------------------- */
       .cards {
@@ -503,7 +468,6 @@
       .confcell {
         letter-spacing: 0.04em;
         font-size: 13px;
-        cursor: help;
         white-space: nowrap;
       }
       .confcell .stars {
@@ -523,67 +487,6 @@
       }
       .extlink:hover {
         text-decoration: underline;
-      }
-
-      /* compact "?" info icon — explanatory prose lives in its tooltip, not as
-         standing body text. data-tip carries the copy; shown on hover + focus
-         (keyboard accessible). Replaces the old always-on legend/intro blocks. */
-      .info {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 14px;
-        height: 14px;
-        margin-left: 6px;
-        padding: 0;
-        border: 1px solid var(--line);
-        border-radius: 50%;
-        background: transparent;
-        color: var(--faint);
-        font-size: 9px;
-        font-weight: 700;
-        line-height: 1;
-        cursor: help;
-        position: relative;
-        vertical-align: middle;
-        text-transform: none;
-        letter-spacing: 0;
-      }
-      .info:hover,
-      .info:focus-visible {
-        color: var(--accent);
-        border-color: var(--accent);
-        outline: none;
-      }
-      .info::after {
-        content: attr(data-tip);
-        position: absolute;
-        z-index: 30;
-        left: 0;
-        top: calc(100% + 7px);
-        width: max-content;
-        max-width: 340px;
-        white-space: normal;
-        text-align: left;
-        background: var(--panel2);
-        color: var(--text);
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 8px 11px;
-        font-size: 11px;
-        font-weight: 400;
-        line-height: 1.55;
-        letter-spacing: 0;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
-        opacity: 0;
-        visibility: hidden;
-        transition: opacity 0.12s ease;
-        pointer-events: none;
-      }
-      .info:hover::after,
-      .info:focus-visible::after {
-        opacity: 1;
-        visibility: visible;
       }
 
       /* segmented status control (LIVE / UNVERIFIED / SETTLED) */
@@ -1179,28 +1082,6 @@
 
     <!-- onboarding explainer (page-bottom): how to read CLV + stars.
          Dismissible and remembered via localStorage. Static author copy. -->
-    <div class="intro" id="intro" role="note">
-      <span class="intro-txt">
-        Decision support — manual review only; this system never places bets.
-        <button
-          class="info"
-          type="button"
-          aria-label="How to read this dashboard"
-          data-tip="CLV = your pick's price vs the sharp closing line; consistently positive CLV is the proof of edge, not a profit guarantee. ★ stars = confidence in the EDGE, not your chance to win. Always confirm the live price at the book before betting."
-        >
-          ?
-        </button>
-      </span>
-      <button
-        id="intro-dismiss"
-        class="intro-x"
-        type="button"
-        aria-label="Dismiss this note"
-      >
-        ×
-      </button>
-    </div>
-
     <footer>
       auto-refresh 60s · manual review only — this system does
       <b>not</b> place bets; stakes informational, no profit guaranteed
@@ -1902,11 +1783,8 @@
       }
 
       // CONFIDENCE stars — the headline that REPLACES the recommended-stake
-      // column (USER DECISION 1). The stake % lives ONLY in this cell's title
-      // tooltip, never as visible text. Stars set via textContent.
-      const CONF_FRAMING =
-        "Model confidence in the EDGE (sharp-vs-soft line value) — NOT a " +
-        "probability you will win. Evidence currency is held-out CLV.";
+      // column. Stars set via textContent; NO hover tooltip (operator
+      // preference) — the ★ meaning lives in the static legend under the table.
       function cellConfidence(tr, p) {
         const conf = p.confidence_rating || {};
         // Defensive: an older API without confidence_rating still renders a
@@ -1922,22 +1800,6 @@
         empty.className = "dim";
         empty.textContent = "☆".repeat(5 - n); // unfilled
         cell.append(stars, empty);
-        // tooltip = framing + stake (informational) + why-this-rating bands.
-        const frac = Number(p.recommended_stake_fraction);
-        const amt = Number(p.recommended_stake_amount);
-        let tip = CONF_FRAMING;
-        if (isFinite(frac) && isFinite(amt))
-          tip +=
-            "\nRecommended fractional-Kelly stake (informational, not " +
-            "advice): " +
-            (frac * 100).toFixed(2) +
-            "% of bankroll = " +
-            amt.toFixed(2) +
-            " units.";
-        if (conf.reasons && conf.reasons.length)
-          tip += "\nwhy this rating: " + conf.reasons.join("; ");
-        if (tierOf(p) === "volume") tip += " · volume shadow tier (no alert)";
-        cell.title = tip;
         tr.appendChild(cell);
       }
 
@@ -2886,9 +2748,12 @@
           }
         });
 
-        // dependency updates (upstream watch) — chip, not a banner
+        // Upstream watch: only the dependency-check FAILURE is worth a chip on
+        // the operator dashboard. The "update available" notice was dev noise —
+        // it rendered right after the last sport chip and read as a sport
+        // sub-stat — so it is no longer surfaced here (the upstream-watch job
+        // still logs it and /health still carries health.upstream.updates).
         const up = health.upstream || {};
-        const updates = up.updates || [];
         if (up.error) {
           deps.style.display = "";
           setChip(
@@ -2896,28 +2761,6 @@
             "dep check failing",
             "warn",
             "dependency update check failing: " + up.error,
-          );
-        } else if (updates.length) {
-          deps.style.display = "";
-          setChip(
-            deps,
-            "updates: " + updates.length,
-            "info",
-            "dependency update available:\n" +
-              updates
-                .map(
-                  (u) =>
-                    "  " +
-                    u.package +
-                    " " +
-                    u.latest +
-                    " (installed " +
-                    u.installed +
-                    ")",
-                )
-                .join("\n") +
-              "\nrun: bash scripts/upgrade_deps.sh (tested upgrade, " +
-              "auto-rollback on failure)",
           );
         } else {
           deps.style.display = "none";
@@ -3219,30 +3062,10 @@
         $("legend-clv").textContent =
           " CLV +x% = your price beat the de-vigged closing sharp line by " +
           "x%. Consistently positive CLV is the only proof of real edge — " +
-          "not a profit guarantee.";
+          "not a profit guarantee. ★ = model confidence in the EDGE, not your " +
+          "chance to win. Always confirm the live price at the book before betting.";
       }
       fillStaticCopy();
-      // Onboarding explainer: visible by default, hidden once dismissed
-      // (remembered via localStorage so a returning operator isn't re-nagged).
-      (function initIntro() {
-        const el = $("intro");
-        if (!el) return;
-        let dismissed = false;
-        try {
-          dismissed = localStorage.getItem("pt_intro_dismissed") === "1";
-        } catch (e) {
-          dismissed = false;
-        }
-        el.hidden = dismissed;
-        $("intro-dismiss").addEventListener("click", () => {
-          el.hidden = true;
-          try {
-            localStorage.setItem("pt_intro_dismissed", "1");
-          } catch (e) {
-            /* private mode: dismiss for this session only */
-          }
-        });
-      })();
       setGamesOpen(false);
       setArchiveOpen(false);
       // Picks are the product: surface the picks table directly under the KPI

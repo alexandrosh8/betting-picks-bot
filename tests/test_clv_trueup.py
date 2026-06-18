@@ -220,6 +220,9 @@ async def test_true_up_revalidates_current_odds_and_edge(factory) -> None:  # ty
         assert pick is not None
         # SoftBook (the pick's book) quotes Home FC at 2.30 in the fresh scrape
         assert pick.current_odds == Decimal("2.3000")
+        # the "now" price is the pick's OWN book (same-book by default), so the
+        # dashboard "now at <book>" label is honest
+        assert pick.current_bookmaker == pick.bookmaker
         assert pick.revalidated_at is not None
         assert pick.current_edge is not None
         fair = float(pick.closing_fair_probability)

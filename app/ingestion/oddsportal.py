@@ -362,6 +362,12 @@ class _ScrapeGapDowngradeFilter(logging.Filter):
         # or without the bookies-filter nav is the same expected-gap class.
         "Failed to find or click",
         "bookies-filter navigation not found",
+        # A period tab a match page doesn't offer (e.g. football double_chance
+        # pages whose "Full Time" period div isn't present/ready within the
+        # timeout) — same expected-gap class; the market is skipped gracefully.
+        # SCOPED to "period ..." so a bookies-filter target miss (which could
+        # mean we read a filtered book set) stays visible at ERROR.
+        "period target element not found",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:

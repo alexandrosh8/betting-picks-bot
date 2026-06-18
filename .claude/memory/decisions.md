@@ -1,5 +1,25 @@
 # Decisions Log
 
+- 2026-06-18 (scrape-gap log fix — 'period target element not found' downgraded;
+  basketball was a RED HERRING) — live monitoring flagged 8/hr
+  `ERROR:SelectionManager:period target element not found for: Full Time`.
+  Systematic-debugging traced it through installed oddsharvester 0.3.0
+  (selection.py:86, sport_period_registry.py, validate_and_convert_period):
+  the period IS resolved per-sport correctly — basketball O/U uses
+  `FullIncludingOT`/"FT including OT" (806 ok), so basketball is NOT broken; its
+  low O/U coverage (1 event vs 219 home_away) is OFF-SEASON liquidity, not this
+  error. The "Full Time" errors are FOOTBALL double_chance pages (8 of 1415
+  Full-Time period-sets = 0.5%) where the period div isn't present/ready within
+  timeout — an EXPECTED, gracefully-handled scrape gap (market skipped, no
+  crash, picks unaffected). ROOT CAUSE of the NOISE: app/ingestion/oddsportal.py
+  `_ScrapeGapDowngradeFilter` already downgrades expected scrape-gap messages on
+  the SelectionManager logger, but its `_NEEDLES` omitted
+  "period target element not found", so that one leaked at ERROR (and inflated
+  the monitor's error count = false alarm). FIX: added that needle (TDD
+  RED→GREEN; SCOPED to "period ..." so a bookies-filter target miss stays at
+  ERROR). NO scrape-behavior change. The needle is message-text-coupled to
+  oddsharvester 0.3.0 like the other patches — re-verify on bump (pitfalls.md).
+
 - 2026-06-18 (external-AI findings cross-checked — NO config change) — an
   outside review flagged a football "artifact mismatch": live devig is
   `differential_margin_weighting` (config.py:211) while `scripts/value_backtest.py`

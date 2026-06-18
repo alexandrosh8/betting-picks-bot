@@ -484,6 +484,37 @@ def test_scrape_gap_filter_downgrades_expected_misses_to_info() -> None:
     assert f.filter(bookies_nav)
     assert bookies_nav.levelno == logging.INFO
 
+    # A period tab that a match page doesn't offer (e.g. football double_chance
+    # pages where the "Full Time" period div isn't present/ready) is the SAME
+    # expected-gap class — the match's market is skipped gracefully. Upstream
+    # logs it at ERROR; downgrade to INFO so it doesn't masquerade as a real
+    # failure (it was inflating the "errors" count in live monitoring).
+    period_gap = logging.LogRecord(
+        "SelectionManager",
+        logging.ERROR,
+        __file__,
+        0,
+        "period target element not found for: Full Time",
+        None,
+        None,
+    )
+    assert f.filter(period_gap)
+    assert period_gap.levelno == logging.INFO
+
+    # SCOPED: a bookies-filter target miss is MORE meaningful (it could mean we
+    # read a filtered book set), so it must STAY at ERROR — not downgraded.
+    bookies_target = logging.LogRecord(
+        "SelectionManager",
+        logging.ERROR,
+        __file__,
+        0,
+        "bookies-filter target element not found for: All Bookies",
+        None,
+        None,
+    )
+    assert f.filter(bookies_target)
+    assert bookies_target.levelno == logging.ERROR  # NOT downgraded
+
     other = logging.LogRecord(
         "PageScroller", logging.WARNING, __file__, 0, "something else broke", None, None
     )

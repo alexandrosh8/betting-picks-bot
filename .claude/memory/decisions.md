@@ -11,6 +11,13 @@
   close but not a sharp anchor). Built instead: dashboard **CLOSED tab** (4th
   tab, kicked-off picks = proof-of-edge ledger) + **CLV scorecard** (% beat
   close, mean CLV). Do not re-scan these two repos.
+  PROBE RAN (scripts/research/probe_historic_odds.py, EPL 2023-24, 1 page):
+  HISTORIC works — 50 matches, per-book CLOSING 1X2 odds — but **PINNACLE
+  ABSENT** (8 soft books: 1xBet/22Bet/888sport/BetInAsia/Betsson/GGBET/N1Bet/
+  bet365). Data gate NOT cleared: free soft-book closes (better than our
+  re-price proxy for grading) but no free sharp anchor. Historic backfill NOT
+  worth building for edge — DECIDED, do not re-run unless probing a per-match
+  detail page / target_bookmaker=Pinnacle (residual uncertainty only).
 
 - 2026-06-18 (scrape-gap log fix — 'period target element not found' downgraded;
   basketball was a RED HERRING) — live monitoring flagged 8/hr

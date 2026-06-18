@@ -2935,6 +2935,16 @@
       // Segmented status control: LIVE / UNVERIFIED / SETTLED. aria-selected
       // tracks the active tab; switching re-renders with the matching column
       // set. Default tab (LIVE) is set in the markup.
+      // Persist the operator's view (tier / tab / search) across reloads so
+      // triage isn't reset. Wrapped in try/catch — private-mode localStorage
+      // can throw on read/write.
+      function rememberView(key, value) {
+        try {
+          localStorage.setItem(key, value);
+        } catch (e) {
+          /* storage disabled — non-fatal */
+        }
+      }
       function setStatusTab(tab) {
         STATUS_TAB = tab;
         document
@@ -2942,6 +2952,7 @@
           .forEach((b) => {
             b.setAttribute("aria-selected", String(b.dataset.status === tab));
           });
+        rememberView("pt_tab", tab);
         render();
       }
       document
@@ -2949,8 +2960,28 @@
         .forEach((b) => {
           b.addEventListener("click", () => setStatusTab(b.dataset.status));
         });
-      $("f-tier").addEventListener("change", render);
-      $("f-search").addEventListener("input", render);
+      $("f-tier").addEventListener("change", () => {
+        rememberView("pt_tier", $("f-tier").value);
+        render();
+      });
+      $("f-search").addEventListener("input", () => {
+        rememberView("pt_search", $("f-search").value);
+        render();
+      });
+      // Restore the saved view BEFORE the first render (validate against known
+      // values so a stale key can never blank the table).
+      try {
+        const savedTier = localStorage.getItem("pt_tier");
+        if (["premium", "volume", ""].includes(savedTier))
+          $("f-tier").value = savedTier;
+        const savedSearch = localStorage.getItem("pt_search");
+        if (savedSearch) $("f-search").value = savedSearch;
+        const savedTab = localStorage.getItem("pt_tab");
+        if (["live", "unverified", "settled"].includes(savedTab))
+          setStatusTab(savedTab);
+      } catch (e) {
+        /* storage unavailable — defaults stand */
+      }
       $("toggle-games").addEventListener("click", () =>
         setGamesOpen(!GAMES_OPEN),
       );

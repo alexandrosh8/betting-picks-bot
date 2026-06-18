@@ -408,16 +408,21 @@ def test_dashboard_html_is_not_browser_cached() -> None:
     assert "no-store" in res.headers.get("cache-control", "").lower()
 
 
-def test_dashboard_has_onboarding_clv_explainer() -> None:
-    """A dismissible, plain-language explainer frames CLV + confidence stars
-    BEFORE the data (not just the footer): CLV is proof of edge — not a profit
-    guarantee; stars are edge-confidence, not win probability; manual review
-    always. Keeps the picks-only framing prominent."""
+def test_dashboard_legend_frames_clv_and_confidence() -> None:
+    """The static legend under the picks table frames CLV (proof of edge, NOT a
+    profit guarantee) and the ★ confidence stars (edge-confidence, not win
+    probability). This replaces the old dismissible intro banner + the hover "?"
+    explainers (operator removed them); the framing now lives as static legend
+    copy, and the footer still carries the 'does not place bets' line."""
     text = TestClient(make_app()).get("/").text
-    assert 'id="intro"' in text
-    assert 'id="intro-dismiss"' in text
-    assert "proof of edge" in text
-    assert "not" in text and "profit guarantee" in text
+    assert 'id="picks-legend"' in text
+    assert "proof of real edge" in text
+    assert "not a profit guarantee" in text
+    assert "confidence in the EDGE" in text
+    # the dismissible intro banner + its hover "?" explainers were removed
+    assert 'id="intro"' not in text
+    assert 'id="intro-dismiss"' not in text
+    assert "data-tip" not in text
 
 
 def test_dashboard_has_archive_coverage_panel() -> None:
@@ -564,23 +569,19 @@ def test_picks_serializer_attaches_confidence_rating(monkeypatch) -> None:  # ty
 
 
 def test_dashboard_renders_confidence_stars_not_visible_stake() -> None:
-    """USER DECISION 1: the Confidence stars are the headline; the stake %
-    moves to the star cell's hover tooltip and never appears as visible text.
-    The doctrine framing must be present and must not claim a win rate."""
+    """The Confidence stars are the headline (they replaced the stake column).
+    The operator removed the hover tooltip, so the stake % is no longer surfaced
+    in the dashboard at ALL, and the ★ framing (confidence in the EDGE, not a win
+    probability) lives in the static legend — never claiming a win rate."""
     text = TestClient(make_app()).get("/").text
     assert "<th>Confidence</th>" in text
     assert "confidence_rating" in text
-    # framing copy — confidence in the EDGE, not a win probability. The source
-    # string is line-wrapped by the formatter, so assert the surviving
-    # fragments rather than the runtime-joined sentence.
-    assert "Model confidence in the EDGE" in text
-    assert "NOT a " in text
-    assert "probability you will win" in text
-    assert "Evidence currency is held-out CLV" in text
-    # stake stays tooltip-only: the recommended-stake amount is referenced
-    # exactly once now — inside the tooltip string, never as a visible cell.
-    assert text.count("recommended_stake_amount") == 1
-    assert "Recommended fractional-Kelly stake (informational" in text
+    assert 'cell.className = "confcell"' in text  # the stars cell
+    # framing moved to the static legend (no hover): edge-confidence, not P(win)
+    assert "model confidence in the EDGE, not your" in text
+    # the stake % is no longer surfaced anywhere in the dashboard (tooltip gone)
+    assert text.count("recommended_stake_amount") == 0
+    assert "Recommended fractional-Kelly" not in text
     # the star glyphs are present and the rating reads off confidence_rating
     assert "★" in text  # filled star
     assert "☆" in text  # empty star

@@ -1,5 +1,22 @@
 # Decisions Log
 
+- 2026-06-18 (config defaults → VPS/local parity — DONE) — the committed
+  `Settings` defaults now match the reference `.env` so a fresh deploy is wide
+  out of the box (the local-vs-VPS divergence was pure per-`.env` config, not a
+  bug): `oddsportal_football_leagues` + `oddsportal_basketball_leagues` →
+  `"all"` (worldwide daily page; off-season yields nothing) with their market
+  lists trimmed to the 4-key budget (`_enforce_all_leagues_market_budget`, so
+  the worldwide scrape stays sub-hour); `oddsportal_tennis_leagues` → the
+  in-season grass slugs (VISIBILITY-ONLY — still mints NO picks/alerts) with
+  `oddsportal_tennis_markets="match_winner"`; `arcadia_enabled` → `True`
+  (capture is GET-only and mints nothing, so on-by-default is safe — operator
+  confirmed Cloudflare no longer blocks the VPS). `CLV_USE_PINNACLE_ARCHIVE`
+  STAYS `False` (still gated on cross-source match-rate validation). Tennis
+  grass slugs are SEASONAL — rotate in `.env` as the tour moves. Supersedes the
+  "ARCADIA_ENABLED OFF by default" wording in the 2026-06-16 entries below and
+  in ADR-0013. Tests updated (test_config, test_sports_enablement); `.env.example`
+  - free-odds-sources doc updated; safety audit exit 0.
+
 - 2026-06-16 (cross-source CLV matcher — BUILT, ADR-0014) — the deferred
   ADR-0013 step is SHIPPED: a PURE `app/resolution/` strict matcher attaches the
   Pinnacle ARCHIVE close to the matching OddsPortal pick. `match_event` =

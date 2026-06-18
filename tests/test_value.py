@@ -2,7 +2,13 @@
 
 import pytest
 
-from app.edge.value import ceil_odds, effective_odds, find_value_bets, min_acceptable_odds
+from app.edge.value import (
+    ceil_odds,
+    effective_odds,
+    find_value_bets,
+    find_value_bets_with_fair,
+    min_acceptable_odds,
+)
 
 
 def test_flags_value_when_soft_beats_pinnacle_fair() -> None:
@@ -130,6 +136,21 @@ def test_min_odds_gate_blocks_ultra_short_prices() -> None:
         "away": {"Pinnacle": 9.00, "SoftBook": 8.00},
     }
     assert find_value_bets(prices, min_edge=0.0, min_odds=1.30) == []
+
+
+def test_min_odds_floor_gates_on_effective_not_raw_for_exchanges() -> None:
+    # A Betfair-Exchange raw 1.31 nets ~1.2945 at 5% commission — BELOW a 1.30
+    # floor on the price you can actually realize, so it must be rejected even
+    # though raw >= floor. The SAME raw 1.31 at a soft book (no commission)
+    # nets 1.31 and is admitted. Anchor = Pinnacle; fair makes "home" the value.
+    fair = {"home": 0.80, "away": 0.20}
+    exch = {"home": {"Pinnacle": 2.00, "Betfair Exchange": 1.31}, "away": {"Pinnacle": 2.00}}
+    assert (
+        find_value_bets_with_fair(exch, fair, "Pinnacle", min_edge=0.0, min_odds=1.30) == []
+    )  # eff 1.2945 < 1.30
+    soft = {"home": {"Pinnacle": 2.00, "SoftBook": 1.31}, "away": {"Pinnacle": 2.00}}
+    bets = find_value_bets_with_fair(soft, fair, "Pinnacle", min_edge=0.0, min_odds=1.30)
+    assert any(b.best_book == "SoftBook" for b in bets)  # eff 1.31 >= 1.30
 
 
 # --- structural guards --------------------------------------------------------

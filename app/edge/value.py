@@ -244,7 +244,12 @@ def _scan_against_fair(
         if best is None:
             continue
         best_book, raw, eff = best
-        if raw < min_odds:
+        # Floor on the REALIZABLE price: net exchange commission first so a raw
+        # 1.31 that nets 1.295 at a 5% exchange is correctly rejected under a
+        # 1.30 floor (edge/EV/Kelly all run on eff, and min_acceptable_odds
+        # reasons in eff space — keep the floor consistent with them). For soft
+        # books eff == raw, so this is unchanged there.
+        if eff < min_odds:
             continue
         implied = 1.0 / eff
         edge = fair_p - implied

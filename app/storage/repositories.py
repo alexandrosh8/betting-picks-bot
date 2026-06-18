@@ -219,6 +219,9 @@ async def latest_picks_with_events(
             "beat_close": p.beat_close,
             "current_odds": str(p.current_odds) if p.current_odds is not None else None,
             "current_edge": str(p.current_edge) if p.current_edge is not None else None,
+            # the book current_odds came from (= p.bookmaker by default; differs
+            # only when the original book dropped the selection at revalidation)
+            "current_bookmaker": p.current_bookmaker,
             "revalidated_at": p.revalidated_at.isoformat() if p.revalidated_at else None,
             # execution helper: "still +EV down to X.XX" (null = not
             # computable — min_edge unset or fair prob >= floor impossible)
@@ -1092,6 +1095,7 @@ async def persist_pick(
         existing.beat_close = None
         existing.current_odds = None
         existing.current_edge = None
+        existing.current_bookmaker = None
         existing.revalidated_at = None
         await session.flush()
         await _supersede_older_versions(

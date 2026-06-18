@@ -124,6 +124,11 @@ async def revalidate_open_picks(
                 current_book, current = None, None
             if current_book is not None and current is not None and current > 1.0:
                 pick.current_odds = Decimal(f"{current:.4f}")
+                # Record which book this price came from — normally the pick's
+                # own bookmaker, but the fallback branch above can pick the best
+                # remaining book when the original dropped the selection. The
+                # dashboard uses this to label "now at <book>" honestly.
+                pick.current_bookmaker = current_book
                 # Edge on the EFFECTIVE (commission-netted) price — pick-time
                 # edges are netted too, so "still value" verdicts compare
                 # like with like at exchanges.

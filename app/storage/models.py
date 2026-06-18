@@ -253,6 +253,11 @@ class Pick(Base):
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)
+    # The book whose live price current_odds reflects. Normally the pick's own
+    # bookmaker (re-priced in place); differs ONLY in the fallback case where
+    # the original book dropped the selection and the best remaining book is
+    # shown instead — so the dashboard can label "now at <book>" honestly.
+    current_bookmaker: Mapped[str | None] = mapped_column(String(64))
     # revalidated_at is SUCCESS-only (the dashboard "verified" badge: the pick
     # actually re-priced). revalidation_attempted_at advances on EVERY fetch
     # of the event's match page — priced or not — and drives the off-window

@@ -437,21 +437,38 @@ def build_scheduler(
         from app.ingestion.pinnacle_arcadia import (
             PinnacleArcadiaCapture,
             PinnacleArcadiaClient,
+            discover_arcadia_config,
         )
 
+        arcadia_client = PinnacleArcadiaClient(
+            arcadia_http_client or http_client,
+            base_url=settings.arcadia_base_url,
+            guest_key=settings.arcadia_guest_key,
+        )
         arcadia_capture = PinnacleArcadiaCapture(
-            client=PinnacleArcadiaClient(
-                arcadia_http_client or http_client,
-                base_url=settings.arcadia_base_url,
-                guest_key=settings.arcadia_guest_key,
-            ),
+            client=arcadia_client,
             session_factory=session_factory,
             sports=tuple(_csv(settings.arcadia_sports)),
             horizon=timedelta(hours=settings.arcadia_horizon_hours),
         )
+        # Best-effort PUBLIC key/base discovery, opt-in (default OFF -> this
+        # whole block is skipped and the path is byte-identical). Done once,
+        # lazily, on the first job run (build_scheduler is sync; discovery is
+        # async). On ANY failure discover_arcadia_config returns None and we
+        # keep the configured key + base URL — never aborts the capture cycle.
+        discover_done = {"ran": False}
+
+        async def _maybe_discover_arcadia_config() -> None:
+            if not settings.arcadia_discover_config or discover_done["ran"]:
+                return
+            discover_done["ran"] = True
+            config = await discover_arcadia_config(arcadia_http_client or http_client)
+            if config is not None:
+                arcadia_client.apply_config(config)
 
         async def capture_pinnacle_arcadia() -> None:
             try:
+                await _maybe_discover_arcadia_config()
                 await arcadia_capture.capture_once()
             except Exception as exc:
                 logger.error("pinnacle arcadia capture failed: %s", type(exc).__name__)

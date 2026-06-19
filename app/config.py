@@ -463,6 +463,14 @@ class Settings(BaseSettings):
     # set in .env only if Pinnacle ever starts requiring it. Kept out of logs/
     # exceptions like every other key.
     arcadia_guest_key: str = ""
+    # Best-effort PUBLIC key/base discovery (read-only GET of pinnacle.com's
+    # web-client config blob, /config/app.json) — refreshes the guest key + base
+    # URL if Pinnacle ever rotates them, hardening reliability. DEFAULT False so
+    # the current path is byte-identical unless opted in; on ANY failure the
+    # composition root falls back to ARCADIA_GUEST_KEY + ARCADIA_BASE_URL. The
+    # discovered key is a PUBLIC web-client constant (authenticates no user) and
+    # is handled as a SecretStr — never logged, committed, or put in an error.
+    arcadia_discover_config: bool = False
     # csv of sport keys to archive (soccer,tennis,basketball,american_football).
     # american_football (sport-id 15) included so NFL's free Pinnacle ML/totals/
     # spread CLOSE is forward-captured — the prerequisite for ever CLV-grading

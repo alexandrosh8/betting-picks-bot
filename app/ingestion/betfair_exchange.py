@@ -60,22 +60,36 @@ SPORT_SEGMENTS: dict[str, str] = {"soccer": "football"}
 #   section : [data-testid="betting-exchanges-section"]
 #   rows    : [data-testid="betting-exchanges-table-row"]
 #   the Betfair row is the row whose <img alt="Betfair Exchange">.
-#   price cells : [data-testid="odd-container"]   header: [data-testid="back-lay-text"]
 # The row renders, per outcome, a BACK triple then a LAY triple, each cell an
 # odds token (fractional "28/25") immediately followed by a liquidity token
 # "(9052)". For a 3-way (1X2) market the BACK side is the FIRST three
 # odds+liquidity pairs in DOM order (home, draw, away); LAY is the next three.
 #
-# RENDER CAVEAT (2026-06-19): on our HEADLESS+proxy loads the odd-container
-# cells were intermittently empty (the row carried only the logo, the Back/Lay
-# header, and a "CLAIM BONUS" promo overlay — the fractional prices had not
-# hydrated). An empty/odds-less row is an EXPECTED gap (no quotes), never an
-# error. We scope token extraction to the price/header region so the promo
-# overlay's own digits ("Bet £20 …") can never leak in as a false cell.
+# EXTRACTION CORRECTION (2026-06-19, re-probed live via UK proxy): the odds do
+# NOT live inside the testid'd row's [data-testid="odd-container"] cells — those
+# are EMPTY. The testid row carries only the Betfair logo + the "Back"/"Lay"
+# header + the "CLAIM BONUS" promo. The fractional prices + liquidity sit in an
+# ANCESTOR/sibling container ~2 levels ABOVE the testid row. The real ancestor
+# chain from img[alt="Betfair Exchange"] is:
+#   A    logo link
+#   DIV  "...justify-center flex w-full items-center"  -> "...CLAIM BONUS" (no odds)
+#   DIV  the betting-exchanges-table-row               -> "...Back Lay"    (no odds)
+#   DIV  "w-full"                                      -> "...Back Lay"    (no odds)
+#   DIV  "flex"  -> "...Back Lay 28/25 (9052) 5/2 (3307) 3/1 (1307) 99.3%
+#                       57/50 (11317) 51/20 (41) 31/10 (2683) 100"        (THE ODDS)
+# So extraction WALKS UP from the row (and the img) and returns the leaf
+# odds/liquidity tokens of the NEAREST ancestor that yields >= 2 odds tokens —
+# stopping at the Betfair odds container so it never climbs into a container
+# holding OTHER bookmakers' rows. The promo "CLAIM BONUS" has no fraction and no
+# parenthesised number, so it can never become a cell. A row that yields no odds
+# at any level is an EXPECTED gap (market closed / no liquidity), never an error.
 _SECTION_TESTID = "betting-exchanges-section"
 _ROW_TESTID = "betting-exchanges-table-row"
-_ODD_CONTAINER_TESTID = "odd-container"
 _EXCHANGE_ALT = "Betfair Exchange"
+# How many ancestor levels above the row/img we climb looking for the odds
+# container (the live odds sit ~2 levels up; 5 gives margin without reaching the
+# section root that holds OTHER bookmakers' rows).
+_ANCESTOR_WALK_UP = 5
 
 _FRACTION_RE = re.compile(r"^(\d+)\s*/\s*(\d+)$")
 _LIQUIDITY_RE = re.compile(r"^\((\d[\d,]*)\)$")
@@ -203,38 +217,58 @@ def back_quotes_to_snapshots(
 # --------------------------------------------------------------------------- #
 
 # In-page JS: read the betting-exchanges section, find the Betfair Exchange row,
-# return its odds+liquidity cells in DOM order (BACK triple, then LAY triple).
-# Token scope is the row's odd-container cells when present (the price region);
-# only if NONE exist do we fall back to scanning the row's leaf text — and even
-# then a fraction/liquidity shape is required, so the "CLAIM BONUS" promo text
-# (which has no fraction and no parenthesised number) cannot become a cell.
+# then WALK UP the ancestor chain to find the odds. The odds do NOT live in the
+# testid row itself (it holds only the logo + "Back"/"Lay" header + promo) — they
+# sit in an ancestor ~2 levels above. We start from the row (and, as a fallback
+# anchor, the img itself in case the testid row is absent on a layout variant)
+# and climb up to `maxUp` ancestors. At each level we collect that element's leaf
+# odds/liquidity tokens (a `d/d` fraction OR a `(d...)` parenthesised number) in
+# DOM order, and return the tokens from the NEAREST (lowest) ancestor that yields
+# >= 2 odds tokens. Returning the nearest qualifying ancestor stops the climb at
+# the Betfair odds container so we never reach a container holding OTHER
+# bookmakers' rows. The "CLAIM BONUS" promo has no fraction/paren, so it can
+# never leak in. No qualifying ancestor -> null (the expected closed-market gap).
 _ROW_EXTRACT_JS = r"""
 (args) => {
   const sectionId = args[0];
   const rowId = args[1];
-  const oddId = args[2];
-  const alt = args[3];
+  const alt = args[2];
+  const maxUp = args[3];
   const section = document.querySelector('[data-testid="' + sectionId + '"]');
   const scope = section || document;
-  const rows = scope.querySelectorAll('[data-testid="' + rowId + '"]');
-  let bf = null;
-  rows.forEach(r => {
-    const img = r.querySelector('img[alt]');
-    if (img && (img.getAttribute('alt') || '').toLowerCase() === alt.toLowerCase()) bf = r;
+  const altLower = alt.toLowerCase();
+  // Find the Betfair logo img (anchor) and, when present, its testid row.
+  let img = null;
+  scope.querySelectorAll('img[alt]').forEach(i => {
+    if (!img && (i.getAttribute('alt') || '').toLowerCase() === altLower) img = i;
   });
-  if (!bf) return null;
+  let row = null;
+  scope.querySelectorAll('[data-testid="' + rowId + '"]').forEach(r => {
+    const ri = r.querySelector('img[alt]');
+    if (!row && ri && (ri.getAttribute('alt') || '').toLowerCase() === altLower) row = r;
+  });
+  // Nothing identifies a Betfair Exchange row on this page -> expected absence.
+  if (!row && !img) return null;
   const isOdds = (t) => /^\d+\s*\/\s*\d+$/.test(t) || /^\(\d[\d,]*\)$/.test(t);
-  const tokens = [];
-  const cells = bf.querySelectorAll('[data-testid="' + oddId + '"]');
-  const roots = cells.length ? cells : [bf];
-  roots.forEach(root => {
-    root.querySelectorAll('*').forEach(e => {
-      if (e.children.length > 0) return;
+  const leafOdds = (el) => {
+    const out = [];
+    el.querySelectorAll('*').forEach(e => {
+      if (e.children.length > 0) return;  // leaf elements only
       const t = (e.textContent || '').trim();
-      if (isOdds(t)) tokens.push(t);
+      if (isOdds(t)) out.push(t);
     });
-  });
-  return tokens;
+    return out;
+  };
+  // Climb from the lowest available anchor (prefer the testid row so the start
+  // level matches the documented chain; fall back to the img) up to maxUp
+  // ancestors. Stop at the NEAREST ancestor yielding >= 2 odds tokens.
+  let node = row || img;
+  for (let up = 0; node && up <= maxUp; up++) {
+    const tokens = leafOdds(node);
+    if (tokens.length >= 2) return tokens;
+    node = node.parentElement;
+  }
+  return null;  // climbed maxUp levels without finding odds (closed market)
 }
 """
 
@@ -279,6 +313,8 @@ class BetfairExchangeReader:
         locale: str = "en-GB",
         nav_timeout_ms: int = 60000,
         settle_ms: int = 6000,
+        hydrate_timeout_ms: int = 12000,
+        hydrate_step_ms: int = 500,
     ) -> None:
         self._min_liquidity = min_liquidity
         self._proxy_pool = tuple(proxy_pool)
@@ -288,6 +324,11 @@ class BetfairExchangeReader:
         self._locale = locale
         self._nav_timeout_ms = nav_timeout_ms
         self._settle_ms = settle_ms
+        # Bounded re-poll for slowly-hydrating fractional prices (read-only):
+        # keep re-running the in-page extraction up to `hydrate_timeout_ms`,
+        # `hydrate_step_ms` per step, until odds appear or the budget is spent.
+        self._hydrate_timeout_ms = hydrate_timeout_ms
+        self._hydrate_step_ms = hydrate_step_ms
 
     async def _load_tokens(self, url: str, proxy: ScraperProxy | None) -> list[str] | None:
         """Return the Betfair row's ordered DOM tokens, or None if the page has
@@ -323,11 +364,25 @@ class BetfairExchangeReader:
                 for _ in range(8):
                     await page.mouse.wheel(0, 1400)
                     await page.wait_for_timeout(400)
-                tokens = await page.evaluate(
-                    _ROW_EXTRACT_JS,
-                    [_SECTION_TESTID, _ROW_TESTID, _ODD_CONTAINER_TESTID, _EXCHANGE_ALT],
-                )
-                return list(tokens) if tokens else None
+                args = [_SECTION_TESTID, _ROW_TESTID, _EXCHANGE_ALT, _ANCESTOR_WALK_UP]
+                # Bounded hydration wait: the fractional prices hydrate slowly on
+                # some loads (the row appears first with only the logo/header).
+                # Re-run the extraction every `hydrate_step_ms` until it yields
+                # >= 2 tokens or `hydrate_timeout_ms` elapses, then accept the
+                # last result (None/[] stays clean when odds are truly absent —
+                # a closed/illiquid market is an EXPECTED gap, never an error).
+                tokens: list[str] | None = None
+                waited = 0
+                while True:
+                    raw = await page.evaluate(_ROW_EXTRACT_JS, args)
+                    tokens = list(raw) if raw else None
+                    if tokens is not None and len(tokens) >= 2:
+                        break
+                    if waited >= self._hydrate_timeout_ms:
+                        break
+                    await page.wait_for_timeout(self._hydrate_step_ms)
+                    waited += self._hydrate_step_ms
+                return tokens if tokens else None
             finally:
                 await browser.close()
 

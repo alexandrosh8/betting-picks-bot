@@ -18,6 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 from app.ingestion.base import EventTeams, ScraperProxy
 from app.ingestion.betfair_exchange import (
+    _ANCESTOR_WALK_UP,
+    _EXCHANGE_ALT,
+    _ROW_EXTRACT_JS,
+    _ROW_TESTID,
+    _SECTION_TESTID,
     BOOKMAKER,
     SPORT_SEGMENTS,
     BackQuote,
@@ -257,6 +262,136 @@ async def test_reader_proxy_failover_then_raises() -> None:
     assert "TimeoutError" in str(exc.value)
     for secret in ("h1", "h2", "pass", "://u"):
         assert secret not in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# DOM extraction against the REAL structure (static HTML, no network).
+#
+# Live matches were 0/10 today (our slate is mostly obscure leagues with no
+# Betfair liquidity / closed markets), so a live read cannot verify the fix.
+# Instead we run the ACTUAL `_ROW_EXTRACT_JS` against a hand-built HTML fixture
+# that mirrors the real ancestor chain the user probed via Playwright:
+#   img[alt="Betfair Exchange"]
+#     -> logo link (A)
+#     -> DIV "...justify-center..."  "Betfair Exchange CLAIM BONUS"  (NO odds)
+#     -> DIV  the betting-exchanges-table-row  logo+"Back"/"Lay"     (NO odds)
+#     -> DIV "w-full"                          "...Back Lay"         (NO odds)
+#     -> DIV "flex"  BACK triple then LAY triple                     (THE ODDS)
+# The odds are leaves ~2 levels ABOVE the testid'd row, so the extractor must
+# walk up and stop at the nearest ancestor holding >= 2 odds tokens.
+#
+# This test touches a real headless browser, so it skips cleanly when Playwright
+# or its Chromium build is unavailable (same pattern as the DB tests skipping
+# without compose Postgres) — it is NOT part of the network-free core path.
+# --------------------------------------------------------------------------- #
+
+# Odds container holds the BACK triple (home/draw/away) then the LAY triple, each
+# a fraction immediately followed by its parenthesised £ liquidity, with overround
+# %s interleaved (must be dropped). Mirrors the live row text the user captured.
+_BACK_LAY_ODDS_HTML = (
+    '<div class="flex">'
+    "<span>Back</span><span>Lay</span>"
+    "<span>28/25</span><span>(9052)</span>"  # BACK home -> 2.12
+    "<span>5/2</span><span>(3307)</span>"  # BACK draw -> 3.5
+    "<span>3/1</span><span>(1307)</span>"  # BACK away -> 4.0
+    "<span>99.3%</span>"  # back overround (dropped)
+    "<span>57/50</span><span>(11317)</span>"  # LAY home (discarded)
+    "<span>51/20</span><span>(41)</span>"  # LAY draw (discarded)
+    "<span>31/10</span><span>(2683)</span>"  # LAY away (discarded)
+    "<span>100</span>"  # lay overround (dropped)
+    "</div>"
+)
+
+
+def _exchange_section_html(*, with_odds: bool) -> str:
+    """A betting-exchanges section whose testid row carries ONLY the Betfair
+    logo + Back/Lay header + "CLAIM BONUS" promo (no odds). When ``with_odds``
+    the BACK/LAY odds container sits as a SIBLING ~2 levels ABOVE that row,
+    exactly as the live DOM renders. When not, no odds appear anywhere (a closed
+    / illiquid market). The logo img[alt] identifies the Betfair row in both."""
+    odds_block = _BACK_LAY_ODDS_HTML if with_odds else ""
+    return f"""
+    <div data-testid="{_SECTION_TESTID}">
+      <div class="w-full">
+        <div class="max-ms:justify-center flex w-full items-center">
+          <a class="logo-link">
+            <img alt="{_EXCHANGE_ALT}" src="bf.png">
+          </a>
+          <span>CLAIM BONUS</span>
+          <div data-testid="{_ROW_TESTID}"
+               class="flex-center min-h-[101px] w-full border-b border-l">
+            <a class="logo-link"><img alt="{_EXCHANGE_ALT}" src="bf.png"></a>
+            <span>Back</span><span>Lay</span>
+          </div>
+          {odds_block}
+        </div>
+      </div>
+    </div>
+    """
+
+
+async def _evaluate_row_extract(html: str) -> list[str] | None:
+    """Run the REAL in-page _ROW_EXTRACT_JS against static HTML via a headless
+    Chromium page.set_content — no network. Skips when Playwright/Chromium is
+    unavailable, mirroring the other browser-touching skips."""
+    async_api = pytest.importorskip("playwright.async_api")
+    try:
+        pw_cm = async_api.async_playwright()
+        pw = await pw_cm.__aenter__()
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"playwright unavailable: {type(exc).__name__}")
+    try:
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception as exc:  # Chromium not installed
+            pytest.skip(f"chromium not installed: {type(exc).__name__}")
+        try:
+            page = await browser.new_page()
+            await page.set_content(html)
+            raw = await page.evaluate(
+                _ROW_EXTRACT_JS,
+                [_SECTION_TESTID, _ROW_TESTID, _EXCHANGE_ALT, _ANCESTOR_WALK_UP],
+            )
+            return list(raw) if raw else None
+        finally:
+            await browser.close()
+    finally:
+        await pw_cm.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_row_extract_js_walks_up_to_ancestor_odds() -> None:
+    # The odds live ~2 levels ABOVE the testid row; the extractor must climb to
+    # them and return the BACK triple then LAY triple (overround %s dropped).
+    tokens = await _evaluate_row_extract(_exchange_section_html(with_odds=True))
+    assert tokens == list(_LIVE_ROW_TOKENS)
+
+    # tokens -> cells -> gated BACK quotes -> snapshots: BACK 2.12/3.5/4.0 with
+    # liquidity 9052/3307/1307; the LAY triple is discarded.
+    cells = _pair_tokens(tokens)
+    quotes = extract_back_quotes(cells, min_liquidity=0.0)
+    assert [q.designation for q in quotes] == ["home", "draw", "away"]
+    assert [round(q.decimal_odds, 2) for q in quotes] == [2.12, 3.5, 4.0]
+    assert [q.liquidity for q in quotes] == [9052.0, 3307.0, 1307.0]
+
+    snaps = back_quotes_to_snapshots("https://op/match", quotes, _teams(), now=NOW)
+    assert [round(s.decimal_odds, 2) for s in snaps] == [2.12, 3.5, 4.0]
+    assert [s.liquidity for s in snaps] == [9052.0, 3307.0, 1307.0]
+    # The LAY prices (57/50 -> 2.14, 51/20 -> 3.55, 31/10 -> 4.1) never appear.
+    for lay_dec in (2.14, 3.55, 4.1):
+        assert all(round(s.decimal_odds, 2) != lay_dec for s in snaps)
+
+
+@pytest.mark.asyncio
+async def test_row_extract_js_closed_market_returns_none() -> None:
+    # The Betfair row renders (logo + Back/Lay header) but NO odds hydrate
+    # anywhere — a closed / illiquid market. The walk-up finds nothing and the
+    # extractor returns None; the reader maps that to [] (an expected gap).
+    tokens = await _evaluate_row_extract(_exchange_section_html(with_odds=False))
+    assert tokens is None
+
+    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(tokens))
+    assert await reader.read_back_quotes("https://op/closed") == []
 
 
 # --------------------------------------------------------------------------- #

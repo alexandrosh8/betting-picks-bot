@@ -98,6 +98,32 @@ off-by-default until live cycles show the hit-rate is worth the page-load cost.
 The selectors above are the durable contract; the price hydration is the
 fragile part, and gaps are expected (never bypass anti-bot to force them).
 
+### Update 2026-06-19 — decimal-OR-fractional values, odd-container-scoped extraction
+
+The first reader build assumed FRACTIONAL BACK values and a walk-up that
+collected every odds-like leaf under the ancestor. Two corrections (verified
+against the user's captured live row + a real-browser test):
+
+- **The odds VALUE is decimal OR fractional.** OddsPortal's odds format is a
+  per-visitor COOKIE — a fresh scraper context gets `6.51` (decimal) or `28/25`
+  (fractional) unpredictably. `parse_odds_value` now reads both (decimal used
+  directly; fractional via num/den + 1). The fractional-only reader captured
+  NOTHING on a decimal-format page — the real cause of the injectable-close 0.
+- **Extraction is scoped to `[data-testid="odd-container"]` cells.** Each cell
+  holds the value TWICE (a hidden `<a>` + a `<p>`, responsive show/hide) plus
+  the `(liquidity)`; the walk-up-all-leaves approach captured duplicates AND
+  mixed the BACK and LAY rows, scrambling the pairing. `_ROW_EXTRACT_JS` now
+  climbs to the nearest ancestor holding the odd-container cells, takes ONE
+  value + ONE liquidity per cell in DOM order (BACK triple first, LAY tail
+  discarded by `extract_back_quotes`), and excludes `payout-container` (the
+  overround %). Live-verified: the reader now returns the full, correctly-mapped
+  3-way BACK (home/draw/away) on real matches.
+
+The liquidity floor (`BETFAIR_EXCHANGE_MIN_LIQUIDITY`, default £500) is the
+SEPARATE reason a thin minor-league slate still yields 0 — those exchange
+markets are £10–£30 backable and below the reliability floor; liquidity-rich
+(major) matches pass it and now capture.
+
 ## Safety
 
 GET-only PUBLIC market data — **no account, no login, no stored credentials, no

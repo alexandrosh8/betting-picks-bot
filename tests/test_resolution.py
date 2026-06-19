@@ -227,6 +227,12 @@ def test_seed_aliases_resolve_cross_source_name_variants() -> None:
         ("Bulleen", "Bulleen Lions"),  # nickname suffix
         ("Macae", "Macae Esporte RJ"),  # short vs full name
         ("San German", "Atleticos de San German"),  # club prefix (BSN basketball)
+        # 2026-06-19 CLV-readiness audit: high-confidence soccer same-fixture gaps.
+        ("Turkey", "Turkiye"),  # exonym vs endonym (country)
+        ("Czech Republic", "Czechia"),  # long-form vs short-form (country)
+        ("San Martin T.", "San Martin de San Juan"),  # surname-abbrev vs full club name
+        ("San Martin S.J.", "San Martin de San Juan"),  # S.J. abbrev for the same club
+        ("Colon Santa Fe", "Colon de Santa Fe"),  # missing "de" connector
     ]
     for oddsportal_name, pinnacle_name in pairs:
         assert table.canonical(oddsportal_name) == table.canonical(pinnacle_name), (

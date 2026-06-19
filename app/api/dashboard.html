@@ -1416,7 +1416,7 @@
             <select id="f-game-sport" aria-label="Filter games by sport">
               <option value="">ALL SPORTS</option>
               <option value="soccer">FOOTBALL</option>
-              <option value="basketball">NBA</option>
+              <option value="basketball">BASKETBALL</option>
               <option value="tennis">TENNIS</option>
             </select>
             <input
@@ -1518,7 +1518,7 @@
         team_totals: "TT",
         correct_score: "CS",
       };
-      const SPORT_LABELS = { soccer: "Football", basketball: "NBA" };
+      const SPORT_LABELS = { soccer: "Football", basketball: "Basketball" };
 
       // All times shown in Cyprus time (IANA zone — DST handled correctly).
       // The API stays UTC; conversion is display-only.
@@ -1905,7 +1905,7 @@
               "Tennis is off (visibility-only) — set ODDSPORTAL_TENNIS_LEAGUES in .env to enable.";
           } else if (GAMES.length && sportSel === "basketball") {
             msg =
-              "No NBA games right now — the NBA is off-season (Jun–Oct); only club competitions appear when listed.";
+              "No basketball games listed right now — leagues are seasonal (NBA Oct–Jun, EuroLeague, etc.); fixtures appear when listed.";
           } else if (GAMES.length && sportSel) {
             msg = "No games for this sport in the current slate.";
           }

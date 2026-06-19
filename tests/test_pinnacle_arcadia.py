@@ -8,6 +8,7 @@ ever.
 """
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
@@ -19,13 +20,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ingestion.pinnacle_arcadia import (
     BOOKMAKER,
+    CONFIG_APP_JSON_URL,
     SPORT_IDS,
+    ArcadiaConfig,
     MarketQuote,
     PinnacleArcadiaCapture,
     PinnacleArcadiaClient,
     PinnacleArcadiaError,
     _RoundRobinTransport,
     american_to_decimal,
+    discover_arcadia_config,
     extract_market_quotes,
     extract_moneyline_quotes,
     extract_spread_quotes,
@@ -109,6 +113,28 @@ def test_parse_matchups_filters_specials_children_and_window() -> None:
     ]
     parsed = parse_matchups(rows, now=NOW, horizon_end=HORIZON_END)
     assert set(parsed) == {"1"}
+
+
+def test_parse_matchups_prefers_cutoff_at_over_start_time() -> None:
+    # The period-0 cutoffAt is the TRUE betting cutoff; prefer it over startTime
+    # when present so the latest pre-kickoff row IS the close.
+    row = {
+        **_tennis_matchup(mid=11, start="2026-06-17T07:00:00Z"),
+        "cutoffAt": "2026-06-17T06:55:00Z",
+    }
+    parsed = parse_matchups([row], now=NOW, horizon_end=HORIZON_END)
+    assert parsed["11"].starts_at == datetime(2026, 6, 17, 6, 55, tzinfo=UTC)
+
+
+def test_parse_matchups_falls_back_to_start_time_when_cutoff_absent() -> None:
+    # No cutoffAt (or unparseable) -> startTime is used unchanged.
+    no_cutoff = _tennis_matchup(mid=12, start="2026-06-17T07:00:00Z")
+    null_cutoff = {**_tennis_matchup(mid=13, start="2026-06-17T08:00:00Z"), "cutoffAt": None}
+    junk_cutoff = {**_tennis_matchup(mid=14, start="2026-06-17T09:00:00Z"), "cutoffAt": "not-a-ts"}
+    parsed = parse_matchups([no_cutoff, null_cutoff, junk_cutoff], now=NOW, horizon_end=HORIZON_END)
+    assert parsed["12"].starts_at == datetime(2026, 6, 17, 7, 0, tzinfo=UTC)
+    assert parsed["13"].starts_at == datetime(2026, 6, 17, 8, 0, tzinfo=UTC)
+    assert parsed["14"].starts_at == datetime(2026, 6, 17, 9, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------- #
@@ -474,6 +500,120 @@ async def test_client_non_json_200_raises_arcadia_error() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Dynamic sport discovery (GET /sports — live sports only)
+# --------------------------------------------------------------------------- #
+def test_sport_ids_carry_the_verified_public_ids() -> None:
+    # The widened coverage set: the original 4 + the verified public ids.
+    for key, sport_id in (
+        ("soccer", 29),
+        ("tennis", 33),
+        ("basketball", 4),
+        ("american_football", 15),
+        ("baseball", 3),
+        ("hockey", 19),
+        ("rugby", 27),
+        ("handball", 18),
+    ):
+        assert SPORT_IDS[key] == sport_id
+
+
+async def test_fetch_sports_keeps_only_live_unhidden() -> None:
+    # /sports payload: keep isHidden==false AND matchupCount>0 only.
+    payload = [
+        {"id": 29, "name": "Soccer", "isHidden": False, "matchupCount": 412},
+        {"id": 3, "name": "Baseball", "isHidden": False, "matchupCount": 31},
+        {"id": 19, "name": "Hockey", "isHidden": True, "matchupCount": 50},  # hidden -> drop
+        {"id": 27, "name": "Rugby Union", "isHidden": False, "matchupCount": 0},  # empty -> drop
+        {"id": 99, "name": "Esports", "matchupCount": 5},  # isHidden absent -> treat as live
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/sports")
+        return httpx.Response(200, content=json.dumps(payload))
+
+    live = await _make_client(handler).fetch_sports()
+    assert live == {"soccer": 29, "baseball": 3, "esports": 99}
+
+
+# --------------------------------------------------------------------------- #
+# Public config discovery (GET /config/app.json — best-effort, fallback-safe)
+# --------------------------------------------------------------------------- #
+_APP_JSON = {
+    "api": {"haywire": {"apiKey": "PUBLIC-WEBCLIENT-CONST"}},
+    "routes": {"curacao": {"guestRoot": "https://guest.api.arcadia.pinnacle.com/0.1"}},
+    "apiVersion": "0.1",
+}
+
+
+def _config_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_discover_arcadia_config_success_populates_key_and_base() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == CONFIG_APP_JSON_URL
+        return httpx.Response(200, content=json.dumps(_APP_JSON))
+
+    cfg = await discover_arcadia_config(_config_client(handler))
+    assert isinstance(cfg, ArcadiaConfig)
+    assert cfg.base_url == "https://guest.api.arcadia.pinnacle.com/0.1"
+    # The guest key is a SecretStr-style value: only revealed via the explicit
+    # accessor, never in repr.
+    assert cfg.guest_key.get_secret_value() == "PUBLIC-WEBCLIENT-CONST"
+    assert "PUBLIC-WEBCLIENT-CONST" not in repr(cfg)
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pytest.param(lambda r: httpx.Response(503), id="non-200"),
+        pytest.param(lambda r: httpx.Response(200, content="<html>nope</html>"), id="non-json"),
+        pytest.param(lambda r: httpx.Response(200, content=json.dumps({})), id="missing-keys"),
+        pytest.param(
+            lambda r: (_ for _ in ()).throw(httpx.ConnectError("boom")), id="transport-error"
+        ),
+    ],
+)
+async def test_discover_arcadia_config_any_failure_falls_back_to_none(
+    handler: Callable[[httpx.Request], httpx.Response],
+) -> None:
+    cfg = await discover_arcadia_config(_config_client(handler))
+    assert cfg is None
+
+
+async def test_discover_arcadia_config_never_logs_the_key(caplog) -> None:  # type: ignore[no-untyped-def]
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(_APP_JSON))
+
+    with caplog.at_level(logging.DEBUG):
+        cfg = await discover_arcadia_config(_config_client(handler))
+    assert cfg is not None
+    # CRITICAL secret hygiene: the public guest key must never appear in ANY
+    # log record (message or args), even on the success path.
+    for record in caplog.records:
+        assert "PUBLIC-WEBCLIENT-CONST" not in record.getMessage()
+        assert "PUBLIC-WEBCLIENT-CONST" not in str(record.args)
+
+
+async def test_discover_arcadia_config_failure_never_logs_url_or_raises(caplog) -> None:  # type: ignore[no-untyped-def]
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    with caplog.at_level(logging.DEBUG):
+        cfg = await discover_arcadia_config(_config_client(handler))
+    assert cfg is None
+    # OUR module's records must never carry the source URL (it identifies the
+    # source / would carry the key on key-bearing endpoints). httpx's own
+    # request logger is framework behaviour and out of scope here; the key
+    # value (asserted across ALL records elsewhere) is what must never leak.
+    ours = [r for r in caplog.records if r.name == "app.ingestion.pinnacle_arcadia"]
+    assert ours, "expected at least one log record from our module"
+    for record in ours:
+        assert "pinnacle.com" not in record.getMessage()
+        assert "arcadia.pinnacle" not in record.getMessage()
+
+
+# --------------------------------------------------------------------------- #
 # Version change-gate (pure, no DB)
 # --------------------------------------------------------------------------- #
 def _capture(sports: tuple[str, ...] = ("tennis",)) -> PinnacleArcadiaCapture:
@@ -535,6 +675,107 @@ def test_quote_is_frozen_dataclass() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# capture_once dynamic-discovery driving + isolation + fallback (no DB)
+# --------------------------------------------------------------------------- #
+class _RecordingSource:
+    """Records the sport_ids matchups were fetched for; lets a chosen sport
+    raise (per-sport isolation) and lets /sports raise (fallback). No network,
+    no DB (session_factory stays None so persistence is skipped)."""
+
+    def __init__(
+        self,
+        *,
+        live_sports: dict[str, int] | None,
+        raise_for_sport_id: int | None = None,
+        sports_error: Exception | None = None,
+    ) -> None:
+        self._live = live_sports
+        self._raise_for = raise_for_sport_id
+        self._sports_error = sports_error
+        self.fetched_sport_ids: list[int] = []
+        self.sports_calls = 0
+
+    async def fetch_sports(self) -> dict[str, int]:
+        self.sports_calls += 1
+        if self._sports_error is not None:
+            raise self._sports_error
+        assert self._live is not None
+        return dict(self._live)
+
+    async def fetch_matchups(self, sport_id: int) -> list[dict]:
+        self.fetched_sport_ids.append(sport_id)
+        if self._raise_for is not None and sport_id == self._raise_for:
+            raise PinnacleArcadiaError(f"boom for sport={sport_id}")
+        return []
+
+    async def fetch_straight_markets(self, sport_id: int) -> list[dict]:
+        return []
+
+
+def _no_db_capture(source: _RecordingSource, sports: tuple[str, ...]) -> PinnacleArcadiaCapture:
+    return PinnacleArcadiaCapture(
+        client=source,
+        session_factory=None,  # no persistence; we only assert iteration/isolation
+        sports=sports,
+        horizon=timedelta(hours=72),
+        now_fn=lambda: NOW,
+    )
+
+
+async def test_capture_once_intersects_configured_with_live_sports() -> None:
+    # Configured 3 sports; /sports reports only soccer+baseball live -> hockey
+    # (matchupCount==0/hidden upstream) is SKIPPED, never fetched.
+    source = _RecordingSource(live_sports={"soccer": 29, "baseball": 3})
+    cap = _no_db_capture(source, ("soccer", "baseball", "hockey"))
+    written = await cap.capture_once()
+    assert source.sports_calls == 1
+    # hockey id (19) must never be fetched; soccer (29) + baseball (3) are.
+    assert set(source.fetched_sport_ids) == {29, 3}
+    assert 19 not in source.fetched_sport_ids
+    # Skipped sport still appears in the result with 0 rows (honest, not silent).
+    assert written == {"soccer": 0, "baseball": 0, "hockey": 0}
+
+
+async def test_capture_once_per_sport_isolation_one_raise_does_not_abort_rest() -> None:
+    # soccer raises mid-cycle; baseball + hockey still run.
+    source = _RecordingSource(
+        live_sports={"soccer": 29, "baseball": 3, "hockey": 19},
+        raise_for_sport_id=29,
+    )
+    cap = _no_db_capture(source, ("soccer", "baseball", "hockey"))
+    written = await cap.capture_once()
+    # All three live sports were attempted (isolation = the raise is contained).
+    assert set(source.fetched_sport_ids) == {29, 3, 19}
+    # soccer raised -> omitted from the written map; the others recorded 0.
+    assert "soccer" not in written
+    assert written == {"baseball": 0, "hockey": 0}
+
+
+async def test_capture_once_falls_back_to_configured_when_fetch_sports_fails() -> None:
+    # /sports raises -> fall back to capturing ALL configured sports as today;
+    # the cycle is never aborted.
+    source = _RecordingSource(
+        live_sports=None,
+        sports_error=httpx.ConnectError("sports endpoint down"),
+    )
+    cap = _no_db_capture(source, ("soccer", "baseball", "hockey"))
+    written = await cap.capture_once()
+    assert source.sports_calls == 1
+    # Fallback = every configured sport's id is fetched regardless of /sports.
+    assert set(source.fetched_sport_ids) == {29, 3, 19}
+    assert written == {"soccer": 0, "baseball": 0, "hockey": 0}
+
+
+async def test_capture_once_unknown_configured_sport_is_skipped() -> None:
+    # A configured sport with no SPORT_IDS entry is skipped before any fetch.
+    source = _RecordingSource(live_sports={"soccer": 29})
+    cap = _no_db_capture(source, ("soccer", "quidditch"))
+    written = await cap.capture_once()
+    assert source.fetched_sport_ids == [29]
+    assert written == {"soccer": 0}
+
+
+# --------------------------------------------------------------------------- #
 # capture_once integration (compose Postgres; skip when absent)
 # --------------------------------------------------------------------------- #
 @pytest.fixture
@@ -559,12 +800,27 @@ async def factory():  # type: ignore[no-untyped-def]
 
 
 class _StubClient:
-    """Returns canned matchups/markets; records call counts. No network."""
+    """Returns canned matchups/markets; records call counts. No network.
 
-    def __init__(self, matchups: list[dict], markets: list[dict]) -> None:
+    fetch_sports defaults to "every configured sport is live" so the existing
+    integration tests are unaffected by the dynamic-discovery intersection.
+    """
+
+    def __init__(
+        self,
+        matchups: list[dict],
+        markets: list[dict],
+        *,
+        live_sports: dict[str, int] | None = None,
+    ) -> None:
         self._matchups = matchups
         self._markets = markets
+        # None = return ALL known sport ids as live (intersection is a no-op).
+        self._live = live_sports if live_sports is not None else dict(SPORT_IDS)
         self.calls = 0
+
+    async def fetch_sports(self) -> dict[str, int]:
+        return dict(self._live)
 
     async def fetch_matchups(self, sport_id: int) -> list[dict]:
         self.calls += 1

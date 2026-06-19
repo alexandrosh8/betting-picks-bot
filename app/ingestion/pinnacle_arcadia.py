@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard
 
 import httpx
+from pydantic import SecretStr
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -48,15 +49,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://guest.api.arcadia.pinnacle.com/0.1"
+# Public web-client config blob (no auth, no login) — used only when
+# arcadia_discover_config is opted in. Carries the guest x-api-key + guest
+# base URL + apiVersion. A plain public GET; never a credential/login path.
+CONFIG_APP_JSON_URL = "https://www.pinnacle.com/config/app.json"
 BOOKMAKER = "Pinnacle"  # contains "pinnacle" -> top-priority sharp anchor (value.py)
 
 # arcadia numeric sport ids (verified live against /0.1/sports). "american_
 # football" is id 15 ("Football" upstream); soccer is the distinct id 29.
+# The latter four widen coverage to the sports picks actually span (the 34-
+# fixture gap is mostly sport-enumeration on our side, not a missing endpoint —
+# docs/research/pinnacle-odds-sources-2026-06-19.md). capture_once still
+# INTERSECTS this set with the live /sports feed, so off-season ids cost nothing.
 SPORT_IDS: dict[str, int] = {
     "soccer": 29,
     "tennis": 33,
     "basketball": 4,
     "american_football": 15,
+    "baseball": 3,
+    "hockey": 19,
+    "rugby": 27,
+    "handball": 18,
 }
 
 # Straight (s), period 0 (full event) market keys. period>=1 is
@@ -101,6 +114,61 @@ def _parse_ts(raw: str) -> datetime | None:
 
 
 @dataclass(frozen=True)
+class ArcadiaConfig:
+    """Public guest credentials discovered from ``/config/app.json``.
+
+    ``guest_key`` is a SecretStr-style value: it is Pinnacle's PUBLIC web-client
+    constant (authenticates no user), but it must NEVER be logged, committed, or
+    appear in any exception/URL — so it is wrapped so ``repr`` redacts it and the
+    raw value is reachable only via the explicit ``.get_secret_value()`` accessor.
+    """
+
+    guest_key: SecretStr
+    base_url: str
+
+
+async def discover_arcadia_config(
+    client: httpx.AsyncClient,
+    *,
+    url: str = CONFIG_APP_JSON_URL,
+    timeout: float = 10.0,
+) -> ArcadiaConfig | None:
+    """Best-effort public GET of the Pinnacle web-client config blob.
+
+    Reads ``api.haywire.apiKey`` (guest x-api-key), ``routes.curacao.guestRoot``
+    (base URL) and ``apiVersion``. Returns an ``ArcadiaConfig`` on success, or
+    ``None`` on ANY failure (transport error, non-200, non-JSON, missing keys) so
+    the caller falls back to the current empty key + DEFAULT_BASE_URL. A plain
+    read-only GET to a PUBLIC file — no login, no session, no anti-bot bypass.
+
+    Secret hygiene: the guest key is never logged or placed in an exception; only
+    a success/failure line is emitted, and it carries the failure TYPE only,
+    never the URL (which identifies the source) or the key.
+    """
+    try:
+        response = await client.get(url, headers={"accept": "application/json"}, timeout=timeout)
+        if response.status_code != 200:
+            logger.info(
+                "arcadia config discovery: non-200 (%d); using fallback key/base",
+                response.status_code,
+            )
+            return None
+        data = response.json()
+        api_key = (((data.get("api") or {}).get("haywire") or {}).get("apiKey")) or ""
+        guest_root = (((data.get("routes") or {}).get("curacao") or {}).get("guestRoot")) or ""
+        if not isinstance(api_key, str) or not api_key:
+            logger.info("arcadia config discovery: no apiKey present; using fallback")
+            return None
+        base_url = guest_root if isinstance(guest_root, str) and guest_root else DEFAULT_BASE_URL
+        logger.info("arcadia config discovery: succeeded; refreshed guest key/base")
+        return ArcadiaConfig(guest_key=SecretStr(api_key), base_url=base_url)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        # type-only — never the URL (identifies the source) or the key.
+        logger.info("arcadia config discovery failed: %s; using fallback", type(exc).__name__)
+        return None
+
+
+@dataclass(frozen=True)
 class _Matchup:
     """Event/team context for one upcoming arcadia matchup."""
 
@@ -135,6 +203,10 @@ def parse_matchups(
     Drops props/outrights (``type != "matchup"``), derived sub-matchups
     (``parent`` set), two-sided events missing a home/away participant, and
     anything already started or beyond the horizon.
+
+    Kickoff prefers the period-0 ``cutoffAt`` (the TRUE betting cutoff) over
+    ``startTime`` when present, so the latest pre-kickoff row IS the close;
+    falls back to ``startTime`` when ``cutoffAt`` is absent or unparseable.
     """
     out: dict[str, _Matchup] = {}
     for matchup in raw:
@@ -147,7 +219,9 @@ def parse_matchups(
         away = next((p.get("name") for p in participants if p.get("alignment") == "away"), None)
         if not home or not away:
             continue
-        starts_at = _parse_ts(str(matchup.get("startTime", "")))
+        starts_at = _parse_ts(str(matchup.get("cutoffAt") or "")) or _parse_ts(
+            str(matchup.get("startTime", ""))
+        )
         if starts_at is None or starts_at <= now or starts_at > horizon_end:
             continue
         league = str((matchup.get("league") or {}).get("name") or "")
@@ -410,6 +484,7 @@ def extract_market_quotes(
 
 
 class _MarketSource(Protocol):
+    async def fetch_sports(self) -> dict[str, int]: ...
     async def fetch_matchups(self, sport_id: int) -> list[dict[str, Any]]: ...
     async def fetch_straight_markets(self, sport_id: int) -> list[dict[str, Any]]: ...
 
@@ -465,6 +540,15 @@ class PinnacleArcadiaClient:
         self._base_url = base_url.rstrip("/")
         self._guest_key = guest_key
 
+    def apply_config(self, config: ArcadiaConfig) -> None:
+        """Adopt a base URL + guest key discovered from ``/config/app.json``.
+
+        The key is read out of the SecretStr only here, only into the private
+        header field; it is never logged or returned. Used by the composition
+        root when ``arcadia_discover_config`` is opted in."""
+        self._base_url = config.base_url.rstrip("/")
+        self._guest_key = config.guest_key.get_secret_value()
+
     def _headers(self) -> dict[str, str]:
         headers = {"accept": "application/json"}
         if self._guest_key:
@@ -514,6 +598,40 @@ class PinnacleArcadiaClient:
             "markets",
             sport_id,
         )
+
+    async def fetch_sports(self) -> dict[str, int]:
+        """LIVE sports from ``GET /sports``: name (lowercased) -> id, keeping
+        only entries with ``isHidden`` falsey AND ``matchupCount > 0``.
+
+        Lets capture_once skip hidden/empty sports so no matchups fetch is wasted
+        on a sport pricing nothing. GET-only; raises PinnacleArcadiaError on a
+        non-200/non-JSON body (status only, never the URL/key) so the caller's
+        fallback path is the same as for any other fetch failure.
+        """
+        response = await self._get("/sports")
+        if response.status_code != 200:
+            raise PinnacleArcadiaError(f"pinnacle sports returned status {response.status_code}")
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise PinnacleArcadiaError("pinnacle sports returned a non-JSON body") from exc
+        live: dict[str, int] = {}
+        for entry in data if isinstance(data, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("isHidden"):
+                continue
+            count = entry.get("matchupCount")
+            # isinstance (not _is_number) so mypy narrows away None; bool is not
+            # a valid count.
+            if not isinstance(count, (int, float)) or isinstance(count, bool) or count <= 0:
+                continue
+            sport_id = entry.get("id")
+            name = entry.get("name")
+            if not _is_int_price(sport_id) or not isinstance(name, str) or not name:
+                continue
+            live[name.lower()] = sport_id
+        return live
 
 
 class PinnacleArcadiaCapture:
@@ -578,14 +696,36 @@ class PinnacleArcadiaCapture:
                 )
         return fresh, teams
 
+    async def _live_sport_ids(self) -> set[int] | None:
+        """Live sport ids from ``/sports`` (isHidden==false & matchupCount>0),
+        or ``None`` if discovery fails for ANY reason. ``None`` signals the
+        caller to FALL BACK to capturing every configured sport (today's
+        behaviour) — discovery is an optimisation, never a gate that can abort
+        or shrink the cycle on a transient error."""
+        assert self._client is not None
+        try:
+            live = await self._client.fetch_sports()
+        except (httpx.HTTPError, PinnacleArcadiaError) as exc:
+            logger.info(
+                "pinnacle arcadia /sports discovery failed: %s; capturing all configured sports",
+                type(exc).__name__,
+            )
+            return None
+        return set(live.values())
+
     async def capture_once(self) -> dict[str, int]:
-        """One capture cycle across all configured sports. Returns new rows
-        written per sport. A failed sport is logged (type + status only, never
-        the URL/key) and skipped — never aborts the other sports."""
+        """One capture cycle across the CONFIGURED sports, intersected with the
+        live ``/sports`` feed so hidden/empty sports are skipped. Returns new
+        rows written per sport. A failed sport is logged (type + status only,
+        never the URL/key) and skipped — never aborts the other sports; a failed
+        ``/sports`` discovery falls back to all configured sports."""
         if self._client is None:
             return {sport: 0 for sport in self._sports}
 
         from app.storage.repositories import persist_odds_snapshots
+
+        # None = discovery unavailable -> capture every configured sport (today).
+        live_ids = await self._live_sport_ids()
 
         now = self._now_fn()
         horizon_end = now + self._horizon
@@ -594,6 +734,11 @@ class PinnacleArcadiaCapture:
             sport_id = SPORT_IDS.get(sport)
             if sport_id is None:
                 logger.warning("pinnacle arcadia: unknown sport %r; skipping", sport)
+                continue
+            if live_ids is not None and sport_id not in live_ids:
+                # Hidden/empty upstream this cycle: skip the wasted matchups
+                # fetch. Recorded as 0 (honest), never silently dropped.
+                written[sport] = 0
                 continue
             try:
                 raw_matchups = await self._client.fetch_matchups(sport_id)

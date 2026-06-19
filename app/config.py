@@ -493,6 +493,37 @@ class Settings(BaseSettings):
     # corrupt CLV. Requires ARCADIA_ENABLED so the archive exists to match.
     clv_use_pinnacle_archive: bool = False
 
+    # --- Betfair Exchange BACK-odds capture (read-only; opt-in, OFF) ----------
+    # Dedicated ISOLATED reader of OddsPortal's Betfair Exchange BACK/LAY row
+    # (ADR-0015). OddsPortal serves a live Betfair Exchange row on
+    # liquidity-rich (major) matches that OddsHarvester's main-table parser
+    # skips; this captures its BACK side into the isolated `betfair_<sport>`
+    # warehouse namespace (bookmaker="Betfair Exchange"). It mirrors the arcadia
+    # archive exactly: an INDEPENDENT capture that runs ALONGSIDE the active
+    # ODDS_SOURCE, mints NO picks/alerts, and never touches the live dashboard/
+    # pick path. v1 is the ENABLER only (like arcadia) — "betfair exchange" is
+    # already a SHARP_BOOK with EXCHANGE_COMMISSION in app/edge/value.py, but
+    # nothing in v1 consumes these rows for picks.
+    #
+    # OFF by default (unlike arcadia): the reader spends a full browser page-load
+    # per match, so it stays opt-in until its target slate is scoped. GET-only,
+    # read-only — the page is loaded the same way the OddsPortal scrape already
+    # loads it; NO Betfair API/login/session/order path exists (ADR-0002), so
+    # there are deliberately no BETFAIR_* credential slots.
+    betfair_exchange_enabled: bool = False
+    # Backable £ liquidity floor: a BACK outcome whose displayed liquidity is
+    # below this is SKIPPED (thin markets give unreliable exchange prices). The
+    # default mirrors the user's 2026-06-19 live probe, where a major match's
+    # BACK liquidities were in the thousands of £. Floored at 0 (0 = no gate).
+    betfair_exchange_min_liquidity: float = Field(default=500.0, ge=0.0)
+    # csv of sport keys to capture (v1 supports "soccer" only — the 3-way 1X2
+    # BACK row). Other sports are skipped until their exchange row is probed.
+    betfair_exchange_sports: str = "soccer"
+    # Capture cadence. Change-gated on the per-selection BACK price, so a short
+    # interval just tracks repricings; near kickoff is what matters. The >=30s
+    # floor blocks hammering-by-typo on a free scraped source.
+    betfair_exchange_poll_interval_seconds: int = Field(default=300, ge=30)
+
     @model_validator(mode="after")
     def _enforce_picks_only(self) -> "Settings":
         if self.auto_betting or self.bet_execution_enabled:

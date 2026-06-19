@@ -468,6 +468,74 @@ def build_scheduler(
             settings.arcadia_sports,
         )
 
+    # Independent read-only Betfair Exchange BACK-odds ARCHIVE capture
+    # (ADR-0015). Like arcadia, it runs ALONGSIDE the active odds_source, mints
+    # NO picks/alerts, and persists into the isolated `betfair_<sport>`
+    # namespace (bookmaker="Betfair Exchange"). It re-reads the SAME fixtures the
+    # OddsPortal scrape already discovered (loader.directory + the last fetch's
+    # event ids = match links), so it owns no listing/scheduling policy. OFF
+    # unless BETFAIR_EXCHANGE_ENABLED=true, the source is oddsportal (so the
+    # directory is populated), and a DB session factory exists.
+    if (
+        settings.betfair_exchange_enabled
+        and settings.odds_source == "oddsportal"
+        and directory is not None
+        and session_factory is not None
+        and isinstance(loader, OddsPortalLoader)
+    ):
+        from app.ingestion.betfair_exchange import (
+            BetfairExchangeCapture,
+            BetfairExchangeReader,
+            MatchTarget,
+        )
+
+        bfx_directory = directory
+        bfx_loader = loader
+
+        def _betfair_targets(sport: str) -> list[MatchTarget]:
+            # Re-read the fixtures the last OddsPortal scrape listed for this
+            # sport; the event_id IS the match-link URL. Team context comes from
+            # the shared directory the scrape already populated.
+            targets: list[MatchTarget] = []
+            for event_id in bfx_loader.last_fetch_event_ids.get(sport, ()):  # noqa: B023
+                if not event_id.startswith("http"):
+                    continue  # synthetic id (no usable URL) — skip
+                teams = bfx_directory.lookup(event_id)  # noqa: B023
+                if teams is None:
+                    continue
+                targets.append(MatchTarget(event_id=event_id, url=event_id, teams=teams))
+            return targets
+
+        betfair_capture = BetfairExchangeCapture(
+            reader=BetfairExchangeReader(
+                min_liquidity=settings.betfair_exchange_min_liquidity,
+                proxy_pool=settings.scraper_proxies(),
+                locale=settings.oddsportal_locale,
+            ),
+            session_factory=session_factory,
+            targets_fn=_betfair_targets,
+            sports=tuple(_csv(settings.betfair_exchange_sports)),
+        )
+
+        async def capture_betfair_exchange() -> None:
+            try:
+                await betfair_capture.capture_once()
+            except Exception as exc:
+                logger.error("betfair exchange capture failed: %s", type(exc).__name__)
+
+        scheduler.add_job(
+            capture_betfair_exchange,
+            IntervalTrigger(seconds=settings.betfair_exchange_poll_interval_seconds),
+            id="capture_betfair_exchange",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=None,  # run on Mac wake, don't skip
+        )
+        logger.info(
+            "betfair exchange BACK-odds archive ENABLED (read-only) for sports=%s",
+            settings.betfair_exchange_sports,
+        )
+
     return scheduler
 
 

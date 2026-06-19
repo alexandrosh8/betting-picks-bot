@@ -453,6 +453,12 @@ async def _default_scrape(**kwargs: Any) -> Any:
     return await run_scraper(command=CommandEnum.UPCOMING_MATCHES, **kwargs)
 
 
+# Cap the proxy failover sweep: an empty/blocked slate retries at most this many
+# proxies (not the whole pool), so a genuinely-empty sport/date can't burn all 15
+# proxies and starve the rest of the scrape cycle.
+_MAX_PROXY_FAILOVER = 3
+
+
 class OddsPortalLoader:
     """OddsLoader over OddsHarvester's upcoming-matches scraper."""
 
@@ -537,13 +543,16 @@ class OddsPortalLoader:
         a zero-match result (the throttle signature), retry with the NEXT proxy.
         Empty pool -> a single direct call (host IP, default). Credentials go via
         separate proxy_user/proxy_pass kwargs (never in the URL); logging is
-        index-only so nothing leaks."""
+        index-only so nothing leaks. The sweep is CAPPED at ``_MAX_PROXY_FAILOVER``
+        proxies so a genuinely-empty slate (no games that day) can't burn the whole
+        pool and starve later sports in the cycle."""
         pool = self._proxy_pool
         if not pool:
             return await self._scrape(**kwargs)
         n = len(pool)
+        tries = min(n, _MAX_PROXY_FAILOVER)
         result: Any = None
-        for attempt in range(n):
+        for attempt in range(tries):
             idx = (self._proxy_cursor + attempt) % n
             proxy = pool[idx]
             try:
@@ -565,7 +574,7 @@ class OddsPortalLoader:
                 self._proxy_cursor = (idx + 1) % n  # advance past the winner
                 return result
             logger.info("oddsportal scrape via proxy #%d returned 0 matches; trying next", idx)
-        self._proxy_cursor = (self._proxy_cursor + 1) % n  # spread load next cycle
+        self._proxy_cursor = (self._proxy_cursor + tries) % n  # skip the ones just tried
         return result
 
     async def fetch_odds(self, sport_key: str) -> list[OddsSnapshotIn]:

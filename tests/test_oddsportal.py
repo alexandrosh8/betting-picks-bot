@@ -655,3 +655,30 @@ async def test_empty_pool_scrapes_without_proxy_kwargs() -> None:
     assert "proxy_url" not in call
     assert "proxy_user" not in call
     assert "proxy_pass" not in call
+
+
+async def test_proxy_failover_capped_on_empty_slate() -> None:
+    # A genuinely-empty slate (every proxy returns 0 matches) must NOT burn the
+    # whole pool — the failover sweep is capped so empty/slow sports can't starve
+    # the rest of the scrape cycle.
+    from app.ingestion.base import ScraperProxy
+    from app.ingestion.oddsportal import _MAX_PROXY_FAILOVER
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_scrape(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(success=[], failed=[], partial=[])  # always empty
+
+    pool = tuple(
+        ScraperProxy(url=f"http://h{i}:1", username=f"u{i}", password=f"p{i}") for i in range(8)
+    )
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        scrape_fn=fake_scrape,
+        proxy_pool=pool,
+    )
+    snaps = await loader.fetch_odds("soccer")
+    assert snaps == []
+    assert len(calls) == _MAX_PROXY_FAILOVER  # capped, NOT all 8 proxies

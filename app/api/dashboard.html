@@ -3097,6 +3097,28 @@
           ev.n_settled +
           " settled picks · stake-wtd CLV by stratum · instrument for the " +
           "VALUE_ML_FILTER flip";
+        // Below the floor EVERY stratum reads "insufficient data" — show one
+        // clear accumulating line instead of a wall of identical rows. This
+        // panel is an AGGREGATE CLV instrument; per-match detail is the SETTLED
+        // tab.
+        if (Number(ev.n_settled) < minN) {
+          const tr = document.createElement("tr");
+          const cell = td(
+            tr,
+            "Accumulating — " +
+              ev.n_settled +
+              " / " +
+              minN +
+              " settled picks. The CLV strata fill in once ≥ " +
+              minN +
+              " results are recorded (a smaller sample is too noisy to read). " +
+              "For per-match detail use the SETTLED tab.",
+            "evinsuf",
+          );
+          cell.colSpan = 6;
+          tbody.appendChild(tr);
+          return;
+        }
         const SCORE_LABELS = {
           score_ge_q:
             "ML score ≥ q*" +

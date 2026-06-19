@@ -1,1343 +1,593 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PICKS TERMINAL — Decision Support</title>
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23060906'/%3E%3Ccircle cx='8' cy='8' r='5' fill='none' stroke='%2300ff9d' stroke-width='2'/%3E%3C/svg%3E"
-    />
+<!DOCTYPE html>
+<html lang="en"><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PICKS TERMINAL</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23060906'/%3E%3Ccircle cx='8' cy='8' r='5' fill='none' stroke='%2300ff9d' stroke-width='2'/%3E%3C/svg%3E">
     <style>
-      /* ---------------------------------------------------------------
-         Semantic palette — ONE meaning per colour, everywhere:
-           pos   = value/healthy/positive numbers
-           neg   = loss/edge-gone/failure
-           warn  = stale/degraded/needs attention
-           info  = interactive/identifying (selection names, open status)
-           dim/faint = secondary text (faint ≈ 4.9:1 on panel — AA at 10px+)
-         --------------------------------------------------------------- */
+      /* =====================================================================
+         PICKS TERMINAL — proof-led, full-width vertical IA.
+         Order: top status strip · PROOF OF EDGE (CLV hero + KPI tiles) ·
+         VIEW + filters toolbar · full-width picks table · secondary panels ·
+         safety legend last. Chrome is desaturated near-black slate; COLOUR
+         belongs to the DATA, and +EV green (--pos) is the brightest signal on
+         the page (§2). Every figure renders in a true monospace with
+         tabular-nums so columns align (§4). JS contract preserved: every
+         class/id/var the inline script touches is kept (only restyled). === */
       :root {
-        /* Neutral slate surfaces — no colour tint. Refined monospace trading
-           terminal: structure is grey, the DATA carries the colour. */
-        --bg: #0b0d10;
-        --bg2: #0f1217;
-        --panel: #13161b;
-        --panel2: #171b21;
-        --line: #232a33;
-        --text: #d7dde5;
-        --dim: #8a93a0;
-        --faint: #69707c;
-        /* semantics — ONE meaning each; reserved for NUMBERS, never chrome */
-        --pos: #3ecf8e;
-        --pos-soft: #2faf78;
-        --neg: #e0625e;
-        --warn: #e0a23c;
-        /* structural accent: selection / focus / interactive identity — NOT a
-           value, so hierarchy reads even when every number is "lit" */
-        --info: #6ad7ff;
-        --accent: #6ad7ff;
-        --radius: 4px;
+        --bg: #0a0c10;
+        --surface-1: #0f1216;
+        --surface-2: #151921;
+        --surface-3: #1b212b;
+        --line: #232a35;
+        --panel: #0f1216;
+        --panel2: #151921;
+        --bg2: #11151b;
+        --text: #e8edf4;
+        --dim: #aeb8c6;
+        --faint: #8793a3;
+        --ink-faint: #565f6d;
+        --pos: #34d399;
+        --pos-soft: #10b981;
+        --neg: #f4525f;
+        --warn: #f0b429;
+        --info: #38bdf8;
+        --accent: #38bdf8;
+        --radius: 10px;
+        --radius-sm: 6px;
+        --radius-xs: 3px;
+        --ease: cubic-bezier(.2, 0, 0, 1);
+        --font-display:
+          "SF Pro Display", "Söhne", "Geist", "Helvetica Neue", system-ui,
+          -apple-system, sans-serif;
         --mono:
           ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
           Consolas, monospace;
       }
-      * {
-        box-sizing: border-box;
-        margin: 0;
-      }
-      [hidden] {
-        display: none !important;
-      }
-      html {
-        background: var(--bg);
-      }
+      * { box-sizing: border-box; margin: 0; }
+      [hidden] { display: none !important; }
+      html { background: var(--bg); }
       body {
         color: var(--text);
-        /* tabular-nums globally: every odds/percent/money figure aligns */
-        font: 13px/1.5 var(--mono);
+        font: 14px/1.5 var(--font-display);
         font-variant-numeric: tabular-nums;
-        padding: 22px 18px 40px;
+        -webkit-font-smoothing: antialiased;
         min-height: 100vh;
-        background: var(--bg);
+        padding: 0;
+        background:
+          radial-gradient(1100px 520px at 100% -8%, rgba(52, 211, 153, .045), transparent 60%),
+          var(--bg);
       }
+      table, .chip, .stamp, .badge, .card .v, .ko, .evtable, code,
+      input, select, button, .extlink, .banner, #clv-scorecard {
+        font-family: var(--mono);
+        font-feature-settings: "tnum" 1;
+      }
+      :focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
 
-      /* --- header + status bar ------------------------------------- */
-      header {
-        display: flex;
-        align-items: baseline;
-        gap: 16px;
-        flex-wrap: wrap;
-      }
-      .brand {
-        font-size: 16px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        color: var(--text);
-        padding-left: 10px;
-        border-left: 2px solid var(--accent);
-      }
-      .live {
-        display: inline-flex;
-        align-items: center;
-        gap: 7px;
-        color: var(--dim);
-        font-size: 10px;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-      .live i {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--pos);
-        animation: pulse 1.6s ease-in-out infinite;
-      }
-      .live.down {
-        color: var(--neg);
-      }
-      .live.down i {
-        background: var(--neg);
-        box-shadow: 0 0 8px rgba(255, 92, 87, 0.7);
-        animation: none;
-      }
-      @keyframes pulse {
-        50% {
-          opacity: 0.25;
-        }
-      }
-      .sub {
-        color: var(--dim);
-        font-size: 11px;
-        margin-top: 4px;
-        letter-spacing: 0.04em;
-      }
+      .app { max-width: 1760px; margin: 0 auto; padding: 18px 24px 40px; }
 
-      /* status bar: poll age · verified window · ingestion · deps */
-      .statusbar {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-wrap: wrap;
-        margin: 16px 0;
-      }
-      .chipset {
-        display: contents;
-      }
-      .chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        border: 1px solid var(--line);
-        border-radius: 3px;
-        background: var(--bg2);
-        color: var(--dim);
-        padding: 3px 9px;
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        white-space: nowrap;
-      }
-      .chip.ok {
-        color: var(--pos-soft);
-        border-color: rgba(43, 213, 118, 0.35);
-      }
-      .chip.warn {
-        color: var(--warn);
-        border-color: rgba(255, 180, 84, 0.45);
-        background: rgba(255, 180, 84, 0.05);
-      }
-      .chip.err {
-        color: var(--neg);
-        border-color: rgba(255, 92, 87, 0.5);
-        background: rgba(255, 92, 87, 0.06);
-      }
-      .chip.info {
-        color: var(--info);
-        border-color: rgba(106, 215, 255, 0.35);
-      }
-
-      /* full-width unmissable failure banner (only when /picks fails) */
-      .banner {
-        margin: 0 0 16px;
-        padding: 10px 14px;
-        font-size: 12px;
-        font-weight: 700;
-        color: var(--neg);
-        border: 1px solid rgba(255, 92, 87, 0.5);
-        border-radius: 4px;
-        background: rgba(255, 92, 87, 0.07);
-        letter-spacing: 0.03em;
-      }
-
-      /* onboarding explainer — frames CLV/stars before the data; dismissible
-         and remembered (localStorage) so it never re-nags. */
-
-      /* --- summary cards -------------------------------------------- */
-      .cards {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
-        gap: 8px;
-        margin-bottom: 16px;
-      }
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: var(--radius);
-        padding: 12px 16px 10px;
-        position: relative;
-        overflow: hidden;
-      }
-      .card::before {
-        content: "";
-        position: absolute;
-        inset: 0 auto 0 0;
-        width: 2px;
-        background: var(--accent);
-        opacity: 0.55;
-      }
-      .card .v {
-        font-size: 21px;
-        font-weight: 700;
-        color: var(--text);
-        letter-spacing: -0.01em;
-      }
-      .card .k {
-        color: var(--dim);
-        font-size: 10px;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        margin-top: 3px;
-      }
-      /* stale/degraded card: value visibly demoted + corner flag.
-         Every value on screen is either live or explicitly marked. */
-      .card.stale .v {
-        color: var(--dim);
-      }
-      .card.stale::before {
-        background: var(--warn);
-      }
-      .card.stale::after {
-        content: attr(data-flag);
-        position: absolute;
-        top: 8px;
-        right: 10px;
-        font-size: 9px;
-        font-weight: 700;
-        letter-spacing: 0.14em;
-        color: var(--warn);
-      }
-
-      /* --- controls --------------------------------------------------- */
-      .controls {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        flex-wrap: wrap;
-        margin-bottom: 12px;
-      }
-      select,
-      input[type="search"],
-      button {
-        background: var(--bg2);
-        color: var(--text);
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        padding: 7px 11px;
-        font: 12px var(--mono);
-        letter-spacing: 0.03em;
-      }
-      input[type="search"] {
-        width: 280px;
-      }
-      input[type="search"]::placeholder {
-        color: var(--faint);
-      }
-      select:focus,
-      input:focus,
-      button:focus {
-        outline: 1px solid var(--accent);
-        outline-offset: 0;
-      }
-      button {
-        cursor: pointer;
-        color: var(--text);
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-size: 11px;
-      }
-      button:hover {
-        border-color: var(--accent);
-        background: rgba(106, 215, 255, 0.08);
-      }
-      .stamp {
-        color: var(--dim);
-        font-size: 11px;
-        margin-left: auto;
-        letter-spacing: 0.05em;
-      }
-      .stamp.err {
-        color: var(--warn);
-      }
-      .games-head {
-        display: flex;
-        align-items: baseline;
-        gap: 10px;
-        margin-top: 14px;
-        margin-bottom: 8px;
-      }
-      .games-head .stamp {
-        margin-left: 0;
-      }
-      .section-toggle {
-        width: auto;
-        padding: 3px 9px;
-        font-size: 10px;
-        line-height: 1.3;
-      }
-      .gameswrap {
-        margin-bottom: 16px;
-      }
-      .gameswrap .matchwrap {
-        max-width: 260px;
-      }
-
-      /* --- picks table -------------------------------------------------- */
-      .tablewrap {
-        overflow-x: auto;
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        background: var(--panel);
-      }
-      table {
-        border-collapse: collapse;
-        width: 100%;
-        /* No hard min-width: the table must fit a 1280px laptop without
-           horizontal scroll EVEN in the worst-case row — settle button
-           visible + long team/book names (browser QA 2026-06-11: 8px cell
-           padding overflowed the 1246px wrap by 26px once settle rendered).
-           Hence 6px horizontal cell padding + ellipsis caps on the free-text
-           columns (match/selection/book), each with a full-text tooltip. */
-      }
-      th {
-        text-align: left;
-        font-size: 10px;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--dim);
-        padding: 8px 6px;
+      /* --- top status strip --------------------------------------------- */
+      .topbar {
+        display: flex; align-items: center; gap: 12px 18px; flex-wrap: wrap;
+        padding-bottom: 14px; margin-bottom: 18px;
         border-bottom: 1px solid var(--line);
-        position: sticky;
-        top: 0;
-        background: var(--panel);
-        z-index: 2;
       }
-      /* Clickable column headers (picks table). The caret doubles as the
-         affordance: a faint ↕ on sortable-but-inactive headers, an accent
-         ▲/▼ on the active one. Non-sortable headers get neither. */
-      /* Sortable headers stay clickable (caret + role=button signal it), but
-         keep the default arrow cursor — operator dislikes the hand/help cursor
-         on header words. Hover tooltips still appear on the plain arrow. */
-      th.sortable {
-        user-select: none;
+      .ident { display: flex; align-items: baseline; gap: 10px; }
+      .brand {
+        font-family: var(--font-display);
+        font-size: 18px; font-weight: 600; letter-spacing: .14em; color: var(--text);
       }
-      th.sortable:hover {
-        color: var(--text);
+      .tagline { font-size: 10px; letter-spacing: .22em; text-transform: uppercase; color: var(--faint); }
+      .live {
+        display: inline-flex; align-items: center; gap: 7px; color: var(--dim);
+        font-size: 10px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+        padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2);
       }
-      th.sortable:focus-visible {
-        color: var(--text);
-        /* keep a visible keyboard focus ring (a11y) rather than removing it */
-        outline: 1px solid var(--accent);
-        outline-offset: -2px;
+      .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--pos); box-shadow: 0 0 8px rgba(52, 211, 153, .6); animation: pulse 2s ease-in-out infinite; }
+      .live.down { color: var(--neg); border-color: rgba(244, 82, 95, .5); }
+      .live.down i { background: var(--neg); box-shadow: 0 0 8px rgba(244, 82, 95, .7); animation: none; }
+      @keyframes pulse { 50% { opacity: .25; } }
+
+      .statusbar { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+      .chipset { display: contents; }
+      .chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-2);
+        color: var(--dim); padding: 4px 9px; font-size: 10px; font-weight: 600;
+        letter-spacing: .08em; text-transform: uppercase; white-space: nowrap;
       }
-      th .caret {
-        font-size: 9px;
-        color: var(--accent);
-      }
-      th[aria-sort="none"] .caret {
-        color: var(--line);
-      }
-      td {
-        padding: 7px 6px;
-        border-bottom: 1px solid rgba(26, 36, 26, 0.6);
-        white-space: nowrap;
-      }
-      td.bookcell {
-        max-width: 100px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      .matchwrap {
-        max-width: 168px;
-      }
-      .matchwrap .match,
-      .matchwrap .league {
-        display: block;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      .selwrap {
-        max-width: 140px;
-      }
-      .selwrap .sel,
-      .selwrap small {
-        display: block;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      tbody tr:hover td {
-        background: rgba(106, 215, 255, 0.05);
-      }
-      tbody tr:hover td:first-child {
-        box-shadow: inset 2px 0 0 var(--accent);
+      .chip.ok { color: var(--pos); border-color: rgba(52, 211, 153, .32); background: rgba(52, 211, 153, .05); }
+      .chip.warn { color: var(--warn); border-color: rgba(240, 180, 41, .42); background: rgba(240, 180, 41, .06); }
+      .chip.err { color: var(--neg); border-color: rgba(244, 82, 95, .5); background: rgba(244, 82, 95, .07); }
+      .chip.info { color: var(--info); border-color: rgba(56, 189, 248, .35); }
+      #logout { margin-left: auto; }
+
+      .banner {
+        margin: 0 0 16px; padding: 11px 14px; font-size: 12px; font-weight: 600;
+        color: var(--neg); border: 1px solid rgba(244, 82, 95, .5);
+        border-radius: var(--radius-sm); background: rgba(244, 82, 95, .07); letter-spacing: .02em;
       }
 
-      .ko {
-        color: var(--text);
+      /* section label */
+      .nav-label {
+        font-size: 10px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase;
+        color: var(--faint); margin-bottom: 9px;
       }
-      .ko small {
-        display: block;
-        color: var(--faint);
-        font-size: 10px;
-        letter-spacing: 0.08em;
+
+      /* === 1) PROOF OF EDGE — full-width strip, top of page ============= */
+      .proof { margin-bottom: 22px; }
+      .proof-row { display: grid; grid-template-columns: minmax(260px, 320px) 1fr; gap: 12px; align-items: stretch; }
+      .proof .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+      .card {
+        background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius);
+        padding: 13px 16px 12px; position: relative; overflow: hidden; box-shadow: 0 1px 2px rgba(0, 0, 0, .4);
       }
-      .ko small.soon {
-        color: var(--warn);
+      .card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--info); opacity: .32; }
+      .card .v { font-size: 21px; font-weight: 700; color: var(--text); letter-spacing: -.01em; }
+      .card .k { color: var(--dim); font-size: 10px; letter-spacing: .07em; text-transform: uppercase; margin-top: 4px; line-height: 1.35; font-family: var(--font-display); font-weight: 600; }
+      /* hero = stake-weighted CLV: the brightest +EV proof on the page */
+      .card.hero {
+        display: flex; flex-direction: column; justify-content: center;
+        padding: 20px 22px; background: linear-gradient(180deg, rgba(52, 211, 153, .08), rgba(52, 211, 153, 0)), var(--surface-2);
       }
-      .ko .tbd {
-        color: var(--faint);
-        font-weight: 700;
-        letter-spacing: 0.1em;
+      .card.hero::before { width: 3px; background: var(--pos); opacity: 1; }
+      .card.hero .v { font-size: 44px; color: var(--pos); letter-spacing: -.02em; line-height: 1; }
+      .card.hero .k { font-size: 11px; margin-top: 10px; }
+      /* stale: value demoted + corner flag — overrides hero green */
+      .card.stale::before { background: var(--warn); opacity: 1; }
+      .card.stale .v { color: var(--dim); }
+      .card.stale::after { content: attr(data-flag); position: absolute; top: 9px; right: 11px; font-size: 9px; font-weight: 700; letter-spacing: .14em; color: var(--warn); font-family: var(--mono); }
+
+      /* === 2) VIEW + filters toolbar =================================== */
+      .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+      /* horizontal segmented view control (LIVE / UNVERIFIED / CLOSED / SETTLED) */
+      #status-tabs {
+        display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm);
+        overflow: hidden; background: var(--surface-1); flex-wrap: wrap;
       }
-      .match {
-        font-weight: 700;
+      #status-tabs button {
+        appearance: none; cursor: pointer; border: 0; border-right: 1px solid var(--line);
+        background: transparent; color: var(--dim); padding: 10px 18px;
+        font: 600 11px/1.2 var(--mono); letter-spacing: .1em;
+        transition: background .2s var(--ease), color .2s var(--ease);
       }
-      .league {
-        display: block;
-        color: var(--faint);
-        font-size: 10px;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
+      #status-tabs button:last-child { border-right: 0; }
+      #status-tabs button:hover { color: var(--text); background: var(--surface-2); }
+      #status-tabs button[aria-selected="true"] { color: var(--text); background: var(--surface-3); box-shadow: inset 0 -2px 0 var(--pos); }
+
+      .toolbar-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 1 1 380px; }
+      select, input[type="search"], button {
+        background: var(--surface-1); color: var(--text); border: 1px solid var(--line);
+        border-radius: var(--radius-sm); padding: 9px 11px; font: 12px var(--mono); letter-spacing: .03em;
       }
-      .sel {
-        color: var(--info);
-        font-weight: 700;
+      select { cursor: pointer; }
+      input[type="search"] { flex: 1 1 240px; min-width: 180px; }
+      input[type="search"]::placeholder { color: var(--faint); }
+      #refresh {
+        cursor: pointer; text-transform: uppercase; letter-spacing: .1em; font-size: 11px; font-weight: 600; color: var(--text);
+        transition: border-color .2s var(--ease), background .2s var(--ease);
       }
-      .odds {
-        font-weight: 700;
+      #refresh:hover { border-color: var(--info); background: rgba(56, 189, 248, .08); }
+      .stamp { color: var(--dim); font-size: 11px; margin-left: auto; letter-spacing: .04em; }
+      .stamp.err { color: var(--warn); }
+      .section-toggle {
+        width: auto; cursor: pointer; background: var(--surface-1); color: var(--dim);
+        border: 1px solid var(--line); border-radius: var(--radius-sm);
+        padding: 8px 13px; font: 600 10px/1.3 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+        transition: border-color .2s var(--ease), color .2s var(--ease), background .2s var(--ease);
       }
-      .edgecell {
-        min-width: 70px;
+      .section-toggle:hover { border-color: var(--info); color: var(--text); }
+
+      /* === 3) full-width picks table =================================== */
+      .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+      .tablewrap {
+        overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius);
+        background: var(--surface-1); box-shadow: 0 1px 2px rgba(0, 0, 0, .4);
       }
+      /* compact density so all 11 columns fit on one screen without sideways
+         scroll (matches the original fit-1280 engineering); arrow cursor over
+         the grid, never the text I-beam. */
+      table { border-collapse: collapse; width: 100%; font-size: 13px; }
+      th {
+        text-align: left; font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+        color: var(--faint); padding: 9px 6px; cursor: default; border-bottom: 1px solid var(--line);
+        position: sticky; top: 0; background: var(--surface-2); z-index: 2; white-space: nowrap;
+        font-family: var(--font-display); font-weight: 600;
+      }
+      th.sortable { user-select: none; }
+      th.sortable:hover { color: var(--text); }
+      th.sortable:focus-visible { color: var(--text); outline: 2px solid var(--info); outline-offset: -2px; }
+      th .caret { font-size: 9px; color: var(--info); }
+      th[aria-sort="none"] .caret { color: var(--ink-faint); }
+      td { padding: 8px 6px; border-bottom: 1px solid rgba(35, 42, 53, .55); white-space: nowrap; vertical-align: top; cursor: default; }
+      td.bookcell { max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+      .matchwrap { max-width: 168px; }
+      .matchwrap .match, .matchwrap .league { display: block; overflow: hidden; text-overflow: ellipsis; }
+      .selwrap { max-width: 140px; }
+      .selwrap .sel, .selwrap small { display: block; overflow: hidden; text-overflow: ellipsis; }
+      tbody tr { transition: background .12s var(--ease); }
+      tbody tr:hover td { background: rgba(56, 189, 248, .05); }
+      tbody tr:hover td:first-child { box-shadow: inset 2px 0 0 var(--info); }
+
+      .ko { color: var(--text); }
+      .ko small { display: block; color: var(--faint); font-size: 10px; letter-spacing: .06em; }
+      .ko small.soon { color: var(--warn); }
+      .ko .tbd { color: var(--faint); font-weight: 700; letter-spacing: .1em; }
+      .match { font-weight: 700; }
+      .league { display: block; color: var(--faint); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+      .sel { color: var(--info); font-weight: 700; }
+      .odds { font-weight: 700; font-size: 13px; }
+      .edgecell { min-width: 70px; }
+      .edge { color: var(--pos); font-weight: 700; }
+      .bar { height: 3px; border-radius: 2px; background: var(--surface-3); margin-top: 5px; position: relative; overflow: hidden; }
+      .bar i { position: absolute; inset: 0 auto 0 0; background: var(--pos); }
+      .confcell { letter-spacing: .06em; font-size: 14px; white-space: nowrap; }
+      .confcell .stars { color: var(--pos); }
+      .confcell .dim { color: var(--ink-faint); }
       td button {
-        font-family: inherit;
-        font-size: 10px;
-        font-weight: 700;
-        line-height: 1.4;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        padding: 2px 7px;
-        background: transparent;
-        border: 1px solid var(--line);
-        border-radius: 3px;
-        color: var(--info);
-        cursor: pointer;
+        font-family: var(--mono); font-size: 10px; font-weight: 700; line-height: 1.4;
+        letter-spacing: .08em; text-transform: uppercase; padding: 3px 8px;
+        background: transparent; border: 1px solid var(--line); border-radius: var(--radius-xs);
+        color: var(--info); cursor: pointer; transition: border-color .12s var(--ease);
       }
-      td button:hover {
-        border-color: var(--info);
-      }
-      .edge {
-        color: var(--pos);
-        font-weight: 700;
-      }
-      .bar {
-        height: 3px;
-        border-radius: 2px;
-        background: var(--faint);
-        margin-top: 4px;
-        position: relative;
-        overflow: hidden;
-      }
-      .bar i {
-        position: absolute;
-        inset: 0 auto 0 0;
-        background: var(--pos);
-      }
-
-      /* confidence stars — replaces the old Stake column. Filled stars carry
-         the value colour; the stake % lives in the cell title only. */
-      .confcell {
-        letter-spacing: 0.04em;
-        font-size: 13px;
-        white-space: nowrap;
-      }
-      .confcell .stars {
-        color: var(--pos);
-      }
-      .confcell .dim {
-        color: var(--faint);
-      }
-
-      /* external-link affordance on the Available games Match cell — the URL
-         lives in href/title only, never as visible text. */
-      .extlink {
-        color: var(--info);
-        text-decoration: none;
-        margin-left: 6px;
-        font-size: 11px;
-      }
-      .extlink:hover {
-        text-decoration: underline;
-      }
-
-      /* segmented status control (LIVE / UNVERIFIED / SETTLED) */
-      .segmented {
-        display: inline-flex;
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        overflow: hidden;
-      }
-      .segmented button {
-        border: 0;
-        border-radius: 0;
-        border-right: 1px solid var(--line);
-        background: var(--bg2);
-        color: var(--dim);
-        padding: 7px 13px;
-        font-size: 11px;
-        letter-spacing: 0.12em;
-      }
-      .segmented button:last-child {
-        border-right: 0;
-      }
-      .segmented button[aria-selected="true"] {
-        background: rgba(106, 215, 255, 0.1);
-        color: var(--accent);
-        border-color: var(--line);
-      }
-      .segmented button:hover {
-        background: rgba(106, 215, 255, 0.06);
-      }
-
-      /* badges: ONE shape/size system, semantic variants only */
-      .badge {
-        display: inline-block;
-        border-radius: 3px;
-        padding: 2px 8px;
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-      }
-      .b-pos {
-        background: rgba(62, 207, 142, 0.13);
-        color: var(--pos);
-      }
-      .b-neg {
-        background: rgba(224, 98, 94, 0.13);
-        color: var(--neg);
-      }
-      .b-neutral {
-        background: rgba(138, 147, 160, 0.12);
-        color: var(--dim);
-      }
-      .b-info {
-        background: rgba(106, 215, 255, 0.1);
-        color: var(--info);
-      }
-
-      /* Value-gone rows: the live re-price no longer beats fair value
-         (current edge <= 0 — the market moved against the pick). Faded so the
-         still-actionable picks stand out; NOT removed — the pick stays on the
-         board and in CLV tracking (dropping losers would be survivorship bias).
-         Hover restores opacity so a dimmed row is still readable on inspection. */
-      tr.valuegone {
-        opacity: 0.42;
-      }
-      tr.valuegone:hover {
-        opacity: 0.9;
-      }
-
-      /* designed empty + skeleton loading states */
-      .empty {
-        padding: 28px 16px;
-        text-align: left;
-        white-space: normal;
-      }
-      .empty-title {
-        color: var(--dim);
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-      }
-      .empty-hint {
-        color: var(--faint);
-        font-size: 11px;
-        margin-top: 6px;
-        max-width: 640px;
-      }
+      td button:hover { border-color: var(--info); }
+      .extlink { color: var(--info); text-decoration: none; margin-left: 6px; font-size: 11px; }
+      .extlink:hover { text-decoration: underline; }
+      .badge { display: inline-block; border-radius: var(--radius-xs); padding: 2px 8px; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+      .b-pos { background: rgba(52, 211, 153, .14); color: var(--pos); }
+      .b-neg { background: rgba(244, 82, 95, .14); color: var(--neg); }
+      .b-neutral { background: rgba(174, 184, 198, .12); color: var(--dim); }
+      .b-info { background: rgba(56, 189, 248, .12); color: var(--info); }
+      tr.valuegone { opacity: .42; transition: opacity .2s var(--ease); }
+      tr.valuegone:hover { opacity: .9; }
+      .empty { padding: 28px 16px; text-align: left; white-space: normal; }
+      .empty-title { color: var(--dim); font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+      .empty-hint { color: var(--faint); font-size: 12px; margin-top: 6px; max-width: 640px; line-height: 1.55; }
       .skelbar {
-        height: 10px;
-        border-radius: 3px;
-        background: linear-gradient(
-          90deg,
-          rgba(138, 147, 160, 0.1) 25%,
-          rgba(138, 147, 160, 0.22) 50%,
-          rgba(138, 147, 160, 0.1) 75%
-        );
-        background-size: 200% 100%;
-        animation: shimmer 1.2s linear infinite;
+        height: 12px; border-radius: var(--radius-xs);
+        background: linear-gradient(90deg, rgba(174, 184, 198, .08) 25%, rgba(174, 184, 198, .2) 50%, rgba(174, 184, 198, .08) 75%);
+        background-size: 200% 100%; animation: shimmer 1.2s linear infinite;
       }
-      @keyframes shimmer {
-        to {
-          background-position: -200% 0;
-        }
+      @keyframes shimmer { to { background-position: -200% 0; } }
+      #clv-scorecard {
+        margin-top: 12px; padding: 13px 16px; border: 1px solid rgba(52, 211, 153, .3);
+        border-radius: var(--radius); background: rgba(52, 211, 153, .05);
+        color: var(--dim); font-size: 12.5px; line-height: 1.55;
       }
 
-      /* --- live evidence panel (score/tier/anchor-stratified CLV) ----- */
-      .evpanel {
-        margin-top: 12px;
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        background: var(--panel);
-        padding: 8px 12px 10px;
-      }
-      .evtitle {
-        color: var(--dim);
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        margin-bottom: 6px;
-      }
-      .evtable {
-        border-collapse: collapse;
-        font-size: 11px;
-      }
-      .evtable th,
-      .evtable td {
-        padding: 2px 14px 2px 0;
-        text-align: left;
-        white-space: nowrap;
-      }
-      .evtable th {
-        color: var(--faint);
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-      }
-      .evgroup td {
-        color: var(--faint);
-        font-size: 9px;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        padding: 5px 14px 1px 0;
-        border-bottom: 0;
-      }
-      .evtoggle {
-        width: auto;
-        padding: 2px 0;
-        border: 0;
-        background: transparent;
-        color: var(--faint);
-        font-size: 9px;
-        letter-spacing: 0.1em;
-        text-align: left;
-      }
-      .evtoggle:hover {
-        border-color: transparent;
-        color: var(--pos-soft);
-        background: transparent;
-      }
-      .evtoggle .evcount {
-        color: var(--dim);
-        margin-left: 8px;
-      }
-      .evinsuf {
-        color: var(--dim);
-        font-style: italic;
-      }
+      /* === 4) secondary panels ========================================= */
+      .panels { margin-top: 22px; }
+      .evpanel { margin-bottom: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-1); padding: 13px 16px 16px; overflow-x: auto; }
+      .evtitle { color: var(--dim); font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; font-family: var(--font-display); }
+      .evpanel .evtitle { margin-bottom: 6px; text-transform: none; letter-spacing: .02em; font-size: 12px; }
+      /* plain-English "how to read" caption for the evidence table */
+      .evhelp { color: var(--faint); font-size: 11.5px; line-height: 1.6; max-width: 920px; margin-bottom: 12px; }
+      .evhelp b { color: var(--dim); font-weight: 700; }
+      .evtable { border-collapse: collapse; font-size: 11px; }
+      .evtable th, .evtable td { padding: 4px 18px 4px 0; text-align: left; white-space: nowrap; }
+      .evtable th { color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; position: static; background: transparent; }
+      .evgroup td { color: var(--faint); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; padding: 8px 18px 2px 0; border-bottom: 0; }
+      .evtoggle { width: auto; padding: 2px 0; border: 0; background: transparent; color: var(--faint); font-size: 9px; letter-spacing: .1em; text-align: left; cursor: pointer; }
+      .evtoggle:hover { color: var(--pos); background: transparent; border-color: transparent; }
+      .evtoggle .evcount { color: var(--dim); margin-left: 8px; }
+      .evinsuf { color: var(--dim); font-style: italic; }
 
-      footer {
-        color: var(--faint);
-        font-size: 11px;
-        margin-top: 16px;
-        letter-spacing: 0.04em;
+      .games-head { display: flex; align-items: center; gap: 12px; margin: 18px 0 8px; flex-wrap: wrap; }
+      .games-head .stamp { margin-left: 0; }
+      .gameswrap { margin-bottom: 4px; }
+      .gameswrap .matchwrap { max-width: 300px; }
+      .sub { color: var(--dim); font-size: 11px; letter-spacing: .03em; }
+      #archive-purpose { margin-bottom: 8px; line-height: 1.55; max-width: 920px; }
+
+      .legend {
+        margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line);
+        color: var(--dim); font-size: 11.5px; line-height: 1.7; max-width: 1120px;
       }
-      footer code {
-        color: var(--dim);
+      .legend b { color: var(--text); font-family: var(--font-display); letter-spacing: .04em; }
+
+      /* === responsive ================================================== */
+      @media (max-width: 1100px) {
+        .proof-row { grid-template-columns: 1fr; }
+        .proof .cards { grid-template-columns: repeat(3, 1fr); }
+        .card.hero { padding: 16px 18px; }
+        .card.hero .v { font-size: 36px; }
       }
 
       @media (max-width: 720px) {
-        body {
-          padding: 14px 10px 28px;
-          font-size: 12px;
-        }
-        header {
-          gap: 8px;
-        }
-        .brand {
-          font-size: 15px;
-          letter-spacing: 0.14em;
-        }
-        .sub {
-          font-size: 11px;
-          line-height: 1.55;
-        }
-        /* The CLV scorecard + status/CLV legend are prose-dense blocks. Give
-           them breathing room and a faint card surround so they read as a
-           panel, not a cramped wall of grey text running edge-to-edge. */
-        #clv-scorecard,
-        #picks-legend {
-          padding: 9px 11px;
-          border: 1px solid var(--line);
-          border-radius: var(--radius);
-          background: var(--panel);
-          margin-bottom: 12px;
-        }
-        #clv-scorecard {
-          margin: 0 0 10px;
-        }
-        #picks-legend b {
-          color: var(--dim);
-        }
-        .statusbar,
-        .controls {
-          align-items: stretch;
-        }
-        .chip,
-        select,
-        input[type="search"],
-        button,
-        .stamp {
-          width: 100%;
-        }
-        /* Bigger tap targets on the interactive controls (44px-ish): the
-           operator filters on a phone, so the tier select, search box and
-           refresh need thumb-sized hit areas. */
-        select,
-        input[type="search"],
-        button {
-          padding: 11px 12px;
-          font-size: 13px;
-        }
-        /* Segmented status tabs: span full width and split evenly so all four
-           tabs are reachable instead of bunched at the left edge. */
-        .segmented {
-          display: flex;
-          width: 100%;
-        }
-        .segmented button {
-          flex: 1 1 0;
-          width: auto;
-          padding: 11px 6px;
-          font-size: 11px;
-          text-align: center;
-        }
-        .section-toggle,
-        .evtoggle {
-          width: auto;
-        }
-        .stamp {
-          margin-left: 0;
-        }
-        .cards {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 6px;
-          margin-bottom: 12px;
-        }
-        .card {
-          padding: 9px 10px 8px;
-        }
-        .card .v {
-          font-size: 17px;
-        }
-        .card .k {
-          font-size: 9px;
-          letter-spacing: 0.08em;
-          margin-top: 2px;
-          line-height: 1.3;
-        }
-        /* keep the stale-flag from colliding with the value on the narrower
-           2-col card */
-        .card.stale::after {
-          top: 6px;
-          right: 8px;
-          font-size: 8px;
-        }
-        .evpanel {
-          overflow-x: auto;
-        }
-        #games-table,
-        #games-table thead,
-        #games-table tbody,
-        #games-table tr,
-        #games-table td,
-        #picks-table,
-        #picks-table thead,
-        #picks-table tbody,
-        #picks-table tr,
-        #picks-table td {
-          display: block;
-        }
-        #games-table thead,
-        #picks-table thead {
-          display: none;
-        }
-        #games-table tr,
-        #picks-table tr {
-          border-bottom: 1px solid var(--line);
-          padding: 8px 0;
-        }
-        /* BASE per-cell layout — a labelled label|value grid. The games table
-           and the SETTLED picks view keep this stacked form (it suits a short,
-           browse-y column set); the LIVE/UNVERIFIED/CLOSED picks view OVERRIDES
-           it below with a compact card so several picks fit on one screen. */
-        #games-table td,
-        #picks-table td {
-          display: grid;
-          grid-template-columns: minmax(84px, 34%) minmax(0, 1fr);
-          gap: 10px;
-          align-items: start;
-          border-bottom: 0;
-          white-space: normal;
-          overflow-wrap: anywhere;
-        }
-        #games-table td::before,
-        #picks-table td::before {
-          color: var(--faint);
-          font-size: 9px;
-          font-weight: 700;
-          letter-spacing: 0.1em;
-          text-transform: uppercase;
-        }
-        #games-table td[colspan]::before,
-        #picks-table td[colspan]::before,
-        #games-table td.empty::before,
-        #picks-table td.empty::before {
-          content: "" !important;
-        }
-        #games-table td:nth-child(1)::before {
-          content: "Kickoff";
-        }
-        #games-table td:nth-child(2)::before {
-          content: "Match";
-        }
-        #games-table td:nth-child(3)::before {
-          content: "League";
-        }
-        #games-table td:nth-child(4)::before {
-          content: "Sport";
-        }
-        #games-table td:nth-child(5)::before {
-          content: "Coverage";
-        }
-        #picks-table td:nth-child(1)::before {
-          content: "Kickoff";
-        }
-        #picks-table td:nth-child(2)::before {
-          content: "Match";
-        }
-        #picks-table td:nth-child(3)::before {
-          content: "Market";
-        }
-        #picks-table td:nth-child(4)::before {
-          content: "Pick";
-        }
-        #picks-table td:nth-child(5)::before {
-          content: "Book";
-        }
-        #picks-table td:nth-child(6)::before {
-          content: "Odds";
-        }
-        #picks-table td:nth-child(7)::before {
-          content: "Fair / EV";
-        }
-        #picks-table td:nth-child(8)::before {
-          content: "Edge";
-        }
-        #picks-table td:nth-child(9)::before {
-          content: "Confidence";
-        }
-        #picks-table td:nth-child(10)::before {
-          content: "CLV";
-        }
-        #picks-table td:nth-child(11)::before {
-          content: "Status";
-        }
-        /* SETTLED view has a different (shorter) column set — drive the
-           mobile labels off each cell's data-label so they follow the active
-           columns instead of fixed nth-child indices. */
-        #picks-table.settled td::before {
-          content: attr(data-label);
-        }
+        .app { padding: 14px 12px 30px; }
+        .topbar { gap: 10px 14px; padding-bottom: 12px; margin-bottom: 14px; }
+        .brand { font-size: 16px; letter-spacing: .16em; }
+        .statusbar { width: 100%; }
+        #logout { margin-left: 0; }
+        .proof .cards { grid-template-columns: 1fr 1fr; }
+        .card.hero .v { font-size: 32px; }
+        /* tabs full-width 2×2 so "UNVERIFIED (12)" never clips; ≥44px targets */
+        #status-tabs { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+        #status-tabs button { border-right: 0; border-bottom: 1px solid var(--line); text-align: center; padding: 12px 6px; }
+        #status-tabs button:nth-child(odd) { border-right: 1px solid var(--line); }
+        #status-tabs button:nth-last-child(-n+2) { border-bottom: 0; }
+        .toolbar-filters { flex: 1 1 100%; }
+        .toolbar-filters select, .toolbar-filters input[type="search"], #refresh, #logout { flex: 1 1 100%; width: 100%; padding: 12px; font-size: 13px; }
+        .stamp { margin-left: 0; flex-basis: 100%; }
+        #games-panel select, #games-panel input[type="search"] { width: 100%; flex: 1 1 100%; padding: 12px; font-size: 13px; }
+        #clv-scorecard, .legend { padding: 12px 14px; }
+        .evhelp { font-size: 11px; }
 
-        /* ============================================================== *
-         * COMPACT PICK CARD — LIVE / UNVERIFIED / CLOSED views only.     *
-         * Each <tr> becomes a 2-column grid card with three tiers so 3-4 *
-         * picks fit per phone screen instead of one tall 11-row stack:   *
-         *   tier 1 — Match (bold, wide)        + Kickoff (right)         *
-         *   tier 2 — Pick (wide) | Odds        + Book under the pick     *
-         *   tier 3 — a wrapping metrics strip: Market · Fair/EV · Edge · *
-         *           Confidence · CLV · Status (labels muted/dropped      *
-         *           where the value already names itself).               *
-         * Scoped :not(.settled) so the SETTLED 8-col view keeps its own  *
-         * data-label stack above (and the games table is untouched).     *
-         * ============================================================== */
+        /* table -> stacked blocks (games + SETTLED picks use label|value form) */
+        #games-table, #games-table thead, #games-table tbody, #games-table tr, #games-table td,
+        #picks-table, #picks-table thead, #picks-table tbody, #picks-table tr, #picks-table td { display: block; }
+        #games-table thead, #picks-table thead { display: none; }
+        #games-table tr, #picks-table tr { border-bottom: 1px solid var(--line); padding: 8px 0; }
+        #games-table td, #picks-table td {
+          display: grid; grid-template-columns: minmax(84px, 34%) minmax(0, 1fr);
+          gap: 10px; align-items: start; border-bottom: 0; white-space: normal; overflow-wrap: anywhere;
+        }
+        #games-table td::before, #picks-table td::before { color: var(--faint); font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+        #games-table td[colspan]::before, #picks-table td[colspan]::before,
+        #games-table td.empty::before, #picks-table td.empty::before { content: "" !important; }
+        #games-table td:nth-child(1)::before { content: "Kickoff"; }
+        #games-table td:nth-child(2)::before { content: "Match"; }
+        #games-table td:nth-child(3)::before { content: "League"; }
+        #games-table td:nth-child(4)::before { content: "Sport"; }
+        #games-table td:nth-child(5)::before { content: "Coverage"; }
+        #picks-table td:nth-child(1)::before { content: "Kickoff"; }
+        #picks-table td:nth-child(2)::before { content: "Match"; }
+        #picks-table td:nth-child(3)::before { content: "Market"; }
+        #picks-table td:nth-child(4)::before { content: "Pick"; }
+        #picks-table td:nth-child(5)::before { content: "Book"; }
+        #picks-table td:nth-child(6)::before { content: "Odds"; }
+        #picks-table td:nth-child(7)::before { content: "Fair / EV"; }
+        #picks-table td:nth-child(8)::before { content: "Edge"; }
+        #picks-table td:nth-child(9)::before { content: "Confidence"; }
+        #picks-table td:nth-child(10)::before { content: "CLV"; }
+        #picks-table td:nth-child(11)::before { content: "Status"; }
+        #picks-table.settled td::before { content: attr(data-label); }
+
+        /* COMPACT PICK CARD — LIVE / UNVERIFIED / CLOSED only */
         #picks-table:not(.settled) tbody tr {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          grid-template-areas:
-            "match   match   kickoff"
-            "pick    pick    odds"
-            "book    book    odds"
-            "fairev  edge    conf"
-            "clv     clv     status";
-          column-gap: 8px;
-          row-gap: 5px;
-          align-items: start;
-          padding: 11px 12px;
+          display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-areas: "match match kickoff" "pick pick odds" "book book odds" "fairev edge conf" "clv clv status";
+          column-gap: 8px; row-gap: 5px; align-items: start; padding: 12px; border-bottom: 1px solid var(--line);
         }
-        /* rows that aren't real picks (skeleton / empty-state) carry a single
-           full-width colspan cell — let it span the whole card, never the
-           grid template. */
-        #picks-table:not(.settled) tbody tr:has(td[colspan]) {
-          display: block;
-          padding: 8px 0;
-        }
-        #picks-table:not(.settled) td {
-          display: block;
-          grid-template-columns: none;
-          gap: 0;
-          min-width: 0;
-        }
-        /* the card's own grouping makes most labels redundant — drop them and
-           re-introduce only the few that aid scanning, inline + muted. */
-        #picks-table:not(.settled) td::before {
-          content: "";
-          display: none;
-        }
-        /* tier 1 — Match headline (wide) + Kickoff (right, muted). */
-        #picks-table:not(.settled) td:nth-child(1) {
-          grid-area: kickoff;
-          text-align: right;
-          font-size: 10px;
-        }
-        #picks-table:not(.settled) td:nth-child(1) .ko small {
-          font-size: 9px;
-        }
-        #picks-table:not(.settled) td:nth-child(2) {
-          grid-area: match;
-          font-size: 13px;
-        }
-        #picks-table:not(.settled) td:nth-child(2) .match {
-          font-size: 14px;
-        }
-        /* tier 2 — the actionable line: Pick (wide) + Odds (big, right),
-           Book muted under the pick. */
-        #picks-table:not(.settled) td:nth-child(4) {
-          grid-area: pick;
-          font-size: 13px;
-        }
-        #picks-table:not(.settled) td:nth-child(5) {
-          grid-area: book;
-          color: var(--dim);
-          font-size: 11px;
-          max-width: none;
-        }
-        #picks-table:not(.settled) td:nth-child(5)::before {
-          content: "@ ";
-          display: inline;
-          color: var(--faint);
-          font-size: 11px;
-          letter-spacing: 0;
-        }
-        #picks-table:not(.settled) td:nth-child(6) {
-          grid-area: odds;
-          text-align: right;
-          align-self: center;
-        }
-        #picks-table:not(.settled) td:nth-child(6) .odds {
-          font-size: 17px;
-        }
-        #picks-table:not(.settled) td:nth-child(6) small {
-          font-size: 10px;
-        }
-        /* tier 3 — a tidy metrics strip: Fair/EV · Edge · Conf share three
-           equal columns above a CLV + Status row. Each is a STACKED stat (a
-           tiny uppercase label over its value) so nothing is unlabelled and
-           there is no big empty gap. A hair-line sets the strip apart. */
-        #picks-table:not(.settled) td:nth-child(3) {
-          display: none; /* Market is redundant on mobile — the Pick names it. */
-        }
+        #picks-table:not(.settled) tbody tr:has(td[colspan]) { display: block; padding: 8px 0; }
+        #picks-table:not(.settled) td { display: block; grid-template-columns: none; gap: 0; min-width: 0; }
+        #picks-table:not(.settled) td::before { content: ""; display: none; }
+        #picks-table:not(.settled) td:nth-child(1) { grid-area: kickoff; text-align: right; font-size: 10px; }
+        #picks-table:not(.settled) td:nth-child(1) .ko small { font-size: 9px; }
+        #picks-table:not(.settled) td:nth-child(2) { grid-area: match; font-size: 13px; }
+        #picks-table:not(.settled) td:nth-child(2) .match { font-size: 14px; }
+        #picks-table:not(.settled) td:nth-child(4) { grid-area: pick; font-size: 13px; }
+        #picks-table:not(.settled) td:nth-child(5) { grid-area: book; color: var(--dim); font-size: 11px; max-width: none; }
+        #picks-table:not(.settled) td:nth-child(5)::before { content: "@ "; display: inline; color: var(--faint); font-size: 11px; letter-spacing: 0; }
+        #picks-table:not(.settled) td:nth-child(6) { grid-area: odds; text-align: right; align-self: center; }
+        #picks-table:not(.settled) td:nth-child(6) .odds { font-size: 17px; }
+        #picks-table:not(.settled) td:nth-child(6) small { font-size: 10px; }
+        #picks-table:not(.settled) td:nth-child(3) { display: none; }
         #picks-table:not(.settled) td:nth-child(7),
         #picks-table:not(.settled) td:nth-child(8),
         #picks-table:not(.settled) td:nth-child(9),
         #picks-table:not(.settled) td:nth-child(10),
-        #picks-table:not(.settled) td:nth-child(11) {
-          display: flex;
-          flex-direction: column;
-          gap: 2px;
-          font-size: 12px;
-          min-width: 0;
-        }
-        #picks-table:not(.settled) td:nth-child(7) {
-          grid-area: fairev;
-        }
-        #picks-table:not(.settled) td:nth-child(8) {
-          grid-area: edge;
-        }
-        #picks-table:not(.settled) td:nth-child(9) {
-          grid-area: conf;
-          display: block; /* keep the 5 ★/☆ on ONE line (label sits above). */
-          white-space: nowrap;
-        }
-        #picks-table:not(.settled) td:nth-child(10) {
-          grid-area: clv;
-        }
-        #picks-table:not(.settled) td:nth-child(11) {
-          grid-area: status;
-          align-items: flex-end;
-          justify-content: flex-start;
-        }
-        /* the hair-line over the metrics row (the three top tier-3 cells). */
+        #picks-table:not(.settled) td:nth-child(11) { display: flex; flex-direction: column; gap: 2px; font-size: 12px; min-width: 0; }
+        #picks-table:not(.settled) td:nth-child(7) { grid-area: fairev; }
+        #picks-table:not(.settled) td:nth-child(8) { grid-area: edge; }
+        #picks-table:not(.settled) td:nth-child(9) { grid-area: conf; display: block; white-space: nowrap; }
+        #picks-table:not(.settled) td:nth-child(10) { grid-area: clv; }
+        #picks-table:not(.settled) td:nth-child(11) { grid-area: status; align-items: flex-end; justify-content: flex-start; }
         #picks-table:not(.settled) td:nth-child(7),
         #picks-table:not(.settled) td:nth-child(8),
-        #picks-table:not(.settled) td:nth-child(9) {
-          margin-top: 7px;
-          padding-top: 7px;
-          border-top: 1px solid var(--line);
-        }
-        /* stacked-stat labels: tiny, muted, uppercase, above each value. */
+        #picks-table:not(.settled) td:nth-child(9) { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); }
         #picks-table:not(.settled) td:nth-child(7)::before,
         #picks-table:not(.settled) td:nth-child(8)::before,
         #picks-table:not(.settled) td:nth-child(9)::before,
-        #picks-table:not(.settled) td:nth-child(10)::before {
-          display: block;
-          color: var(--faint);
-          font-size: 8.5px;
-          font-weight: 700;
-          letter-spacing: 0.1em;
-          text-transform: uppercase;
-        }
-        #picks-table:not(.settled) td:nth-child(7)::before {
-          content: "Fair / EV";
-        }
-        #picks-table:not(.settled) td:nth-child(8)::before {
-          content: "Edge";
-        }
-        #picks-table:not(.settled) td:nth-child(9)::before {
-          content: "Conf";
-        }
-        #picks-table:not(.settled) td:nth-child(10)::before {
-          content: "CLV";
-        }
-        #picks-table:not(.settled) td:nth-child(7) small {
-          font-size: 10px;
-        }
-        /* drop the tiny edge sparkline on mobile — the % is the signal. */
-        #picks-table:not(.settled) td:nth-child(8) .bar {
-          display: none;
-        }
-        #picks-table:not(.settled) td:nth-child(8) .edgecell {
-          min-width: 0;
-        }
-        /* the settle button (appears on past-kickoff open picks) sits in the
-           Status cell — don't force it onto its own row. */
-        #picks-table:not(.settled) td button {
-          margin-top: 0;
-        }
+        #picks-table:not(.settled) td:nth-child(10)::before { display: block; color: var(--faint); font-size: 8.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+        #picks-table:not(.settled) td:nth-child(7)::before { content: "Fair / EV"; }
+        #picks-table:not(.settled) td:nth-child(8)::before { content: "Edge"; }
+        #picks-table:not(.settled) td:nth-child(9)::before { content: "Conf"; }
+        #picks-table:not(.settled) td:nth-child(10)::before { content: "CLV"; }
+        #picks-table:not(.settled) td:nth-child(7) small { font-size: 10px; }
+        #picks-table:not(.settled) td:nth-child(8) .bar { display: none; }
+        #picks-table:not(.settled) td:nth-child(8) .edgecell { min-width: 0; }
+        #picks-table:not(.settled) td button { margin-top: 0; }
+        .matchwrap, .gameswrap .matchwrap, .selwrap, td.bookcell { max-width: none; }
+        td button { width: auto; margin-top: 4px; }
+      }
 
-        .matchwrap,
-        .gameswrap .matchwrap,
-        .selwrap,
-        td.bookcell,
-        .gameswrap .marketscell {
-          max-width: none;
-        }
-        td button {
-          width: auto;
-          margin-top: 4px;
-        }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
       }
     </style>
+  
   </head>
   <body>
-    <header>
-      <span class="brand">PICKS&nbsp;TERMINAL</span>
-      <span class="live" id="eng-badge"
-        ><i aria-hidden="true"></i><span id="eng-label">POLLING</span></span
-      >
-      <button id="logout" class="section-toggle" type="button">Log out</button>
-    </header>
+    <div class="app">
+      <!-- top status strip: identity + engine liveness + poll/window/ingestion chips + log out -->
+      <header class="topbar">
+        <div class="ident">
+          <span class="brand">PICKS&nbsp;TERMINAL</span>
+        </div>
+        <span class="live" id="eng-badge"><i aria-hidden="true"></i><span id="eng-label">POLLING</span></span>
+        <div class="statusbar" role="status">
+          <span class="chip" id="chip-poll">poll: —</span>
+          <span class="chip" id="chip-window">verified ≤ 45m</span>
+          <span class="chip" id="chip-sports">football — · nba — · tennis —</span>
+          <span class="chipset" id="ing-chips"></span>
+          <span class="chip" id="chip-deps" style="display: none"></span>
+        </div>
+        <button id="logout" class="section-toggle" type="button">Log out</button>
+      </header>
 
-    <!-- compact status bar: poll age · verified window · ingestion · deps -->
-    <div class="statusbar" role="status">
-      <span class="chip" id="chip-poll">poll: —</span>
-      <span class="chip" id="chip-window">verified ≤ 45m</span>
-      <span class="chip" id="chip-sports">football — · nba — · tennis —</span>
-      <span class="chipset" id="ing-chips"></span>
-      <span class="chip" id="chip-deps" style="display: none"></span>
-    </div>
+      <!-- unmissable full-width banner — ONLY when /picks itself fails -->
+      <div class="banner" id="offline-banner" style="display: none"></div>
 
-    <!-- unmissable full-width banner — ONLY when /picks itself fails -->
-    <div class="banner" id="offline-banner" style="display: none"></div>
+      <!-- 1) PROOF OF EDGE — CLV hero (stake-wtd) + KPI tiles, premium-scoped -->
+      <section class="proof">
+        <div class="nav-label">Proof of edge</div>
+        <div class="proof-row">
+          <div class="card hero" id="card-swclv" data-flag="STALE">
+            <div class="v" id="c-swclv">—</div>
+            <div class="k">Stake-wtd CLV (premium settled)</div>
+          </div>
+          <div class="cards">
+            <div class="card" id="card-clv" data-flag="STALE">
+              <div class="v" id="c-clv">—</div>
+              <div class="k" id="c-clv-k">Beat close (premium)</div>
+            </div>
+            <div class="card" id="card-pnl" data-flag="STALE">
+              <div class="v" id="c-pnl">—</div>
+              <div class="k">P&amp;L / ROI (premium settled)</div>
+            </div>
+            <div class="card" id="card-open" data-flag="STALE">
+              <div class="v" id="c-open">—</div>
+              <div class="k" id="c-open-k">Open picks (premium, verified)</div>
+            </div>
+            <div class="card" id="card-edge" data-flag="STALE">
+              <div class="v" id="c-edge">—</div>
+              <div class="k">Avg live edge (premium open)</div>
+            </div>
+            <div class="card" id="card-settled" data-flag="STALE">
+              <div class="v" id="c-settled">—</div>
+              <div class="k">Settled (premium, all time)</div>
+            </div>
+            <div class="card" id="card-record" data-flag="STALE" title="Win–Loss–(Push+Void) over settled premium picks. The (½: …) count is half-results from quarter-line Asian handicaps — bets where half your stake won and half pushed (half-won), or half lost (half-lost), so the bet is neither a full win nor a full loss. It only appears when you have some.">
+              <div class="v" id="c-record">—</div>
+              <div class="k">Record W-L-P/V (premium)</div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-    <!-- summary cards are PREMIUM-tier scoped (captions say so): the volume
-         shadow tier must never distort the headline numbers -->
-    <div class="cards">
-      <div class="card" id="card-open" data-flag="STALE">
-        <div class="v" id="c-open">—</div>
-        <div class="k" id="c-open-k">Open picks (premium, verified)</div>
+      <!-- 2) VIEW (four pick states, with live counts) + tier / search / refresh -->
+      <div class="nav-label">View</div>
+      <div class="toolbar">
+        <div class="segmented" id="status-tabs" role="tablist" aria-label="Pick status">
+          <button type="button" role="tab" data-status="live" aria-selected="true">LIVE</button>
+          <button type="button" role="tab" data-status="unverified" aria-selected="false">UNVERIFIED</button>
+          <button type="button" role="tab" data-status="closed" aria-selected="false">CLOSED</button>
+          <button type="button" role="tab" data-status="settled" aria-selected="false">SETTLED</button>
+        </div>
+        <div class="toolbar-filters">
+          <select id="f-tier" aria-label="Filter picks by tier">
+            <option value="premium" selected>PREMIUM</option>
+            <option value="volume">VOLUME</option>
+            <option value="">ALL TIERS</option>
+          </select>
+          <input type="search" id="f-search" aria-label="Search picks" placeholder="search match / team / book / league / market…">
+          <button id="refresh">Refresh</button>
+          <span class="stamp" id="stamp">loading…</span>
+        </div>
       </div>
-      <div class="card" id="card-edge" data-flag="STALE">
-        <div class="v" id="c-edge">—</div>
-        <div class="k">Avg live edge (premium open)</div>
-      </div>
-      <div class="card" id="card-clv" data-flag="STALE">
-        <div class="v" id="c-clv">—</div>
-        <div class="k" id="c-clv-k">Beat close (premium)</div>
-      </div>
-      <div class="card" id="card-settled" data-flag="STALE">
-        <div class="v" id="c-settled">—</div>
-        <div class="k">Settled (premium, all time)</div>
-      </div>
-      <div class="card" id="card-record" data-flag="STALE">
-        <div class="v" id="c-record">—</div>
-        <div class="k">Record W-L-P/V (premium)</div>
-      </div>
-      <div class="card" id="card-pnl" data-flag="STALE">
-        <div class="v" id="c-pnl">—</div>
-        <div class="k">P&amp;L / ROI (premium settled)</div>
-      </div>
-      <div class="card" id="card-swclv" data-flag="STALE">
-        <div class="v" id="c-swclv">—</div>
-        <div class="k">Stake-wtd CLV (premium settled)</div>
-      </div>
-    </div>
 
-    <!-- Live evidence: CLV/ROI over settled picks stratified by ML score
-         bucket / tier / anchor — the accumulating instrument for the
-         VALUE_ML_FILTER flip decision. Hidden until /performance serves the
-         section; strata under n=50 CLV observations show an explicit
-         insufficient-data state instead of point estimates. -->
-    <div class="evpanel" id="evidence-panel" style="display: none">
-      <div class="evtitle" id="evidence-title">Live evidence</div>
-      <table class="evtable" aria-label="Live evidence by stratum">
-        <thead>
-          <tr>
-            <th>stratum</th>
-            <th>n</th>
-            <th>n CLV</th>
-            <th>sw CLV</th>
-            <th>beat close</th>
-            <th>ROI</th>
-          </tr>
-        </thead>
-        <tbody id="evidence-rows"></tbody>
-      </table>
-    </div>
-
-    <div class="games-head">
-      <div class="evtitle">Available games</div>
-      <span class="stamp" id="games-count">loading…</span>
-      <button
-        id="toggle-games"
-        class="section-toggle"
-        type="button"
-        aria-expanded="false"
-        aria-controls="games-panel"
-      >
-        Show
-      </button>
-    </div>
-    <!-- purpose line set via textContent in JS (no untrusted markup) -->
-    <div id="games-panel" hidden>
-      <div class="controls">
-        <select id="f-game-sport" aria-label="Filter games by sport">
-          <option value="">ALL SPORTS</option>
-          <option value="soccer">FOOTBALL</option>
-          <option value="basketball">NBA</option>
-          <option value="tennis">TENNIS</option>
-        </select>
-        <input
-          type="search"
-          id="f-game-search"
-          aria-label="Search games"
-          placeholder="search match / team / league / market…"
-        />
-      </div>
-      <div class="tablewrap gameswrap">
-        <table id="games-table">
+      <!-- 3) full-width picks table -->
+      <div class="tablewrap">
+        <table id="picks-table">
           <thead>
-            <tr>
+            <tr id="picks-head">
               <th>Kickoff</th>
               <th>Match</th>
-              <th>League</th>
-              <th>Sport</th>
-              <th>Coverage</th>
+              <th>Market</th>
+              <th>Pick</th>
+              <th>Book</th>
+              <th>Odds</th>
+              <th>Fair&nbsp;/&nbsp;EV</th>
+              <th>Edge</th>
+              <th>Confidence</th>
+              <th>CLV</th>
+              <th>Status</th>
             </tr>
           </thead>
-          <tbody id="game-rows">
-            <tr>
-              <td colspan="5"><div class="skelbar"></div></td>
-            </tr>
-            <tr>
-              <td colspan="5"><div class="skelbar"></div></td>
-            </tr>
+          <tbody id="rows">
+            <tr><td colspan="11"><div class="skelbar"></div></td></tr>
+            <tr><td colspan="11"><div class="skelbar"></div></td></tr>
+            <tr><td colspan="11"><div class="skelbar"></div></td></tr>
           </tbody>
         </table>
       </div>
-    </div>
-
-    <!-- Pinnacle archive coverage: strict cross-source match rate of picks to
-         the captured Pinnacle sharp-close archive (ADR-0014). The readiness
-         dial for CLV_USE_PINNACLE_ARCHIVE — shadow-only, changes NO pick.
-         Lazy-loaded on expand (the query scans picks + archive) so it never
-         taxes the 60s refresh loop. -->
-    <div class="games-head">
-      <div class="evtitle">Pinnacle archive coverage</div>
-      <span class="stamp" id="archive-count">—</span>
-      <button
-        id="toggle-archive"
-        class="section-toggle"
-        type="button"
-        aria-expanded="false"
-        aria-controls="archive-panel"
-      >
-        Show
-      </button>
-    </div>
-    <div id="archive-panel" hidden>
-      <div class="sub" id="archive-purpose"></div>
-      <div class="tablewrap gameswrap">
-        <table id="archive-table">
-          <thead>
-            <tr>
-              <th>Sport</th>
-              <th>Matched</th>
-              <th>Rate</th>
-            </tr>
-          </thead>
-          <tbody id="archive-rows">
-            <tr>
-              <td colspan="3"><div class="skelbar"></div></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="controls">
-      <!-- segmented status control (replaces the old status <select>):
-           LIVE = verified open · UNVERIFIED = open awaiting re-price ·
-           SETTLED = results recorded. Default tab = LIVE. -->
-      <div
-        class="segmented"
-        id="status-tabs"
-        role="tablist"
-        aria-label="Pick status"
-      >
-        <button
-          type="button"
-          role="tab"
-          data-status="live"
-          aria-selected="true"
-        >
-          LIVE
-        </button>
-        <button
-          type="button"
-          role="tab"
-          data-status="unverified"
-          aria-selected="false"
-        >
-          UNVERIFIED
-        </button>
-        <button
-          type="button"
-          role="tab"
-          data-status="closed"
-          aria-selected="false"
-        >
-          CLOSED
-        </button>
-        <button
-          type="button"
-          role="tab"
-          data-status="settled"
-          aria-selected="false"
-        >
-          SETTLED
-        </button>
-      </div>
-      <!-- tier filter: PREMIUM is the alerted, exposure-capped tier and the
-           default view; VOLUME is the muted CLV-evidence shadow tier -->
-      <select id="f-tier" aria-label="Filter picks by tier">
-        <option value="premium" selected>PREMIUM</option>
-        <option value="volume">VOLUME</option>
-        <option value="">ALL TIERS</option>
-      </select>
-      <input
-        type="search"
-        id="f-search"
-        aria-label="Search picks"
-        placeholder="search match / team / book / league / market…"
-      />
-      <button id="refresh">Refresh</button>
-      <span class="stamp" id="stamp">loading…</span>
-    </div>
-
-    <div class="tablewrap">
-      <table id="picks-table">
-        <thead>
-          <!-- LIVE/UNVERIFIED header (11 cols). render() swaps this row's cells
-               for the 8-col SETTLED set so desktop header labels track the body
-               column set (mobile uses per-cell data-label and is unaffected). -->
-          <tr id="picks-head">
-            <th>Kickoff</th>
-            <th>Match</th>
-            <th>Market</th>
-            <th>Pick</th>
-            <th>Book</th>
-            <th>Odds</th>
-            <th>Fair&nbsp;/&nbsp;EV</th>
-            <th>Edge</th>
-            <th>Confidence</th>
-            <th>CLV</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody id="rows">
-          <!-- loading skeleton — replaced by the first render() -->
-          <tr>
-            <td colspan="11"><div class="skelbar"></div></td>
-          </tr>
-          <tr>
-            <td colspan="11"><div class="skelbar"></div></td>
-          </tr>
-          <tr>
-            <td colspan="11"><div class="skelbar"></div></td>
-          </tr>
-        </tbody>
-      </table>
-      <!-- CLV scorecard relocated BELOW the picks list (operator request) — the
-           proof-of-edge summary on the CLOSED tab: % beat close + mean CLV.
-           JS-populated, text only, never markup. -->
+      <!-- CLV scorecard — proof-of-edge ledger headline (CLOSED tab only) -->
       <div class="sub" id="clv-scorecard" style="display: none"></div>
-    </div>
 
-    <!-- Status + CLV legend. picksFirst() relocates this node to the page
-         bottom, below the Pinnacle archive coverage section. JS-populated
-         (fillStaticCopy) — plain text, never markup. Carries the static
-         picks-only / no-profit safety framing (the old footer banner is gone,
-         this is now the single home for it). -->
-    <div class="sub" id="picks-legend">
-      <b>Status</b><span id="legend-status"></span> &nbsp;·&nbsp; <b>CLV</b
-      ><span id="legend-clv"></span>
+      <!-- 4) FULL-WIDTH SECONDARY: evidence · games · archive (collapsed) -->
+      <section class="panels">
+        <div class="evpanel" id="evidence-panel" style="display: none">
+          <div class="evtitle" id="evidence-title">Live evidence</div>
+          <!-- plain-English guide to the stratified CLV table below -->
+          <div class="evhelp">
+            How to read this: each row is one <b>slice</b> of your settled picks (by
+            ML-score bucket, by tier, or by fair-value anchor). <b>n</b> = picks in the
+            slice · <b>n&nbsp;CLV</b> = how many have a closing-line grade · <b>sw&nbsp;CLV</b>
+            = stake-weighted closing-line value (your price vs the de-vigged close) ·
+            <b>beat&nbsp;close</b> = share that beat the closing line · <b>ROI</b> =
+            return on those picks. A slice with fewer than 50 graded picks shows
+            “insufficient data” instead of a noisy estimate.
+          </div>
+          <table class="evtable" aria-label="Live evidence by stratum">
+            <thead>
+              <tr>
+                <th>stratum</th>
+                <th>n</th>
+                <th>n CLV</th>
+                <th>sw CLV</th>
+                <th>beat close</th>
+                <th>ROI</th>
+              </tr>
+            </thead>
+            <tbody id="evidence-rows"></tbody>
+          </table>
+        </div>
+
+        <div class="games-head">
+          <div class="evtitle">Available games</div>
+          <span class="stamp" id="games-count">loading…</span>
+          <button id="toggle-games" class="section-toggle" type="button" aria-expanded="false" aria-controls="games-panel">Show</button>
+        </div>
+        <div id="games-panel" hidden="">
+          <div class="controls">
+            <select id="f-game-sport" aria-label="Filter games by sport">
+              <option value="">ALL SPORTS</option>
+              <option value="soccer">FOOTBALL</option>
+              <option value="basketball">NBA</option>
+              <option value="tennis">TENNIS</option>
+            </select>
+            <input type="search" id="f-game-search" aria-label="Search games" placeholder="search match / team / league / market…">
+          </div>
+          <div class="tablewrap gameswrap">
+            <table id="games-table">
+              <thead>
+                <tr><th>Kickoff</th><th>Match</th><th>League</th><th>Sport</th><th>Coverage</th></tr>
+              </thead>
+              <tbody id="game-rows">
+                <tr><td colspan="5"><div class="skelbar"></div></td></tr>
+                <tr><td colspan="5"><div class="skelbar"></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="games-head">
+          <div class="evtitle">Pinnacle archive coverage</div>
+          <span class="stamp" id="archive-count">—</span>
+          <button id="toggle-archive" class="section-toggle" type="button" aria-expanded="false" aria-controls="archive-panel">Show</button>
+        </div>
+        <div id="archive-panel" hidden="">
+          <div class="sub" id="archive-purpose"></div>
+          <div class="tablewrap gameswrap">
+            <table id="archive-table">
+              <thead>
+                <tr><th>Sport</th><th>Matched</th><th>Rate</th></tr>
+              </thead>
+              <tbody id="archive-rows">
+                <tr><td colspan="3"><div class="skelbar"></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Status + CLV legend — LAST (no traditional footer). The single home
+           for the picks-only / no-profit-guarantee safety framing. -->
+      <div class="sub legend" id="picks-legend">
+        <b>Status</b><span id="legend-status"></span> &nbsp;·&nbsp; <b>CLV</b><span id="legend-clv"></span>
+      </div>
     </div>
 
     <script>
@@ -2929,7 +2179,7 @@
           "Live evidence — " +
           ev.n_settled +
           " settled picks · stake-wtd CLV by stratum · instrument for the " +
-          "VALUE_ML_FILTER flip (evidence, not a profit promise)";
+          "VALUE_ML_FILTER flip";
         const SCORE_LABELS = {
           score_ge_q:
             "ML score ≥ q*" +
@@ -3580,7 +2830,7 @@
           "until kickoff. Consistently positive CLV is the only " +
           "proof of real edge — not a profit guarantee. " +
           "★ = model confidence in the EDGE, not your chance to win. " +
-          "Decision support only: you review and place every bet yourself — " +
+          "You review and place every bet yourself — " +
           "the system places none.";
       }
       fillStaticCopy();
@@ -3613,5 +2863,7 @@
       load();
       setInterval(load, 60000);
     </script>
-  </body>
-</html>
+    
+  
+
+</body></html>

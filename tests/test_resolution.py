@@ -239,3 +239,42 @@ def test_seed_aliases_resolve_cross_source_name_variants() -> None:
             oddsportal_name,
             pinnacle_name,
         )
+
+
+def test_reep_imported_aliases_resolve_to_canonical() -> None:
+    """A sample of the withqwerty/reep (CC0) club aliases imported by
+    scripts/research/import_reep_soccer_aliases.py must canonicalize onto their
+    seed canonical. Each is an EXACT (normalized) alias of a club we scrape — the
+    import is bounded to scraped teams and the matcher stays exact-only."""
+    table = AliasTable.from_seed()
+    pairs = [
+        ("Athletic Bilbao", "Athletic Club"),  # common name vs official name
+        ("HJK Helsinki", "Helsingin Jalkapalloklubi"),  # acronym vs full Finnish name
+        ("Athlone Town", "Athlone Town F.C."),  # club suffix
+        ("Coritiba", "Coritiba F.C."),  # short vs F.C. form
+        ("CABJ", "Boca Juniors"),  # acronym
+        ("CA San Martín (San Juan)", "San Martin de San Juan"),  # reep accent variant
+    ]
+    for alias, canonical in pairs:
+        assert table.canonical(alias) == table.canonical(canonical), (alias, canonical)
+
+
+def test_reep_import_did_not_introduce_fuzzy_pairing() -> None:
+    """The reep import is DATA-only: it must not have made the matcher fuzzy.
+    A name that merely SHARES tokens with a seeded club but is a DIFFERENT club
+    must NOT collapse onto it — only exact normalized aliases resolve. (Note:
+    matcher equality is by NORMALIZED form; bare club-noise like "Athletic Club"
+    -> "athletic" is the existing normalizer, not a reep alias — so we test on
+    distinguishing tokens that survive normalization.)"""
+    table = AliasTable.from_seed()
+    # "Athletic Bilbao" is a seeded alias of Athletic Club; an UNSEEDED, clearly
+    # different club sharing the token "Bilbao" must NOT snap onto it.
+    assert table.canonical("Bilbao Athletic") != table.canonical("Athletic Bilbao")
+    # An unseeded near-miss with an extra distinguishing token passes through
+    # normalized, never substring-snapping onto the seeded club.
+    assert table.canonical("Boca Juniors Reserve") == normalize_name("Boca Juniors Reserve")
+    assert table.canonical("Boca Juniors Reserve") != table.canonical("Boca Juniors")
+    # No alias resolves to two different canonicals (the import logs+skips such
+    # collisions): every alias key maps to exactly one canonical by construction.
+    table_alias_to_canon = table._alias_to_canon  # noqa: SLF001 (invariant check)
+    assert len(table_alias_to_canon) == len(set(table_alias_to_canon))

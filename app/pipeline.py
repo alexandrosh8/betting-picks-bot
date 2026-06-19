@@ -143,7 +143,7 @@ def _sport_label(sport_key: str) -> str:
     if sport_key.startswith("soccer"):
         return "Football"
     if sport_key.startswith("basketball"):
-        return "NBA"
+        return "Basketball"  # ALL basketball scraped, not NBA-only
     if sport_key.startswith("tennis"):
         return "Tennis"
     if sport_key.startswith("american_football"):

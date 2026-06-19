@@ -136,6 +136,22 @@ def fractional_to_decimal(fraction: str) -> float | None:
     return decimal_odds if decimal_odds > 1.0 else None
 
 
+_DECIMAL_RE = re.compile(r"^\d+(?:\.\d+)?$")
+
+
+def parse_odds_value(raw: str) -> float | None:
+    """Parse a Betfair BACK price in EITHER format OddsPortal may render — the
+    odds format is a per-visitor COOKIE, so a fresh scraper context gets decimal
+    OR fractional unpredictably. Decimal ("6.51", "1.66") is used directly;
+    fractional ("28/25", "3/1") goes through num/den + 1. Returns None for
+    anything unparseable or <= 1.0."""
+    token = raw.strip()
+    if _DECIMAL_RE.match(token):
+        value = float(token)
+        return value if value > 1.0 else None
+    return fractional_to_decimal(token)
+
+
 def parse_liquidity(token: str) -> float | None:
     """Parse a parenthesised £ liquidity token "(9052)" / "(11,317)" -> float.
     Returns None for anything that is not a parenthesised number."""
@@ -176,7 +192,7 @@ def extract_back_quotes(
     """
     quotes: list[BackQuote] = []
     for designation, (raw_odds, liquidity) in zip(outcomes, cells, strict=False):
-        decimal_odds = fractional_to_decimal(raw_odds)
+        decimal_odds = parse_odds_value(raw_odds)
         if decimal_odds is None:
             continue
         if liquidity is None or liquidity < min_liquidity:
@@ -260,35 +276,56 @@ _ROW_EXTRACT_JS = r"""
   // Find the Betfair logo img (anchor) and, when present, its testid row.
   let img = null;
   scope.querySelectorAll('img[alt]').forEach(i => {
-    if (!img && (i.getAttribute('alt') || '').toLowerCase() === altLower) img = i;
+    if (img) return;
+    if ((i.getAttribute('alt') || '').toLowerCase() === altLower) img = i;
   });
   let row = null;
   scope.querySelectorAll('[data-testid="' + rowId + '"]').forEach(r => {
+    if (row) return;
     const ri = r.querySelector('img[alt]');
-    if (!row && ri && (ri.getAttribute('alt') || '').toLowerCase() === altLower) row = r;
+    if (!ri) return;
+    if ((ri.getAttribute('alt') || '').toLowerCase() === altLower) row = r;
   });
   // Nothing identifies a Betfair Exchange row on this page -> expected absence.
-  if (!row && !img) return null;
-  const isOdds = (t) => /^\d+\s*\/\s*\d+$/.test(t) || /^\(\d[\d,]*\)$/.test(t);
-  const leafOdds = (el) => {
-    const out = [];
-    el.querySelectorAll('*').forEach(e => {
-      if (e.children.length > 0) return;  // leaf elements only
-      const t = (e.textContent || '').trim();
-      if (isOdds(t)) out.push(t);
-    });
-    return out;
-  };
-  // Climb from the lowest available anchor (prefer the testid row so the start
-  // level matches the documented chain; fall back to the img) up to maxUp
-  // ancestors. Stop at the NEAREST ancestor yielding >= 2 odds tokens.
+  if (!row) { if (!img) return null; }
+  // The odds VALUE is decimal ("6.51") or fractional ("28/25") — OddsPortal's
+  // odds format is a per-visitor cookie, so accept BOTH. Liquidity is "(1838)".
+  const isOdd = (t) => /^\d+(?:\.\d+)?$/.test(t) || /^\d+\s*\/\s*\d+$/.test(t);
+  const isLiq = (t) => /^\(\d[\d,]*\)$/.test(t);
+  // The BACK/LAY prices live in [data-testid="odd-container"] cells in a SIBLING
+  // block of the testid row (the row itself holds only the logo + Back/Lay
+  // header + the CLAIM BONUS promo). Climb from the Betfair anchor to the
+  // nearest ancestor holding those cells, stopping early so we never reach a
+  // container with OTHER books' exchange rows. payout-container cells are
+  // excluded by the odd-container testid filter.
   let node = row || img;
-  for (let up = 0; node && up <= maxUp; up++) {
-    const tokens = leafOdds(node);
-    if (tokens.length >= 2) return tokens;
+  let cells = [];
+  for (let up = 0; up <= maxUp; up++) {
+    if (!node) break;
+    const found = node.querySelectorAll('[data-testid="odd-container"]');
+    if (found.length >= 2) { cells = Array.prototype.slice.call(found); break; }
     node = node.parentElement;
   }
-  return null;  // climbed maxUp levels without finding odds (closed market)
+  if (cells.length < 2) return null;  // no price cells (closed/unhydrated market)
+  // Per cell: ONE odds value + ONE liquidity, as a flat [odd, liq, odd, liq...]
+  // list in DOM order (BACK triple first, then LAY). The value is duplicated in
+  // a hidden <a> and a <p> (responsive show/hide) — take the FIRST match only,
+  // so the pairing is never scrambled by duplicates. extract_back_quotes keeps
+  // the leading len(outcomes) cells as BACK and discards the LAY tail.
+  const out = [];
+  for (let c = 0; c < cells.length; c++) {
+    let odd = null;
+    let liq = null;
+    cells[c].querySelectorAll('*').forEach(e => {
+      if (e.children.length > 0) return;  // leaf elements only
+      const t = (e.textContent || '').trim();
+      if (odd === null) { if (isOdd(t)) odd = t; }
+      if (liq === null) { if (isLiq(t)) liq = t; }
+    });
+    if (odd !== null) { out.push(odd); if (liq !== null) out.push(liq); }
+  }
+  if (out.length < 2) return null;
+  return out;
 }
 """
 
@@ -302,7 +339,7 @@ def _pair_tokens(tokens: Sequence[str]) -> list[tuple[str, float | None]]:
     n = len(tokens)
     while idx < n:
         token = tokens[idx]
-        if _FRACTION_RE.match(token.strip()):
+        if _DECIMAL_RE.match(token.strip()) or _FRACTION_RE.match(token.strip()):
             liquidity: float | None = None
             if idx + 1 < n:
                 liquidity = parse_liquidity(tokens[idx + 1])

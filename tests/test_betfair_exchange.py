@@ -322,39 +322,96 @@ async def test_reader_proxy_failover_then_raises() -> None:
 #     -> DIV  the betting-exchanges-table-row  logo+"Back"/"Lay"     (NO odds)
 #     -> DIV "w-full"                          "...Back Lay"         (NO odds)
 #     -> DIV "flex"  BACK triple then LAY triple                     (THE ODDS)
-# The odds are leaves ~2 levels ABOVE the testid'd row, so the extractor must
-# walk up and stop at the nearest ancestor holding >= 2 odds tokens.
+# The odds are odd-container cells ~2 levels ABOVE the testid'd row, so the
+# extractor walks up and stops at the nearest ancestor holding >= 2 of them.
 #
 # This test touches a real headless browser, so it skips cleanly when Playwright
 # or its Chromium build is unavailable (same pattern as the DB tests skipping
 # without compose Postgres) — it is NOT part of the network-free core path.
 # --------------------------------------------------------------------------- #
 
+
 # Odds container holds the BACK triple (home/draw/away) then the LAY triple, each
 # a fraction immediately followed by its parenthesised £ liquidity, with overround
 # %s interleaved (must be dropped). Mirrors the live row text the user captured.
-_BACK_LAY_ODDS_HTML = (
-    '<div class="flex">'
-    "<span>Back</span><span>Lay</span>"
-    "<span>28/25</span><span>(9052)</span>"  # BACK home -> 2.12
-    "<span>5/2</span><span>(3307)</span>"  # BACK draw -> 3.5
-    "<span>3/1</span><span>(1307)</span>"  # BACK away -> 4.0
-    "<span>99.3%</span>"  # back overround (dropped)
-    "<span>57/50</span><span>(11317)</span>"  # LAY home (discarded)
-    "<span>51/20</span><span>(41)</span>"  # LAY draw (discarded)
-    "<span>31/10</span><span>(2683)</span>"  # LAY away (discarded)
-    "<span>100</span>"  # lay overround (dropped)
-    "</div>"
+def _odd_cell(value: str, liq: str) -> str:
+    """One [data-testid="odd-container"] price cell, mirroring the live DOM: the
+    odds VALUE duplicated in a hidden <a> and a visible <p> (responsive
+    show/hide), then the parenthesised £ liquidity as a sibling <div>."""
+    return (
+        '<div data-testid="odd-container">'
+        '<div><div class="flex flex-col items-center">'
+        '<div class="flex flex-row items-center">'
+        f'<a class="hidden underline min-mt:!flex" href="/betslip">{value}</a>'
+        f'<p class="min-mt:!hidden">{value}</p>'
+        "</div>"
+        f'<div class="font-main text-[10px]">{liq}</div>'
+        "</div></div></div>"
+    )
+
+
+def _payout_cell(pct: str) -> str:
+    """A [data-testid="payout-container"] cell — the overround %, which the
+    odd-container-scoped extractor must NEVER pick up as an odds value."""
+    return f'<div data-testid="payout-container"><div><p>{pct}</p></div></div>'
+
+
+def _scroll_el(back: str, lay: str) -> str:
+    """The scroll-el odds block: a BACK row then a LAY row, each three
+    odd-container cells followed by a payout-container, exactly as OddsPortal
+    renders the Betfair exchange row in a SIBLING of the testid row."""
+    return (
+        '<div class="scroll-el flex flex-col"><div class="flex flex-col">'
+        f'<div class="flex h-[50px] border-b">{back}</div>'
+        f'<div class="flex h-[50px]">{lay}</div>'
+        "</div></div>"
+    )
+
+
+# FRACTIONAL render (the UK default a fresh scraper context gets): BACK
+# home/draw/away 28/25, 5/2, 3/1 then the LAY triple, each + £ liquidity. The
+# odd-container-scoped extractor returns the flat _LIVE_ROW_TOKENS sequence.
+_BACK_LAY_ODDS_HTML = _scroll_el(
+    back=(
+        _odd_cell("28/25", "(9052)")
+        + _odd_cell("5/2", "(3307)")
+        + _odd_cell("3/1", "(1307)")
+        + _payout_cell("99.3%")
+    ),
+    lay=(
+        _odd_cell("57/50", "(11317)")
+        + _odd_cell("51/20", "(41)")
+        + _odd_cell("31/10", "(2683)")
+        + _payout_cell("100%")
+    ),
+)
+
+# DECIMAL render (the format the user's logged-in browser served — odds format
+# is a per-visitor cookie). Same structure, decimal values: BACK 6.51/3.61/1.66
+# then LAY 7.32/3.95/1.74. The extractor must read these directly via
+# parse_odds_value, where the old fractional-only reader captured NOTHING.
+_DECIMAL_ODDS_HTML = _scroll_el(
+    back=(
+        _odd_cell("6.51", "(1838)")
+        + _odd_cell("3.61", "(29682)")
+        + _odd_cell("1.66", "(7274)")
+        + _payout_cell("96.7%")
+    ),
+    lay=(
+        _odd_cell("7.32", "(2057)")
+        + _odd_cell("3.95", "(2264)")
+        + _odd_cell("1.74", "(17786)")
+        + _payout_cell("103.5%")
+    ),
 )
 
 
-def _exchange_section_html(*, with_odds: bool) -> str:
+def _exchange_section_html(odds_block: str = "") -> str:
     """A betting-exchanges section whose testid row carries ONLY the Betfair
-    logo + Back/Lay header + "CLAIM BONUS" promo (no odds). When ``with_odds``
-    the BACK/LAY odds container sits as a SIBLING ~2 levels ABOVE that row,
-    exactly as the live DOM renders. When not, no odds appear anywhere (a closed
-    / illiquid market). The logo img[alt] identifies the Betfair row in both."""
-    odds_block = _BACK_LAY_ODDS_HTML if with_odds else ""
+    logo + Back/Lay header + "CLAIM BONUS" promo (no odds). ``odds_block`` (the
+    scroll-el odd-container cells) sits as a SIBLING ~2 levels ABOVE that row,
+    exactly as the live DOM renders; "" means no odds anywhere (a closed /
+    illiquid market). The logo img[alt] identifies the Betfair row in both."""
     return f"""
     <div data-testid="{_SECTION_TESTID}">
       <div class="w-full">
@@ -408,7 +465,7 @@ async def _evaluate_row_extract(html: str) -> list[str] | None:
 async def test_row_extract_js_walks_up_to_ancestor_odds() -> None:
     # The odds live ~2 levels ABOVE the testid row; the extractor must climb to
     # them and return the BACK triple then LAY triple (overround %s dropped).
-    tokens = await _evaluate_row_extract(_exchange_section_html(with_odds=True))
+    tokens = await _evaluate_row_extract(_exchange_section_html(_BACK_LAY_ODDS_HTML))
     assert tokens == list(_LIVE_ROW_TOKENS)
 
     # tokens -> cells -> gated BACK quotes -> snapshots: BACK 2.12/3.5/4.0 with
@@ -432,11 +489,44 @@ async def test_row_extract_js_closed_market_returns_none() -> None:
     # The Betfair row renders (logo + Back/Lay header) but NO odds hydrate
     # anywhere — a closed / illiquid market. The walk-up finds nothing and the
     # extractor returns None; the reader maps that to [] (an expected gap).
-    tokens = await _evaluate_row_extract(_exchange_section_html(with_odds=False))
+    tokens = await _evaluate_row_extract(_exchange_section_html(""))
     assert tokens is None
 
     reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(tokens))
     assert await reader.read_back_quotes("https://op/closed") == []
+
+
+@pytest.mark.asyncio
+async def test_row_extract_js_decimal_format() -> None:
+    # OddsPortal's odds format is a per-visitor cookie: the SAME row can render
+    # DECIMAL ("6.51") instead of fractional. The reader must read both — the old
+    # fractional-only extractor captured NOTHING on a decimal page (the real
+    # 0-capture bug). BACK home/draw/away = 6.51/3.61/1.66.
+    tokens = await _evaluate_row_extract(_exchange_section_html(_DECIMAL_ODDS_HTML))
+    assert tokens == [
+        "6.51",
+        "(1838)",
+        "3.61",
+        "(29682)",
+        "1.66",
+        "(7274)",
+        "7.32",
+        "(2057)",
+        "3.95",
+        "(2264)",
+        "1.74",
+        "(17786)",
+    ]
+    cells = _pair_tokens(tokens)
+    quotes = extract_back_quotes(cells, min_liquidity=0.0)
+    assert [q.designation for q in quotes] == ["home", "draw", "away"]
+    assert [q.decimal_odds for q in quotes] == [6.51, 3.61, 1.66]
+    assert [q.liquidity for q in quotes] == [1838.0, 29682.0, 7274.0]
+    # The LAY decimal prices (7.32/3.95/1.74) are discarded.
+    snaps = back_quotes_to_snapshots("https://op/match", quotes, _teams(), now=NOW)
+    assert [s.decimal_odds for s in snaps] == [6.51, 3.61, 1.66]
+    for lay_dec in (7.32, 3.95, 1.74):
+        assert all(s.decimal_odds != lay_dec for s in snaps)
 
 
 # --------------------------------------------------------------------------- #
@@ -723,3 +813,57 @@ async def test_db_tests_leave_no_committed_pollution() -> None:
             assert leftover_snaps == 0
     finally:
         await probe_engine.dispose()
+
+
+# --------------------------------------------------------------------------- #
+# Review nits: parse_odds_value boundary contract + a DECIMAL basketball (2-way)
+# extraction test (the per-visitor odds-format cookie applies to every sport).
+# --------------------------------------------------------------------------- #
+
+# A 2-way basketball moneyline rendered DECIMAL: BACK home/away 1.80/2.10 then
+# LAY home/away, each + parenthesised £ liquidity. No draw cell.
+_BASKETBALL_DECIMAL_HTML = _scroll_el(
+    back=(_odd_cell("1.80", "(5000)") + _odd_cell("2.10", "(4200)") + _payout_cell("99.0%")),
+    lay=(_odd_cell("1.83", "(900)") + _odd_cell("2.16", "(1200)") + _payout_cell("101.0%")),
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("6.51", 6.51),
+        ("1.66", 1.66),
+        ("100", 100.0),  # integer-format decimal (extreme underdog) is valid
+        ("2", 2.0),
+        ("28/25", 2.12),
+        ("3/1", 4.0),
+        ("0", None),
+        ("1", None),  # <= 1.0 is not a backable price
+        ("1.00", None),
+        ("(1838)", None),  # a liquidity token must never parse as an odds value
+        ("99.3%", None),  # a payout % must never parse as an odds value
+        ("", None),
+    ],
+)
+def test_parse_odds_value_decimal_and_fractional(raw: str, expected: "float | None") -> None:
+    from app.ingestion.betfair_exchange import parse_odds_value
+
+    result = parse_odds_value(raw)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_row_extract_js_basketball_decimal() -> None:
+    # The per-visitor odds-format cookie applies to basketball too: a 2-way
+    # moneyline can render DECIMAL. With outcomes=("home","away") the reader keeps
+    # the leading TWO BACK cells (1.80/2.10) and discards the LAY tail.
+    tokens = await _evaluate_row_extract(_exchange_section_html(_BASKETBALL_DECIMAL_HTML))
+    assert tokens == ["1.80", "(5000)", "2.10", "(4200)", "1.83", "(900)", "2.16", "(1200)"]
+    cells = _pair_tokens(tokens)
+    quotes = extract_back_quotes(cells, outcomes=("home", "away"), min_liquidity=0.0)
+    assert [q.designation for q in quotes] == ["home", "away"]
+    assert [q.decimal_odds for q in quotes] == [1.80, 2.10]
+    assert [q.liquidity for q in quotes] == [5000.0, 4200.0]

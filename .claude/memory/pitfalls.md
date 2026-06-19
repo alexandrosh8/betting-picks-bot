@@ -56,3 +56,27 @@
   wholesale. Expected scrape gaps (market tab absent, submarket absent,
   bookies-filter nav absent) are downgraded to INFO by design; the durable
   DOM-break alarm is the per-market snapshot counts each cycle.
+
+- **NEVER loosen the strict cross-source (Pinnacle) matcher to chase coverage**
+  (2026-06-20): the shadow match-rate gap (~37% matched, with a 36-pick "alias
+  gap") is MOSTLY the strict matcher CORRECTLY refusing DANGEROUS matches —
+  women's "W" vs men's games, dropped mascot suffixes (live "Dandenong" vs
+  Pinnacle "Dandenong Rangers"), and same-city ambiguity (live "Canberra" ->
+  Pinnacle "Canberra Gunners" OR "Canberra Nationals"). Aggressive aliasing mints
+  FALSE sharp closes (a WRONG CLV anchor) — worse than no close. ~37% is the
+  doctrine-correct ceiling on obscure/lower-league slates; the lever for more
+  coverage is scoping premium picks to MAJOR leagues (canonical names + full
+  Pinnacle coverage), NOT looser matching. Only add aliases for UNAMBIGUOUS
+  spelling variants (hyphen/space, accents) — never suffix-drops or gender markers.
+
+- **Betfair reader: OddsPortal odds format is a per-visitor COOKIE**
+  (2026-06-20, ADR-0015 update / PR #80): a fresh scraper context gets DECIMAL
+  ("6.51") OR fractional ("28/25") unpredictably. The v1 reader parsed only
+  fractional AND walked-up-all-leaves (capturing the hidden-<a>/visible-<p>
+  DUPLICATE value + mixing BACK+LAY rows) — so it stored majors BROKEN
+  (Brazil-Haiti as "Draw 1.13" = the home price MISLABELED, 1/3 outcomes) or
+  nothing at all on a decimal-format page. Fix: parse_odds_value (both formats) +
+  _ROW_EXTRACT_JS scoped to [data-testid="odd-container"] cells (one value + one
+  liquidity per cell, BACK-triple-first, payout-container excluded). Betfair
+  BASKETBALL liquidity is THIN (£28-£342, under the £500 floor) — Pinnacle is the
+  deep basketball anchor, so basketball needs no Betfair to have a sharp close.

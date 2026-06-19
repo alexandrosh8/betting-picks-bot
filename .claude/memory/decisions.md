@@ -15,6 +15,18 @@
     = no new safe source (off-limits: 2Captcha/stealth/login/proxy-evasion). Top
     mobile skills (ce-frontend-design, bencium-impact-designer, ui-design-system)
     already in ~/.claude/skills/. Do not re-run these searches.
+    FOLLOW-UP PROBE (scripts/research/probe_arcadia_match.py): the 36
+    `unmatched_with_candidates` are NOT pure coverage noise — filtering
+    candidates to ones sharing a team-name token shows **32/36 are real
+    ALIAS/dedup gaps**, 3 systematic patterns: (1) DUPLICATE Pinnacle archive
+    captures of one fixture → the matcher's "multiple candidates => no match"
+    rejects an EXACT-name match (e.g. Perry Lakes Hawks vs Willetton Tigers) —
+    a dedup bug, the biggest lever; (2) unstripped suffix tokens (Besiktas vs
+    "Besiktas JK" — generalizes to in-season majors); (3) women-team naming
+    ("Cairns W" vs "Cairns Dolphins"). Fixes (matcher is CLV-critical, needs
+    careful TDD): dedup candidates by (norm_home,norm_away,date) before the
+    uniqueness check; extend \_NOISE_TOKENS / aliases_seed.json; women aliases
+    without conflating M/W. NOT yet implemented — proposed to operator.
 
 - 2026-06-19 (penaltyblog + OddsHarvester unused-feature scan — see
   docs/research/betting-repo-research.md) — penaltyblog has NOTHING new for the

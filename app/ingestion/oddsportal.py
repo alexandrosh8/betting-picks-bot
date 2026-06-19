@@ -564,9 +564,7 @@ class OddsPortalLoader:
             if getattr(result, "success", None):
                 self._proxy_cursor = (idx + 1) % n  # advance past the winner
                 return result
-            logger.info(
-                "oddsportal scrape via proxy #%d returned 0 matches; trying next", idx
-            )
+            logger.info("oddsportal scrape via proxy #%d returned 0 matches; trying next", idx)
         self._proxy_cursor = (self._proxy_cursor + 1) % n  # spread load next cycle
         return result
 

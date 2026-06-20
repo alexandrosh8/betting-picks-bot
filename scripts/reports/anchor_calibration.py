@@ -105,11 +105,11 @@ def _print_report(title: str, rep: CalibrationReport) -> None:
         print(f"  INSUFFICIENT DATA: n={rep.n} (< min-n) — no estimates shown.")
         return
     assert rep.log_loss is not None and rep.brier is not None  # not insufficient
-    assert rep.ece is not None and rep.mce is not None
+    assert rep.ignorance is not None and rep.ece is not None and rep.mce is not None
     assert rep.base_rate is not None and rep.mean_pred is not None
     print(
-        f"  n={rep.n}  log_loss={rep.log_loss:.4f}  brier={rep.brier:.4f}  "
-        f"ECE={rep.ece:.4f}  MCE={rep.mce:.4f}"
+        f"  n={rep.n}  log_loss={rep.log_loss:.4f}  ignorance={rep.ignorance:.4f} bits  "
+        f"brier={rep.brier:.4f}  ECE={rep.ece:.4f}  MCE={rep.mce:.4f}"
     )
     print(f"  base_rate(observed win)={rep.base_rate:.3f}  mean_pred(anchor)={rep.mean_pred:.3f}")
     print("  reliability (predicted -> observed, n):")

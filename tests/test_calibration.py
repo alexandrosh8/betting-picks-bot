@@ -32,6 +32,7 @@ def test_insufficient_below_min_nulls_every_estimate() -> None:
     assert rep.insufficient is True
     assert rep.n == MIN_CALIBRATION_N - 1
     assert rep.log_loss is None
+    assert rep.ignorance is None
     assert rep.brier is None
     assert rep.ece is None
     assert rep.mce is None
@@ -54,6 +55,8 @@ def test_log_loss_and_brier_golden_values() -> None:
     assert rep.insufficient is False
     assert rep.n == 100
     assert rep.log_loss is not None and math.isclose(rep.log_loss, math.log(2.0), rel_tol=1e-12)
+    # ignorance = log_loss / ln(2) = 1.0 bit at p=0.5
+    assert rep.ignorance is not None and math.isclose(rep.ignorance, 1.0, rel_tol=1e-12)
     assert rep.brier is not None and math.isclose(rep.brier, 0.25, rel_tol=1e-12)
     assert rep.base_rate is not None and math.isclose(rep.base_rate, 0.5, rel_tol=1e-12)
     assert rep.mean_pred is not None and math.isclose(rep.mean_pred, 0.5, rel_tol=1e-12)

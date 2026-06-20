@@ -19,6 +19,8 @@ nulled at the source — no consumer can read noise-level calibration numbers.
 Metrics (all on a binary outcome y in {0,1} and predicted P(win) p):
   - log_loss  = -mean( y·ln p + (1-y)·ln(1-p) )   [strictly proper, local;
                 the penaltyblog author's preferred score — pena.lt/y blog]
+  - ignorance =  log_loss / ln(2)  — the same score in BITS (Good 1952), the
+                units penaltyblog.metrics.ignorance reports
   - brier     =  mean( (p - y)^2 )
   - ece       =  sum_bins (n_b/N)·|mean_pred_b - observed_b|   (n-weighted)
   - mce       =  max_bins |mean_pred_b - observed_b|
@@ -64,6 +66,11 @@ class CalibrationReport:
     n: int  # binary observations scored
     insufficient: bool  # n < min_n -> all estimates below are None
     log_loss: float | None
+    # ignorance score (Good 1952) = log_loss in BITS = log_loss / ln(2). The same
+    # strictly-proper local score the penaltyblog author prefers, in the units his
+    # penaltyblog.metrics.ignorance reports — exposed beside Brier so the report
+    # carries both proper scores (nats + bits) and the calibration diagnostics.
+    ignorance: float | None
     brier: float | None
     ece: float | None
     mce: float | None
@@ -94,6 +101,7 @@ def calibration_report(
             n=n,
             insufficient=True,
             log_loss=None,
+            ignorance=None,
             brier=None,
             ece=None,
             mce=None,
@@ -109,6 +117,7 @@ def calibration_report(
         -sum(y * math.log(p) + (1.0 - y) * math.log(1.0 - p) for y, p in zip(ys, ps, strict=True))
         / n
     )
+    ignorance = log_loss / math.log(2)  # log_loss in bits — Good's ignorance score
     brier = sum((p - y) ** 2 for y, p in zip(ys, ps, strict=True)) / n
     base_rate = sum(ys) / n
     mean_pred = sum(ps) / n
@@ -150,6 +159,7 @@ def calibration_report(
         n=n,
         insufficient=False,
         log_loss=log_loss,
+        ignorance=ignorance,
         brier=brier,
         ece=ece,
         mce=mce,

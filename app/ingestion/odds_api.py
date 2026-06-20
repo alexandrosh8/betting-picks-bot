@@ -31,6 +31,21 @@ _MARKET_MAP = {
     "spreads": Market.SPREADS,
     "totals": Market.TOTALS,
 }
+# The Odds API exposes Betfair Exchange as regional keys (betfair_ex_uk/eu/au);
+# fold them to the canonical name the value engine recognises as the sharp
+# exchange anchor (app/edge/value.SHARP_BOOKS / EXCHANGE_COMMISSION). Pinnacle's
+# key ("pinnacle") and "smarkets" already match SHARP_BOOKS, so they pass
+# through unchanged — without this fold a free Betfair Exchange price would be
+# treated as just another soft book and never anchor CLV.
+_BOOK_CANONICAL = {
+    "betfair_ex_uk": "betfair exchange",
+    "betfair_ex_eu": "betfair exchange",
+    "betfair_ex_au": "betfair exchange",
+}
+
+
+def _canonical_book(key: str) -> str:
+    return _BOOK_CANONICAL.get(key, key)
 
 
 class OddsApiError(Exception):
@@ -105,7 +120,7 @@ class OddsApiClient:
                 continue
             bookmakers = event.get("bookmakers") or []
             for bookmaker in bookmakers:
-                book_key = str(bookmaker.get("key", "unknown"))
+                book_key = _canonical_book(str(bookmaker.get("key", "unknown")))
                 last_update = _parse_ts(str(bookmaker.get("last_update", ""))) or now
                 for market in bookmaker.get("markets") or []:
                     market_key = str(market.get("key", ""))

@@ -263,7 +263,9 @@ def build_scheduler(
     elif settings.odds_source == "odds_api":
         keys = settings.odds_api_keys()
         if keys:
-            loader = OddsApiClient(api_keys=keys, client=http_client)
+            loader = OddsApiClient(
+                api_keys=keys, client=http_client, regions=settings.odds_api_regions
+            )
             sport_keys = ("soccer_epl", "basketball_nba")
         else:
             logger.warning("odds_source=odds_api but no keys configured; polling disabled")

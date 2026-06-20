@@ -462,6 +462,12 @@ class Settings(BaseSettings):
     odds_api_key_1: str = ""
     odds_api_key_2: str = ""
     odds_api_key_3: str = ""
+    # The Odds API regions to request (csv). "eu" carries Pinnacle AND Betfair
+    # Exchange EU; add "uk" for Betfair Exchange UK too (betfair_ex_uk). More
+    # regions = richer sharp coverage but more credits/request — widen only on a
+    # paid/large free budget. Both Betfair variants fold to "betfair exchange"
+    # (app/ingestion/odds_api._BOOK_CANONICAL) so they anchor CLV like Pinnacle.
+    odds_api_regions: str = "eu"
 
     # --- Pinnacle arcadia sharp-line archive (read-only; opt-in, OFF) ---------
     # Clean-room GET-only capture of Pinnacle's PUBLIC guest JSON API

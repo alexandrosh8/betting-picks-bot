@@ -50,6 +50,58 @@ def make_client(handler: httpx.MockTransport, keys: tuple[str, ...]) -> OddsApiC
     return OddsApiClient(api_keys=keys, client=httpx.AsyncClient(transport=handler))
 
 
+async def test_parse_canonicalizes_betfair_exchange_keys() -> None:
+    # The Odds API exposes Betfair Exchange as betfair_ex_uk / betfair_ex_eu;
+    # fold both to "betfair exchange" so the value engine's SHARP_BOOKS /
+    # EXCHANGE_COMMISSION recognise it as the sharp exchange anchor. Pinnacle
+    # ("pinnacle") already matches and must pass through unchanged.
+    payload = [
+        {
+            "id": "evt-bf",
+            "bookmakers": [
+                {
+                    "key": "betfair_ex_uk",
+                    "last_update": "2026-06-10T12:00:00Z",
+                    "markets": [{"key": "h2h", "outcomes": [{"name": "Alpha", "price": 2.5}]}],
+                },
+                {
+                    "key": "betfair_ex_eu",
+                    "last_update": "2026-06-10T12:00:00Z",
+                    "markets": [{"key": "h2h", "outcomes": [{"name": "Alpha", "price": 2.6}]}],
+                },
+                {
+                    "key": "pinnacle",
+                    "last_update": "2026-06-10T12:00:00Z",
+                    "markets": [{"key": "h2h", "outcomes": [{"name": "Alpha", "price": 2.4}]}],
+                },
+            ],
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload))
+
+    client = make_client(httpx.MockTransport(handler), ("k",))
+    snaps = await client.fetch_odds("soccer_epl")
+    assert {s.bookmaker for s in snaps} == {"betfair exchange", "pinnacle"}
+
+
+async def test_regions_param_is_configurable() -> None:
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["regions"] = request.url.params.get("regions")
+        return httpx.Response(200, content=json.dumps([]))
+
+    client = OddsApiClient(
+        api_keys=("k",),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        regions="uk,eu",
+    )
+    await client.fetch_odds("soccer_epl")
+    assert seen["regions"] == "uk,eu"  # Betfair Exchange lives in uk + eu
+
+
 async def test_key_rotation_on_401() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         key = request.url.params.get("apiKey")

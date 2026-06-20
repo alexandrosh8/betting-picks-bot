@@ -2516,7 +2516,36 @@
           // a CONVENIENCE preview of what the settle prompt will pre-fill, only
           // when we scraped the match after it finished. NOT the confirmed
           // result — that is the SETTLED Score column. textContent only.
-          if (p.scraped_score) {
+          // CLOSED-tab value-bet RESULT: how this pick landed from the scraped
+          // final score, BEFORE formal settlement, so you can compare it against
+          // the value bet you were given. PROVISIONAL — confirm by settling; the
+          // SETTLED tab carries the authoritative recorded outcome + P&L.
+          if (p.provisional_outcome) {
+            const rb = badge(
+              p.provisional_outcome.replace("_", " ").toUpperCase(),
+              _OUTCOME_CLS[p.provisional_outcome] || "b-neutral",
+            );
+            rb.style.marginLeft = "6px";
+            rb.title =
+              "PROVISIONAL result graded from the scraped final score — how this " +
+              "value bet landed, before formal settlement. Confirm by settling; " +
+              "the SETTLED tab shows the recorded outcome + P&L.";
+            statusCell.appendChild(rb);
+            const extra = [];
+            if (p.scraped_score) extra.push(p.scraped_score);
+            if (p.provisional_pnl != null) {
+              const v = Number(p.provisional_pnl);
+              extra.push((v >= 0 ? "+" : "") + v.toFixed(2));
+            }
+            if (extra.length) {
+              const s = document.createElement("span");
+              s.textContent = " " + extra.join("  ");
+              s.style.marginLeft = "4px";
+              s.style.color = "var(--faint)";
+              s.style.fontSize = "0.85em";
+              statusCell.appendChild(s);
+            }
+          } else if (p.scraped_score) {
             const hint = document.createElement("span");
             hint.textContent = "scraped: " + p.scraped_score;
             hint.style.marginLeft = "6px";
@@ -2526,6 +2555,16 @@
               "Final score scraped from OddsPortal after the match finished. " +
               "Pre-fills the Settle prompt — confirm or edit it; not a recorded result.";
             statusCell.appendChild(hint);
+          } else {
+            const wait = document.createElement("span");
+            wait.textContent = "awaiting result";
+            wait.style.marginLeft = "6px";
+            wait.style.color = "var(--faint)";
+            wait.style.fontSize = "0.85em";
+            wait.title =
+              "Kicked off (line closed, CLV locked). The result shows here once " +
+              "the final score is available.";
+            statusCell.appendChild(wait);
           }
         }
       }

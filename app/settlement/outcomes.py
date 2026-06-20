@@ -73,6 +73,36 @@ def pick_roi(pnl: Decimal, stake: Decimal) -> Decimal | None:
     return pnl / stake
 
 
+def provisional_result(
+    market: str,
+    selection: str,
+    home: str,
+    away: str,
+    home_score: int | None,
+    away_score: int | None,
+    stake: Decimal | None = None,
+    decimal_odds: Decimal | None = None,
+) -> tuple[str | None, str | None]:
+    """Best-effort (market, selection, scraped final score) -> (outcome, pnl)
+    for a kicked-off-but-unsettled pick, so the CLOSED tab can show how the
+    value bet landed BEFORE formal settlement. Returns (None, None) when the
+    score is missing or the selection cannot be graded — it NEVER guesses. The
+    authoritative, persisted outcome + P&L still come from settlement (the
+    SETTLED tab); this is a read-time convenience only. outcome is an Outcome
+    value string ("won"/"lost"/...); pnl is a 2dp string, or None when stake or
+    odds is absent."""
+    if home_score is None or away_score is None:
+        return None, None
+    try:
+        outcome = settle_selection(market, selection, home, away, int(home_score), int(away_score))
+    except (ValueError, TypeError):
+        return None, None  # unmappable selection -> no guess
+    pnl: str | None = None
+    if stake is not None and decimal_odds is not None:
+        pnl = str(pick_pnl(outcome, Decimal(str(stake)), Decimal(str(decimal_odds))))
+    return outcome.value, pnl
+
+
 def _won(condition: bool) -> Outcome:  # noqa: FBT001 — internal binary helper
     return Outcome.WON if condition else Outcome.LOST
 

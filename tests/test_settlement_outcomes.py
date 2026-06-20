@@ -9,7 +9,12 @@ from decimal import Decimal
 import pytest
 
 from app.schemas.base import Outcome
-from app.settlement.outcomes import pick_pnl, pick_roi, settle_selection
+from app.settlement.outcomes import (
+    pick_pnl,
+    pick_roi,
+    provisional_result,
+    settle_selection,
+)
 
 HOME = "Alpha FC"
 AWAY = "Beta United"
@@ -189,3 +194,40 @@ def test_pnl_half_stakes() -> None:
     assert pick_pnl(Outcome.HALF_WON, stake, Decimal("2.10")) == Decimal("11.00")
     # half the stake is lost, half is returned
     assert pick_pnl(Outcome.HALF_LOST, stake, Decimal("2.10")) == Decimal("-10.00")
+
+
+# --- provisional_result (CLOSED-tab read-time grading) -----------------------
+
+
+def test_provisional_result_won_with_pnl() -> None:
+    # home win, h2h pick on HOME -> WON; pnl = stake*(odds-1)
+    outcome, pnl = provisional_result(
+        "h2h", HOME, HOME, AWAY, 2, 1, Decimal("10.00"), Decimal("1.65")
+    )
+    assert outcome == "won"
+    assert pnl == "6.50"
+
+
+def test_provisional_result_lost() -> None:
+    outcome, pnl = provisional_result(
+        "h2h", HOME, HOME, AWAY, 0, 1, Decimal("10.00"), Decimal("1.65")
+    )
+    assert outcome == "lost"
+    assert pnl == "-10.00"
+
+
+def test_provisional_result_missing_score_is_none() -> None:
+    # in-play / not yet scraped -> no guess
+    assert provisional_result("h2h", HOME, HOME, AWAY, None, None) == (None, None)
+    assert provisional_result("h2h", HOME, HOME, AWAY, 2, None) == (None, None)
+
+
+def test_provisional_result_unmappable_selection_is_none() -> None:
+    # an ungradeable market never guesses an outcome
+    assert provisional_result("nonsense", "whatever", HOME, AWAY, 2, 1) == (None, None)
+
+
+def test_provisional_result_outcome_without_stake_has_no_pnl() -> None:
+    outcome, pnl = provisional_result("h2h", AWAY, HOME, AWAY, 0, 2)
+    assert outcome == "won"
+    assert pnl is None

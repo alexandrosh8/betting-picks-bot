@@ -23,6 +23,7 @@ from app.ingestion.base import EventTeams
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 from app.schemas.picks import PickOut
+from app.settlement.outcomes import provisional_result
 from app.storage.models import (
     DashboardCredential,
     Event,
@@ -151,6 +152,26 @@ async def _get_or_create_model_version(
     session.add(mv)
     await session.flush()
     return mv.id
+
+
+def _provisional_result_fields(
+    pick: Pick, home: str, away: str, shs: int | None, saws: int | None
+) -> dict[str, str | None]:
+    """CLOSED-tab read-time RESULT: how the value bet landed from the scraped
+    final score, BEFORE formal settlement. provisional_* are null until a final
+    score exists / when the selection can't be graded; the SETTLED tab still
+    uses the authoritative persisted outcome + P&L (ResultTracking)."""
+    outcome, pnl = provisional_result(
+        pick.market,
+        pick.selection,
+        home,
+        away,
+        shs,
+        saws,
+        pick.recommended_stake_amount,
+        pick.decimal_odds,
+    )
+    return {"provisional_outcome": outcome, "provisional_pnl": pnl}
 
 
 async def latest_picks_with_events(
@@ -287,6 +308,10 @@ async def latest_picks_with_events(
             # hint — NOT the confirmed result (that is `score`, above). null when
             # either side is unscraped (the common case — the user types as today).
             "scraped_score": (f"{shs}-{saws}" if shs is not None and saws is not None else None),
+            # CLOSED-tab read-time RESULT: how the value bet landed from the
+            # scraped final score, BEFORE formal settlement (null until a score
+            # exists / if ungradeable). SETTLED uses the authoritative outcome.
+            **_provisional_result_fields(p, home_name, away_name, shs, saws),
         }
         for (
             p,

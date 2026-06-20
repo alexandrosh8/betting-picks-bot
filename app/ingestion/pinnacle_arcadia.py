@@ -669,6 +669,10 @@ class PinnacleArcadiaCapture:
         self._horizon = horizon
         self._now_fn = now_fn or _utc_now
         self._seen_version: dict[tuple[str, str, str], int] = {}
+        # sports whose per-cycle fetch failure has already been logged once, so a
+        # persistently-empty sport (e.g. NFL out of season) does not warn every
+        # cycle. Cleared on a successful capture so a later real outage re-warns.
+        self._fetch_warned: set[str] = set()
 
     def _select_fresh(
         self,
@@ -744,19 +748,21 @@ class PinnacleArcadiaCapture:
                 raw_matchups = await self._client.fetch_matchups(sport_id)
                 raw_markets = await self._client.fetch_straight_markets(sport_id)
             except (httpx.HTTPError, PinnacleArcadiaError) as exc:
-                # A single sport failing to price is EXPECTED when discovery is
-                # unavailable (live_ids is None) and the sport is simply out of
-                # season / hidden upstream (e.g. NFL in June) — INFO, not a noisy
-                # per-cycle WARNING. With discovery available the sport WAS listed
-                # as live, so a failure here is genuinely unexpected -> WARNING.
-                level = logging.WARNING if live_ids is not None else logging.INFO
+                # Warn ONCE per sport per process: a persistently-empty sport
+                # (e.g. NFL out of season, which arcadia discovery may still
+                # list) would otherwise WARN every 60s cycle. First failure ->
+                # WARNING (visible); repeats -> DEBUG. A later successful capture
+                # clears the flag so a genuine new outage re-warns.
+                first = sport not in self._fetch_warned
+                self._fetch_warned.add(sport)
                 logger.log(
-                    level,
+                    logging.WARNING if first else logging.DEBUG,
                     "pinnacle arcadia: no data for %s this cycle (%s)",
                     sport,
                     type(exc).__name__,
                 )
                 continue
+            self._fetch_warned.discard(sport)  # fetch recovered -> allow re-warn later
             matchups = parse_matchups(raw_matchups, now=now, horizon_end=horizon_end)
             quotes = extract_market_quotes(matchups, raw_markets, now=now)
             fresh, teams = self._select_fresh(quotes, matchups, sport)

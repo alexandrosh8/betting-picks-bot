@@ -780,7 +780,12 @@ async def test_available_games_fallback_includes_tennis_with_unvalidated_flag(se
     await session.flush()
 
     # Unscoped (sport=None) is the path the /games route uses for the fallback.
-    rows = await latest_available_games_with_events(session, limit=200, now=now)
+    # High limit so a POPULATED shared dev DB (the running app accumulates
+    # hundreds of events ordered by kickoff before this now+3h fixture) can't
+    # truncate our fixture out of the top-N — the assertion is about PRESENCE
+    # in the unscoped warehouse view + the unvalidated flag, not top-N ranking
+    # (mirrors the soccer sibling above, which already uses limit=5000).
+    rows = await latest_available_games_with_events(session, limit=5000, now=now)
     ours = [row for row in rows if row["event_id"] == "evt-games-tennis"]
     assert ours, "warehouse fallback excluded the tennis fixture"
     row = ours[0]
@@ -817,7 +822,9 @@ async def test_available_games_fallback_includes_tennis_with_unvalidated_flag(se
         )
     )
     await session.flush()
-    rows2 = await latest_available_games_with_events(session, limit=200, now=now)
+    # High limit (see above) so a populated shared dev DB can't crowd the
+    # soccer comparison fixture out of the top-N either.
+    rows2 = await latest_available_games_with_events(session, limit=5000, now=now)
     soccer_rows = [row for row in rows2 if row["event_id"] == "evt-games-soccer"]
     assert soccer_rows and soccer_rows[0]["unvalidated"] is False
 

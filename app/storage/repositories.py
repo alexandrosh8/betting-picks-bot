@@ -200,8 +200,10 @@ async def latest_picks_with_events(
             ResultTracking.away_score,
             Event.scraped_home_score,
             Event.scraped_away_score,
+            Sport.key,
         )
         .join(Event, Pick.event_id == Event.id)
+        .join(Sport, Event.sport_id == Sport.id)
         .join(home, Event.home_team_id == home.id)
         .join(away, Event.away_team_id == away.id)
         .join(League, Event.league_id == League.id)
@@ -242,6 +244,15 @@ async def latest_picks_with_events(
             # consensus) — live CLV stratification key; null = model pick
             # or pre-column row
             "anchor_type": p.anchor_type,
+            # sport of the pick (soccer/basketball/tennis/american_football) +
+            # human label, so the multi-sport picks table can badge each row and
+            # tag UNVALIDATED (experimental) sports honestly.
+            "sport": sport_key,
+            "sport_label": _sport_label(sport_key, sport_key),
+            # CLOSE-anchor provenance (ADR-0017): which anchor priced the close
+            # (pinnacle/sharp/consensus). With closing_odds set it marks a
+            # genuine sharp close vs a consensus/fallback one.
+            "closing_anchor_type": p.closing_anchor_type,
             "created_at": p.created_at.isoformat(),
             "clv_log": str(p.clv_log) if p.clv_log is not None else None,
             "beat_close": p.beat_close,
@@ -289,6 +300,7 @@ async def latest_picks_with_events(
             aws,
             shs,
             saws,
+            sport_key,
         ) in rows.all()
     ]
 

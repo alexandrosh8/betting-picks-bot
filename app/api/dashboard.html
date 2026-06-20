@@ -2067,6 +2067,30 @@
         lg.className = "league";
         lg.textContent = p.league;
         m.append(name, lg);
+        // Multi-sport badge: soccer is the default (no badge); other sports get
+        // a chip. Tennis / American football are UNVALIDATED (experimental) — a
+        // warn-coloured "EXPERIMENTAL" tag, honest about the lack of a proven
+        // CLV edge (basketball is a validated pick source -> neutral info chip).
+        if (p.sport && !String(p.sport).startsWith("soccer")) {
+          const sportKey = String(p.sport);
+          const exp =
+            sportKey.startsWith("tennis") ||
+            sportKey.startsWith("american_football");
+          const sp = document.createElement("span");
+          sp.textContent =
+            (p.sport_label || p.sport) + (exp ? " · EXPERIMENTAL" : "");
+          sp.style.cssText =
+            "font-size:10px;letter-spacing:.04em;text-transform:uppercase;" +
+            "border:1px solid var(--line);border-radius:3px;padding:0 4px;" +
+            "margin-top:2px;align-self:flex-start;color:var(--" +
+            (exp ? "warn" : "info") +
+            ");";
+          if (exp)
+            sp.title =
+              "UNVALIDATED sport — informational only, no proven CLV edge yet " +
+              "(shadow tier: never alerted, never sized).";
+          m.append(sp);
+        }
         td(tr, m).dataset.label = "Match";
       }
 

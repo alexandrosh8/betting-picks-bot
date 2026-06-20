@@ -1,5 +1,24 @@
 # Pitfalls
 
+- **Free Betfair/Pinnacle odds: the ONLY two free sources, verified 2026-06-20
+  (Playwright DOM + arcadia live).** (1) PINNACLE is ABSENT from the OddsPortal
+  odds table in EVERY scrapeable region (Cyprus/US/BR exits all checked — no
+  Pinnacle img-alt; the lone "pinnacle" HTML hit was SEO prose). So Pinnacle's
+  ONLY free source is `app/ingestion/pinnacle_arcadia.py` (guest.api.arcadia.
+  pinnacle.com guest JSON, geo-independent, no key — confirmed live: 584 soccer
+  matchups). Do NOT try to capture Pinnacle from OddsPortal. (2) BETFAIR EXCHANGE
+  is in a SEPARATE `data-testid="betting-exchanges-section"` (NOT the main book
+  table); `app/ingestion/betfair_exchange.py` selectors are EXACTLY correct (walk
+  up >=5 levels from the `betting-exchanges-table-row` to 6 odd-container cells =
+  BACK triple then LAY triple; each cell = value + liquidity div). NO selector
+  change needed. **The section appears ONLY on liquidity-rich MAJOR fixtures AND
+  ONLY from a UK or EU proxy exit** — a missing section is the expected geo or
+  liquidity gap, not a bug. Keep the Betfair reader on a UK/EU proxy
+  (SCRAPER_PROXY_POOL). Odds format (decimal vs fractional) is a per-visitor
+  COOKIE — parse_odds_value handles both. roundproxies.com blog re-reviewed: its
+  stealth/CAPTCHA core stays REJECTED (hard rule); every doctrine-safe technique
+  it lists is already implemented. NO new free Betfair/Pinnacle source exists.
+
 - **Dixon-Coles rho conventions: penaltyblog 1.11.0 ships TWO OPPOSITE tau
   parameterizations** (verified 2026-06-12). PAPER (DC 1997: tau(0,1)=
   1+rho*lambda_home) lives in the compiled DixonColes model kernel
@@ -76,7 +95,7 @@
   DUPLICATE value + mixing BACK+LAY rows) — so it stored majors BROKEN
   (Brazil-Haiti as "Draw 1.13" = the home price MISLABELED, 1/3 outcomes) or
   nothing at all on a decimal-format page. Fix: parse_odds_value (both formats) +
-  _ROW_EXTRACT_JS scoped to [data-testid="odd-container"] cells (one value + one
+  \_ROW_EXTRACT_JS scoped to [data-testid="odd-container"] cells (one value + one
   liquidity per cell, BACK-triple-first, payout-container excluded). Betfair
   BASKETBALL liquidity is THIN (£28-£342, under the £500 floor) — Pinnacle is the
   deep basketball anchor, so basketball needs no Betfair to have a sharp close.

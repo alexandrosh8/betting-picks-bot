@@ -1,5 +1,64 @@
 # Decisions Log
 
+- 2026-06-20 (/goal multi-sport high-EV optimization — IMPLEMENTED, branch
+  feat/clv-close-provenance, all local) — realized the ESPN auto-settlement
+  decision below + more, full suite 967 green, ruff/mypy/safety clean each step:
+  (A) **ESPN free auto-settlement** — clean-room app/ingestion/espn*scores.py
+  (key-less GET site.api.espn.com scoreboard; team parser + tennis SET-score
+  parser) wired into run_settlement_cycle so basketball/NFL/tennis auto-settle +
+  auto-ROI through the existing ScoreBook (ESPN_SETTLE*\* config; SCORES only,
+  never odds). (B) **Experimental picks** for unvalidated sports — opt-in
+  ENABLE_UNVALIDATED_PICKS routes tennis/american_football to
+  PipelineDeps.experimental_sports; run_value_pipeline FORCES them to volume
+  (shadow) tier: surfaced + CLV-tracked + auto-settled, NEVER alerted/sized.
+  (C) **odds_api Betfair/Pinnacle** — \_BOOK_CANONICAL folds betfair_ex_uk/eu ->
+  "betfair exchange" + ODDS_API_REGIONS config (keyed path). (E) **dashboard** —
+  /picks now exposes sport/sport_label/closing_anchor_type; picks table badges
+  non-soccer picks, tennis/NFL get a warn EXPERIMENTAL chip. **penaltyblog
+  audit: LOW value** — devig parity + Dixon-Coles already integrated; calibration
+  already has log_loss (= ignorance score) + Brier/ECE/MCE; models are
+  football-goals-only (screens-only for tennis/NFL/NBA); the user's Colab is a
+  penaltyblog.viz.Pitch tutorial with ZERO betting content → no code change.
+  **FREE Betfair/Pinnacle VERIFIED (see pitfalls.md):** Pinnacle is ABSENT from
+  OddsPortal in every region → arcadia guest JSON is the ONLY free source (live:
+  584 matchups); Betfair = OddsPortal betting-exchanges-section (selectors
+  correct, UK/EU proxy + liquid major required); roundproxies blog re-confirmed
+  off-doctrine; NO new free source exists. .env confirms BETFAIR_EXCHANGE_ENABLED
+  - ARCADIA_ENABLED + both CLV flags = true; 15 UK proxies wired. **Football edge
+    RE-VERIFIED** (held-out: edge>=0.03 n=62 ROI +22.4% incCLV +0.107 >2SE). Live
+    World Cup value picks demonstrated (3 picks, consensus-anchored from host IP).
+    REMAINING: full dashboard mobile-polish redesign (sport badges + cards exist;
+    visual device-test pass deferred); merge stack to main; push (user's call).
+
+- 2026-06-20 (repo sweep — AUTO-SETTLEMENT gap; ESPN public API) — multi-sport
+  repo discovery for the open gaps (results/scores feeds for NBA/tennis/NFL
+  settlement + fixtures; calibration/Kelly/CLV were re-confirmed SETTLED — only
+  bee-movie/SEO spam surfaced, no gap). DECISIVE FINDING: the free, no-auth,
+  GET-only **ESPN public scoreboard** (`site.api.espn.com/apis/site/v2/sports/
+{sport}/{league}/scoreboard?dates=YYYYMMDD`) live-verified to carry SETTLEMENT
+  primitives (home/away `score`, `winner`, `status.type.completed`) AND
+  pre-match FIXTURES for NBA(1)/NFL(16)/soccer eng.1(1)/ATP tennis(4)/nbl(2)/
+  fiba(2)/mens-college-basketball(1) — the exact data the project lacks today
+  (`app/settlement/results.py` \_SLUG_SOURCES has NO source for nba/euroleague/
+  tennis → manual POST only). `sportsdataverse/sportsdataverse-py` (MIT, 104★,
+  push 2026-06-19, v0.0.67, PEP621 setuptools — NO custom/postinstall hooks)
+  is the clean reference: `nba_schedule.espn_nba_schedule` + GET-only
+  `dl_utils.download` (requests.Session.get, no auth, Retry-After clamped 120s,
+  404-as-no-data) → VERDICT **adopt-pattern** (clean-room an async httpx ESPN
+  client `app/ingestion/espn_scores.py`; do NOT add the package — heavy
+  xgboost/polars/pyreadr/matplotlib deps orthogonal to FastAPI/asyncpg). MIT =
+  liftable with attribution. CAVEATS: (a) ESPN has NO `euroleague` slug → that
+  league stays manual; (b) tennis needs match-level `summary?event=` parsing
+  (tournament-scoped IDs, not the clean team-sport shape) — extra work vs
+  NBA/NFL; (c) ESPN "Betting & Odds" endpoints are read-only SOFT books
+  (Caesars/FanDuel/DK, NO Pinnacle) → NOT a CLV close anchor, scores-only.
+  REJECTS: `pseudo-r/Public-ESPN-API` (endpoint DOC only, reference-only, no
+  license); `msolonskyi/ManTennisData` (201-byte stub README, 5★, reject);
+  flashscore/sofascore scrapers (ToS-grey, redundant with ESPN's no-auth JSON);
+  all tennis-elo + "settlement" search hits = outcome-prediction or SEO/bee-movie
+  spam. NO autobet risk in any inspected repo (sportsdataverse code-search 0 hits
+  for place_order/betslip). Full report in this session's research output.
+
 - 2026-06-20 (CLV close-anchor provenance — ADR-0017) — an adversarial review
   found the CLV TRUST METRIC was partly contaminated: a pick's `anchor_type` is
   the CREATION anchor, but the CLOSE (computed later by clv_trueup) can be

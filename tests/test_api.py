@@ -301,7 +301,9 @@ def test_dashboard_fetches_and_renders_available_games() -> None:
 
 def test_dashboard_has_mobile_table_card_layout() -> None:
     text = TestClient(make_app()).get("/").text
-    assert "@media (max-width: 720px)" in text
+    # card layout kicks in at the tablet breakpoint (raised 720 -> 860 so 768px
+    # tablets get cards too, not a cramped table — screenshot-verified)
+    assert "@media (max-width: 860px)" in text
     assert "#picks-table td:nth-child(11)::before" in text
     assert 'content: "Status"' in text
     # confidence replaced the Stake label at picks column 9

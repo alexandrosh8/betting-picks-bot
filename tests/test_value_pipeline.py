@@ -94,6 +94,84 @@ def make_deps(sink: RecordingSink, loader: FakeLoader) -> PipelineDeps:
     )
 
 
+def make_deps_league(
+    sink: RecordingSink,
+    loader: FakeLoader,
+    *,
+    league: str,
+    value_policy: ValuePolicy,
+) -> PipelineDeps:
+    """Like make_deps, but the event carries a scraped league and the deps a
+    value_policy — the inputs to the major-league premium gate."""
+    directory = EventDirectory()
+    directory.register("evt-1", EventTeams(home="Home FC", away="Away FC", league=league))
+    return PipelineDeps(
+        loader=loader,
+        model=NullModel(),
+        dispatcher=AlertDispatcher([sink], InMemoryIdempotencyStore()),
+        gate_policy=POLICY,
+        stake_policy=StakePolicy(),
+        ledger=DailyExposureLedger(max_daily_fraction=0.05),
+        bankroll=Decimal("1000"),
+        directory=directory,
+        value_min_edge=0.015,
+        value_min_odds=1.30,
+        value_policy=value_policy,
+    )
+
+
+async def test_major_league_gate_demotes_non_major_premium_to_no_alert() -> None:
+    # With a major-league allowlist set, a premium-edge pick in a league OUTSIDE
+    # the set is demoted to the volume (shadow) tier: never alerted, no premium
+    # pick. Without the gate this exact slate mints one alerted premium pick
+    # (test_value_pipeline_records_poll_liveness) — so the only difference is the
+    # gate. The honest-high-ROI lever: don't alert what has no sharp coverage.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(market_snapshots()),
+        league="Obscure Regional Cup",
+        value_policy=ValuePolicy(major_leagues=("Premier League",)),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # demoted -> never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0  # n_premium == 0
+
+
+async def test_major_league_gate_keeps_premium_in_major_league() -> None:
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(market_snapshots()),
+        league="Premier League",
+        value_policy=ValuePolicy(major_leagues=("premier league",)),  # normalized match
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1  # major league -> alerted premium pick
+    assert LAST_POLL["soccer"]["picks"] == 1
+
+
+async def test_major_league_gate_disabled_keeps_all_premium() -> None:
+    # Empty major_leagues = gate OFF: the obscure-league pick still alerts
+    # (current behavior, the non-breaking default).
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(market_snapshots()),
+        league="Obscure Regional Cup",
+        value_policy=ValuePolicy(),  # gate disabled
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+
+
 async def test_value_pipeline_records_poll_liveness() -> None:
     # The dashboard/health must be able to tell "engine alive" from "engine
     # dead showing day-old picks" — every cycle records itself, including

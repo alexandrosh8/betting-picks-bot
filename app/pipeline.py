@@ -19,6 +19,7 @@ from app.edge.gates import GatePolicy, PickCandidate, evaluate
 from app.edge.value_policy import (
     ValuePolicy,
     distinct_book_count,
+    is_major_league,
     min_books_for,
     min_edge_for,
     odds_in_bands,
@@ -694,6 +695,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_volume = 0
     n_stale = 0
     n_ml_demoted = 0
+    n_major_demoted = 0
     n_off_band = 0
     n_thin_books = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
@@ -746,6 +748,26 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             tier = pick_tier(v.edge, premium_floor, deps.value_volume_min_edge)
             if tier is None:
                 continue  # below both floors (unreachable via scan_min_edge)
+            # Major-league gate: a PREMIUM candidate whose scraped league is not
+            # in the configured major set is DEMOTED to the volume (shadow) tier
+            # — persisted + CLV-tracked, never alerted, never reserving exposure.
+            # Empty value_policy.major_leagues disables the gate (no-op, the
+            # default). The honest-high-ROI lever: alert + risk exposure only
+            # where a sharp anchor + liquidity actually exist
+            # (.claude/memory/pitfalls.md 2026-06-20 — ~37% sharp coverage is
+            # structural on obscure slates; scope premium, don't fuzzy-match).
+            # Runs BEFORE the ML demotion so the two interventions never stack.
+            major_note = ""
+            if tier == "premium":
+                event_league = ""
+                if deps.directory is not None:
+                    teams = deps.directory.lookup(event_id)
+                    if teams is not None and teams.league:
+                        event_league = teams.league
+                if not is_major_league(deps.value_policy, event_league):
+                    tier = "volume"
+                    n_major_demoted += 1
+                    major_note = " | non-major league: demoted to volume (shadow)"
             # Meta-model score AFTER the edge gate (meta-labeling: the
             # deterministic rule generates, the model only filters).
             ml_score = _score_value_candidate(
@@ -846,6 +868,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         if v.best_odds_effective != v.best_odds
                         else ""
                     )
+                    + major_note
                     + ml_note
                 ),
                 tier=tier,
@@ -930,6 +953,15 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: ml-filter demoted %d premium candidate(s) to volume",
             sport_key,
             n_ml_demoted,
+        )
+    if n_major_demoted:
+        # The major-league gate is never silent either: these candidates cleared
+        # the premium edge gate but their scraped league is not in the configured
+        # VALUE_MAJOR_LEAGUES set, so they were demoted to the shadow tier.
+        logger.info(
+            "value pipeline %s: major-league gate demoted %d premium candidate(s) to volume",
+            sport_key,
+            n_major_demoted,
         )
     if n_off_band:
         # VALUE_ODDS_BANDS intervention is never silent either: these

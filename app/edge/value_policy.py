@@ -20,6 +20,7 @@ the same keys the dashboard's per-market counters use), then the market
 family (``str(Market)``, e.g. "h2h", "totals"). Most specific wins.
 """
 
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -45,6 +46,17 @@ class ValuePolicy:
     # (market_key, min_books): minimum distinct bookmakers quoting the
     # market before its candidates are considered. 0/absent = no floor.
     min_books_by_market: tuple[tuple[str, int], ...] = ()
+    # Scraped league names eligible for the PREMIUM (alerting + exposure) tier.
+    # Empty = gate DISABLED — every league is premium-eligible (current
+    # behavior). When set, a premium candidate whose scraped per-event league
+    # name does not normalize into this set is DEMOTED to the volume (shadow)
+    # tier: still persisted + CLV-tracked, never alerted, never reserving
+    # exposure. This is the honest-high-ROI lever — concentrate alerts on
+    # leagues with real sharp-anchor coverage + liquidity (majors), not obscure
+    # slates where no free sharp close exists (.claude/memory/pitfalls.md,
+    # 2026-06-20: ~37% sharp coverage is structural; scope, don't fuzzy-match).
+    # Stored as given; normalized at compare time (see is_major_league).
+    major_leagues: tuple[str, ...] = ()
 
 
 def market_lookup_keys(market: str, market_detail: str | None) -> tuple[str, ...]:
@@ -78,6 +90,38 @@ def min_books_for(policy: ValuePolicy, market: str, market_detail: str | None) -
         if value is not None:
             return value
     return 0
+
+
+def normalize_league(name: str) -> str:
+    """League name canonicalized for exact comparison.
+
+    Accents folded to ASCII (NFKD), punctuation collapsed to spaces, whitespace
+    collapsed, casefolded — so "Série A", " ENGLAND - Premier League " and
+    "premier league" compare predictably. Deliberately NOT fuzzy: membership is
+    exact on this normal form (mirroring the strict cross-source matcher) so the
+    gate can never falsely promote a minor league.
+    """
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    tokens = "".join(ch if ch.isalnum() else " " for ch in ascii_name).split()
+    return " ".join(tokens).casefold()
+
+
+def is_major_league(policy: ValuePolicy, league_name: str) -> bool:
+    """Whether `league_name` qualifies for the PREMIUM (alerting + exposure) tier.
+
+    Empty ``policy.major_leagues`` DISABLES the gate — every league is
+    premium-eligible (current behavior, the non-breaking default). When the set
+    is configured, only a league whose scraped name normalizes to a member is
+    major; a blank/unknown league name is NOT major (it cannot be confirmed to
+    sit in a sharp-covered major league, so it is demoted to the shadow tier —
+    never alerted).
+    """
+    if not policy.major_leagues:
+        return True
+    norm = normalize_league(league_name)
+    if not norm:
+        return False
+    return norm in {normalize_league(major) for major in policy.major_leagues}
 
 
 def odds_in_bands(odds: float, bands: tuple[tuple[float, float], ...]) -> bool:

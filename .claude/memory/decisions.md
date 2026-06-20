@@ -1,5 +1,24 @@
 # Decisions Log
 
+- 2026-06-20 (major-league PREMIUM gate — ADR-0016) — the honest-high-ROI lever
+  is scoping the ALERTING tier to leagues with real sharp coverage, NOT looser
+  matching. New `VALUE_MAJOR_LEAGUES` (csv of scraped `league_name`) → frozen
+  `ValuePolicy.major_leagues`; a premium candidate outside the set is DEMOTED to
+  the volume/shadow tier (still CLV-tracked, never alerted, no exposure),
+  mirroring the `VALUE_ML_FILTER` demotion in `run_value_pipeline`. Exact-on-
+  normalized match (NFKD/casefold/space) — never fuzzy (can't falsely promote a
+  minor league); blank league with gate on ⇒ not major. DEFAULT OFF (empty =
+  every league premium-eligible, non-breaking); `.env.example` ships a commented
+  majors seed. Curate the set from the existing `/resolution/match-rate`
+  `by_league` report (same `league_name` key). DEMOTE not drop = the evidence
+  trail stays auditable. New pure helpers `normalize_league`/`is_major_league`
+  in `app/edge/value_policy.py`; 9 new tests; full suite + ruff/mypy/safety
+  green. Also fixed a pre-existing local-only test fragility:
+  `test_persistence.py` warehouse-fallback tests used `limit=200` against the
+  SHARED dev DB (3172 events, 612 before now+3h) and got crowded out — raised to
+  `limit=5000` to match the already-hardened soccer sibling (NOT pollution; only
+  0 test-pattern refs exist). See [[gateguard-write-pattern]].
+
 - 2026-06-19 (5-stream ultracode research sweep — see
   docs/research/betting-repo-research.md) — VERDICT: nothing new to build.
   Free live Pinnacle (`guest.api.arcadia.pinnacle.com`) is REAL, GET-only, and

@@ -99,6 +99,16 @@ def parse_odds_bands(raw: str) -> tuple[tuple[float, float], ...]:
     return tuple(bands)
 
 
+def parse_major_leagues(raw: str) -> tuple[str, ...]:
+    """VALUE_MAJOR_LEAGUES csv of scraped league names for the PREMIUM tier.
+
+    Empty = gate disabled (the no-op default). Names are kept as given (the
+    scrape's ``league_name``) and normalized only at compare time by
+    app/edge/value_policy.is_major_league; blank entries are dropped.
+    """
+    return tuple(name.strip() for name in raw.split(",") if name.strip())
+
+
 def parse_proxy_urls(raw: str, env_name: str = "ARCADIA_PROXY_URLS") -> tuple[str, ...]:
     """Parse comma/newline separated proxy URLs without ever echoing secrets."""
     urls: list[str] = []
@@ -303,6 +313,18 @@ class Settings(BaseSettings):
     # quoted by fewer books is skipped entirely (thin-liquidity proxy for
     # new lines/divisions). Empty = no floor anywhere (current behavior).
     value_min_books_per_market: str = ""
+    # Major-league PREMIUM gate, csv of scraped league names as OddsPortal emits
+    # them (the per-event league_name), e.g. "Premier League,LaLiga,Serie A,
+    # Bundesliga,Ligue 1,UEFA Champions League,NBA,EuroLeague". Empty = gate
+    # DISABLED (every league premium-eligible — current behavior). When set, a
+    # premium candidate whose scraped league is not in the set is DEMOTED to the
+    # volume (shadow) tier: persisted + CLV-tracked, never alerted, never
+    # reserving exposure. The honest-high-ROI lever — concentrate alerts +
+    # exposure on leagues with real sharp-anchor coverage + liquidity (majors);
+    # obscure slates have no free sharp close (~37% coverage is structural, see
+    # .claude/memory/pitfalls.md 2026-06-20). Names normalized at compare time
+    # (accents/case/spacing); curate from the per-league match-rate report.
+    value_major_leagues: str = ""
 
     # --- Optional drawdown-constrained staking (default OFF) -----------------
     # Both set => Kelly multiplier = min(FRACTIONAL_KELLY, lambda*) where
@@ -705,6 +727,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         min_edge_by_market=parse_market_min_edges(settings.value_min_edge_per_market),
         odds_bands=parse_odds_bands(settings.value_odds_bands),
         min_books_by_market=parse_market_min_books(settings.value_min_books_per_market),
+        major_leagues=parse_major_leagues(settings.value_major_leagues),
     )
 
 

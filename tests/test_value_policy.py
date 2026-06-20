@@ -4,9 +4,11 @@ match the line-qualified market key first, then the market family."""
 from app.edge.value_policy import (
     ValuePolicy,
     distinct_book_count,
+    is_major_league,
     market_lookup_keys,
     min_books_for,
     min_edge_for,
+    normalize_league,
     odds_in_bands,
 )
 
@@ -65,3 +67,46 @@ def test_distinct_book_count_normalizes_names_across_selections() -> None:
         "Away": {"OtherBook": 3.1},
     }
     assert distinct_book_count(prices) == 3
+
+
+def test_normalize_league_strips_accents_punctuation_and_case() -> None:
+    assert normalize_league("Premier League") == "premier league"
+    assert normalize_league("  ENGLAND - Premier League ") == "england premier league"
+    assert normalize_league("Série A") == "serie a"
+    assert normalize_league("LaLiga") == "laliga"
+    assert normalize_league("") == ""
+
+
+def test_major_league_gate_disabled_when_unset_is_a_strict_noop() -> None:
+    # Empty major_leagues = gate OFF: every league is "major" (current behavior,
+    # nothing demoted). This is the non-breaking default.
+    policy = ValuePolicy()
+    assert is_major_league(policy, "Premier League") is True
+    assert is_major_league(policy, "Obscure Regional Div 3") is True
+    assert is_major_league(policy, "") is True
+
+
+def test_major_league_matches_on_normalized_name() -> None:
+    policy = ValuePolicy(major_leagues=("Premier League", "LaLiga", "Série A"))
+    # case / whitespace / accent insensitive, and tolerant of country prefixes
+    # that normalize to the same token set is NOT required — exact normalized
+    # membership only (no fuzzy substring, mirroring the strict matcher).
+    assert is_major_league(policy, "premier league") is True
+    assert is_major_league(policy, "  LA LIGA ") is False  # "la liga" != "laliga"
+    assert is_major_league(policy, "LaLiga") is True
+    assert is_major_league(policy, "Serie A") is True  # accent-folded match
+
+
+def test_non_major_league_is_demoted_when_gate_enabled() -> None:
+    policy = ValuePolicy(major_leagues=("Premier League",))
+    assert is_major_league(policy, "Australia NPL Victoria") is False
+    assert is_major_league(policy, "Brazil Serie A") is False
+
+
+def test_blank_league_is_not_major_when_gate_enabled() -> None:
+    # Gate ON + no scraped league name => cannot CONFIRM it is a covered major
+    # league => not major (demoted). Honest default: only alert what we can
+    # place in a known, sharp-covered league.
+    policy = ValuePolicy(major_leagues=("Premier League",))
+    assert is_major_league(policy, "") is False
+    assert is_major_league(policy, "   ") is False

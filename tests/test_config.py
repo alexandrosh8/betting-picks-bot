@@ -287,6 +287,14 @@ def test_value_policy_parses_market_maps_and_bands() -> None:
     assert policy.min_books_by_market == (("over_under_1_5", 5),)
 
 
+def test_value_policy_parses_major_leagues() -> None:
+    s = make_settings(value_major_leagues="Premier League, LaLiga , Serie A,")
+    # names kept as given (normalized only at compare time), blanks dropped
+    assert value_policy(s).major_leagues == ("Premier League", "LaLiga", "Serie A")
+    # empty (default) = gate disabled — the policy stays the no-op default
+    assert value_policy(make_settings()).major_leagues == ()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

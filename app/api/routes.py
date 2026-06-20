@@ -40,6 +40,7 @@ from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import (
+    betfair_archive_capture_by_sport,
     create_dashboard_credentials,
     latest_available_games_with_events,
     latest_picks_with_events,
@@ -719,6 +720,9 @@ async def resolution_match_rate(
     # included), so the panel shows the archive captures every sport, not just the
     # pick sports that appear in the match rate above.
     report["archive_capture"] = await pinnacle_archive_capture_by_sport(session)
+    # Betfair Exchange coverage alongside Pinnacle (exact-ref, expected sparse —
+    # liquid majors behind a UK/EU proxy only).
+    report["betfair_capture"] = await betfair_archive_capture_by_sport(session)
     return report
 
 

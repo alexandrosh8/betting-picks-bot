@@ -397,8 +397,15 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
             {"sport": "tennis", "captured": 60, "scraped": 6, "matched": 5},
         ]
 
+    async def fake_betfair_capture(session, **_kw):  # type: ignore[no-untyped-def]
+        return [
+            {"sport": "soccer", "scraped": 149, "captured": 46},
+            {"sport": "basketball", "scraped": 64, "captured": 0},
+        ]
+
     monkeypatch.setattr(routes, "shadow_match_rate_outcomes", fake_outcomes)
     monkeypatch.setattr(routes, "pinnacle_archive_capture_by_sport", fake_capture)
+    monkeypatch.setattr(routes, "betfair_archive_capture_by_sport", fake_betfair_capture)
     body = TestClient(make_app()).get("/resolution/match-rate").json()
     assert body["total"] == 3
     assert body["matched"] == 1

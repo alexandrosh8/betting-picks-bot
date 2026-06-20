@@ -1191,6 +1191,51 @@ async def betfair_exchange_coverage_outcomes(
     return outcomes
 
 
+async def betfair_archive_capture_by_sport(
+    session: AsyncSession,
+    *,
+    horizon_days: int = 7,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """Per-sport Betfair Exchange coverage for the dashboard panel: of OUR
+    upcoming scraped fixtures, how many have a captured Betfair Exchange archive
+    event. EXACT ``betfair:`` ref match (no fuzzy) — Betfair only renders on
+    liquid majors behind a UK/EU proxy, so this is expected to be sparse. Read-
+    only diagnostic; attaches no close, changes no pick."""
+    from app.ingestion.betfair_exchange import _namespace_event_ref
+
+    now = now if now is not None else datetime.now(tz=UTC)
+    until = now + timedelta(days=horizon_days)
+    out: list[dict[str, object]] = []
+    for base in ("soccer", "basketball"):
+        our_refs = (
+            (
+                await session.execute(
+                    select(Event.external_ref)
+                    .join(Sport, Event.sport_id == Sport.id)
+                    .where(
+                        Sport.key == base,
+                        Event.starts_at.is_not(None),
+                        Event.starts_at >= now,
+                        Event.starts_at <= until,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        captured = 0
+        if our_refs:
+            betfair_refs = {_namespace_event_ref(r) for r in our_refs}
+            captured = (
+                await session.scalar(
+                    select(func.count(Event.id)).where(Event.external_ref.in_(betfair_refs))
+                )
+            ) or 0
+        out.append({"sport": base, "scraped": len(our_refs), "captured": int(captured)})
+    return out
+
+
 async def pinnacle_archive_capture_by_sport(
     session: AsyncSession,
     *,

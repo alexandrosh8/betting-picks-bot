@@ -1443,7 +1443,7 @@
         </div>
 
         <div class="games-head">
-          <div class="evtitle">Pinnacle archive coverage</div>
+          <div class="evtitle">Sharp-anchor coverage (Pinnacle + Betfair)</div>
           <span class="stamp" id="archive-count">—</span>
           <button
             id="toggle-archive"
@@ -1475,6 +1475,7 @@
               </tbody>
             </table>
           </div>
+          <div class="sub" id="archive-betfair" hidden=""></div>
         </div>
       </section>
 
@@ -1841,6 +1842,29 @@
           }
           tbody.appendChild(tr);
         });
+        // Betfair Exchange coverage (EXACT-ref): of our upcoming scraped games,
+        // how many have a captured Betfair Exchange archive. Sparse by design —
+        // Betfair only renders on liquid majors behind a UK/EU proxy.
+        const bf = Array.isArray(a.betfair_capture) ? a.betfair_capture : [];
+        const bfEl = $("archive-betfair");
+        if (bf.length) {
+          const parts = bf.map(
+            (c) =>
+              (SPORT_LABELS[c.sport] || c.sport) +
+              " " +
+              (Number(c.captured) || 0) +
+              "/" +
+              (Number(c.scraped) || 0),
+          );
+          bfEl.textContent =
+            "Betfair Exchange (sharp anchor, exact-ref) — captured / ours, next 7d: " +
+            parts.join(" · ") +
+            ". Sparse by design: Betfair only renders on liquid majors behind a " +
+            "UK/EU proxy, so most events have no exchange section.";
+          bfEl.hidden = false;
+        } else {
+          bfEl.hidden = true;
+        }
       }
 
       // Resolve a real http(s) URL for the Match external-link icon. Prefers

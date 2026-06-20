@@ -190,6 +190,46 @@ async def test_major_league_gate_disabled_keeps_all_premium() -> None:
     assert LAST_POLL["soccer"]["picks"] == 1
 
 
+async def test_sharp_anchor_loader_injects_betfair_as_live_anchor() -> None:
+    # A soft-only scrape (no Pinnacle/Betfair in the main table — the real
+    # OddsPortal case) anchors on consensus(median). Injecting the captured free
+    # Betfair Exchange line via sharp_anchor_loader makes the pick SHARP-anchored
+    # AT PICK TIME — the "use Betfair/Pinnacle on getting picks" fix.
+    from dataclasses import replace
+
+    soft = [
+        snap("SoftA", "Home FC", 2.45),
+        snap("SoftA", "Draw", 3.30),
+        snap("SoftA", "Away FC", 3.10),
+        snap("SoftB", "Home FC", 2.50),
+        snap("SoftB", "Draw", 3.25),
+        snap("SoftB", "Away FC", 3.05),
+        snap("SoftC", "Home FC", 2.95),
+        snap("SoftC", "Draw", 3.20),
+        snap("SoftC", "Away FC", 2.95),
+    ]
+
+    # Without a loader: consensus-anchored (the current default).
+    sink0 = RecordingSink()
+    picks0 = await run_value_pipeline(make_deps(sink0, FakeLoader(list(soft))), "soccer")
+    assert picks0 and all(p.anchor_type == "consensus" for p in picks0)
+
+    # With the Betfair injector: the same soft scrape now anchors on Betfair.
+    async def betfair_loader(sport_key, snapshots):  # type: ignore[no-untyped-def]
+        return [
+            snap("Betfair Exchange", "Home FC", 2.40),
+            snap("Betfair Exchange", "Draw", 3.45),
+            snap("Betfair Exchange", "Away FC", 3.25),
+        ]
+
+    sink = RecordingSink()
+    deps = replace(make_deps(sink, FakeLoader(list(soft))), sharp_anchor_loader=betfair_loader)
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks, "expected a value pick"
+    assert all(p.anchor_type == "sharp" for p in picks)  # anchored on Betfair, not consensus
+    assert any("betfair" in p.reason_summary.lower() for p in picks)
+
+
 async def test_value_pipeline_records_poll_liveness() -> None:
     # The dashboard/health must be able to tell "engine alive" from "engine
     # dead showing day-old picks" — every cycle records itself, including

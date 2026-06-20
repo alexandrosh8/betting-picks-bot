@@ -8,7 +8,7 @@ joins in roadmap phase 2 alongside event/entity resolution.
 import logging
 import uuid
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -296,6 +296,18 @@ class PipelineDeps:
     # picks for tennis/NFL" without claiming a validated edge. A sport is either
     # visibility_only OR experimental, never both. Default empty.
     experimental_sports: frozenset[str] = frozenset()
+    # OPTIONAL pick-time SHARP-ANCHOR injector (default None = current behavior).
+    # When set, it returns extra OddsSnapshotIn rows — the captured free Betfair
+    # Exchange + Pinnacle ARCADIA prices, re-keyed to the scraped events — which
+    # are MERGED into the live scrape BEFORE anchoring, so a pick anchors on the
+    # SHARP book (Pinnacle/Betfair) instead of the soft-book consensus median.
+    # This makes live picks match the validated Pinnacle-anchored backtest where
+    # a free sharp price is available. Signature: async (sport_key, snapshots)
+    # -> list[OddsSnapshotIn]. Wired at the composition root (app/scheduler.py)
+    # behind VALUE_SHARP_ANCHOR_FROM_ARCHIVES; tests inject a stub.
+    sharp_anchor_loader: (
+        "Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequence[OddsSnapshotIn]]] | None"
+    ) = None
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
@@ -683,7 +695,26 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         _record_poll(sport_key, snapshots, 0, _loader_matches_found(deps.loader, sport_key))
         return []
 
-    grouped = group_market_prices(snapshots)
+    # Optionally MERGE the free Betfair/Pinnacle sharp prices (re-keyed to these
+    # events) into the set used FOR ANCHORING ONLY — so a pick anchors on the
+    # sharp book, not the soft-book consensus median. The original `snapshots`
+    # (scrape) is what gets persisted/counted; only `grouped` sees the extras.
+    # Failure is isolated: sharp injection must NEVER break picking.
+    anchor_snapshots: Sequence[OddsSnapshotIn] = snapshots
+    if deps.sharp_anchor_loader is not None:
+        try:
+            extra = await deps.sharp_anchor_loader(sport_key, snapshots)
+        except Exception as exc:
+            logger.error("sharp-anchor injection failed for %s: %s", sport_key, type(exc).__name__)
+            extra = []
+        if extra:
+            anchor_snapshots = [*snapshots, *extra]
+            logger.info(
+                "value pipeline %s: merged %d free sharp-anchor snapshot(s) for pick anchoring",
+                sport_key,
+                len(extra),
+            )
+    grouped = group_market_prices(anchor_snapshots)
     fair = event_fair_probs(grouped, deps.devig_method)
     await _refresh_kickoffs(deps, {s.event_id for s in snapshots})
     persisted = await _persist_snapshots(deps, snapshots, sport_key, deps.league or sport_key, now)

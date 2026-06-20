@@ -323,6 +323,31 @@ def build_scheduler(
                 settings.value_ml_manifest_filename,
             )
             ml_filter_enforced = False
+        # OPTIONAL: anchor live picks on the free Betfair/Pinnacle sharp prices
+        # (VALUE_SHARP_ANCHOR_FROM_ARCHIVES) instead of the soft-book consensus —
+        # merging the captured archives into the anchor set at pick time. Default
+        # OFF; needs the archives populated (BETFAIR_EXCHANGE_ENABLED/ARCADIA).
+        sharp_anchor_loader = None
+        if (
+            use_value
+            and settings.value_sharp_anchor_from_archives
+            and session_factory is not None
+            and directory is not None
+        ):
+            from app.clv_trueup import build_sharp_anchor_loader
+
+            sharp_anchor_loader = build_sharp_anchor_loader(
+                session_factory,
+                directory,
+                use_betfair=settings.betfair_exchange_enabled,
+                use_pinnacle=settings.arcadia_enabled,
+            )
+            logger.info(
+                "LIVE sharp-anchor injection ENABLED (betfair=%s pinnacle=%s) — picks "
+                "anchor on the free sharp price where available, not consensus",
+                settings.betfair_exchange_enabled,
+                settings.arcadia_enabled,
+            )
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -354,6 +379,7 @@ def build_scheduler(
             # shadow picks, never alerted) when ENABLE_UNVALIDATED_PICKS is on.
             visibility_only_sports=visibility_only_sports,
             experimental_sports=experimental_sports,
+            sharp_anchor_loader=sharp_anchor_loader,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 

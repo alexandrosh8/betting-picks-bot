@@ -574,6 +574,17 @@ class Settings(BaseSettings):
     # only fills the gap. Requires BETFAIR_EXCHANGE_ENABLED so a close exists.
     clv_use_betfair_exchange: bool = False
 
+    # When true, the LIVE pick pipeline MERGES the captured free Betfair Exchange
+    # + Pinnacle ARCADIA prices (re-keyed to each scraped event) into the anchor
+    # set, so a pick anchors on the SHARP book instead of the soft-book consensus
+    # median — making live picks match the validated Pinnacle-anchored backtest
+    # wherever a free sharp price exists (Betfair = exact-ref, Pinnacle = strict
+    # name match). Default OFF (current behavior = consensus-anchored). Needs
+    # ARCADIA_ENABLED / BETFAIR_EXCHANGE_ENABLED so the archives are populated;
+    # uses the SAME re-key/strict-match path as the settlement-time CLV close, so
+    # no new false-match surface. Betfair needs a UK/EU proxy + a liquid major.
+    value_sharp_anchor_from_archives: bool = False
+
     # --- ESPN free results auto-settlement (read-only SCORES, never odds) ----
     # ESPN's public site API gives final scores for basketball / NFL / tennis
     # with no key (app/ingestion/espn_scores.py), so the CLOSED tab auto-shows

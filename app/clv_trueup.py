@@ -16,7 +16,7 @@ only trusted while it stays positive (docs/backtesting/value-findings.md).
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -27,7 +27,7 @@ from sqlalchemy.orm import aliased
 
 from app.backtesting.clv import clv_log
 from app.edge.value import anchor_type_for, effective_odds
-from app.ingestion.base import OddsLoader
+from app.ingestion.base import EventDirectory, OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
 from app.resolution.shadow import arcadia_base_sport
@@ -569,25 +569,18 @@ async def _pinnacle_archive_close(
     )
 
 
-async def _betfair_exchange_close(
-    session: "AsyncSession",
-    pick: Pick,
-    external_ref: str,
-    kickoff: datetime,
+async def resolve_betfair_back_snaps(
+    session: "AsyncSession", external_ref: str, kickoff: datetime
 ) -> list[OddsSnapshotIn]:
-    """The captured Betfair Exchange BACK close for this pick, re-keyed to the
-    pick's own event_id, or [].
-
-    EXACT resolution (no fuzzy, no alias table, no kickoff window): the Betfair
-    capture persists its event under external_ref ``"betfair:" + <pick ref>``
-    (app/ingestion/betfair_exchange._namespace_event_ref), and external_ref is
-    globally unique (uq_events_external_ref), so the betfair event is found by a
-    single deterministic lookup. None present -> [] -> caller's behaviour
-    unchanged. The returned snaps are the betfair event's close rows
-    (bookmaker="Betfair Exchange") re-keyed to the PICK's external_ref so they
-    group with the pick's market in event_fair_probs — the namespacing prefix
-    that keeps the live event separate at capture time must be stripped here so
-    the close anchors the pick.
+    """Captured Betfair Exchange BACK snapshots for an event, re-keyed to its own
+    external_ref, or []. EXACT resolution (no fuzzy/alias): the Betfair capture
+    persists under external_ref ``"betfair:" + ref`` (betfair_exchange.
+    _namespace_event_ref), globally unique, so one deterministic lookup finds it.
+    Re-keys rows off the "betfair:" namespace to ``external_ref`` so they group
+    with that event's market in event_fair_probs. Used BOTH at settlement (the
+    close) and at PICK TIME (the live sharp anchor) — at pick time the cutoff is
+    the future kickoff, so closing_odds_from_snapshots returns the latest
+    CAPTURED price = the current sharp line.
     """
     from app.ingestion.betfair_exchange import _namespace_event_ref
 
@@ -597,13 +590,69 @@ async def _betfair_exchange_close(
     )
     if betfair_event_id is None:
         return []
-    # closing_odds_from_snapshots re-keys every row to the external_ref it is
-    # passed (betfair_ref here); re-key once more to the PICK's ref so the close
-    # groups with the pick's own market rather than a "betfair:"-namespaced one.
     snaps, _last = await closing_odds_from_snapshots(
         session, betfair_event_id, betfair_ref, kickoff
     )
     return [snap.model_copy(update={"event_id": external_ref}) for snap in snaps]
+
+
+async def _betfair_exchange_close(
+    session: "AsyncSession",
+    pick: Pick,
+    external_ref: str,
+    kickoff: datetime,
+) -> list[OddsSnapshotIn]:
+    """Settlement-time wrapper: the Betfair Exchange BACK close for this pick."""
+    return await resolve_betfair_back_snaps(session, external_ref, kickoff)
+
+
+def build_sharp_anchor_loader(
+    session_factory: "async_sessionmaker",
+    directory: EventDirectory,
+    *,
+    use_betfair: bool,
+    use_pinnacle: bool,
+) -> Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[list[OddsSnapshotIn]]]:
+    """Pick-time SHARP-ANCHOR loader for PipelineDeps.sharp_anchor_loader.
+
+    For each scraped event it returns the captured free Betfair Exchange (EXACT
+    ref) and/or Pinnacle ARCADIA (STRICT name match) snapshots re-keyed to that
+    event, so run_value_pipeline anchors the pick on the SHARP book instead of
+    the soft-book consensus median. Reuses the SAME resolution as the
+    settlement-time CLV close — no new false-match surface. Per-event failures
+    propagate to the pipeline's isolated try/except (picking never breaks).
+    """
+    from app.storage.repositories import resolve_pinnacle_close_snaps
+
+    async def loader(sport_key: str, snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
+        base = arcadia_base_sport(sport_key)
+        out: list[OddsSnapshotIn] = []
+        seen: set[str] = set()
+        async with session_factory() as session:
+            for snap in snapshots:
+                ref = snap.event_id
+                if ref in seen:
+                    continue
+                seen.add(ref)
+                teams = directory.lookup(ref)
+                if teams is None or teams.starts_at is None:
+                    continue  # need a kickoff for the cutoff + the pinnacle match
+                if use_betfair:
+                    out.extend(await resolve_betfair_back_snaps(session, ref, teams.starts_at))
+                if use_pinnacle:
+                    out.extend(
+                        await resolve_pinnacle_close_snaps(
+                            session,
+                            pinnacle_sport_key=f"pinnacle_{base}",
+                            pick_external_ref=ref,
+                            home=teams.home,
+                            away=teams.away,
+                            kickoff=teams.starts_at,
+                        )
+                    )
+        return out
+
+    return loader
 
 
 async def true_up_clv(

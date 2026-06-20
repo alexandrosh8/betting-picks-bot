@@ -1302,18 +1302,10 @@
           <button
             type="button"
             role="tab"
-            data-status="closed"
+            data-status="results"
             aria-selected="false"
           >
-            CLOSED
-          </button>
-          <button
-            type="button"
-            role="tab"
-            data-status="settled"
-            aria-selected="false"
-          >
-            SETTLED
+            RESULTS
           </button>
         </div>
         <div class="toolbar-filters">
@@ -1665,6 +1657,12 @@
       function inClosedTab(p) {
         return p.status === "alerted" && hasStarted(p);
       }
+      // RESULTS tab = every pick whose match has kicked off, merged: still-open
+      // ones show their won/lost/awaiting result (graded from the auto-fetched
+      // score), settled ones show the recorded outcome + P&L. One ledger.
+      function inResultsTab(p) {
+        return hasStarted(p) || p.status === "settled";
+      }
       function inUnverifiedTab(p) {
         return p.status === "alerted" && !hasStarted(p) && !inLiveTab(p);
       }
@@ -1704,18 +1702,13 @@
           hint.textContent =
             "Pre-kickoff picks land here when their last re-price is older than " +
             "the verified window; they return to LIVE on the next cycle. Once a " +
-            "match kicks off the pick moves to CLOSED.";
-        } else if (STATUS_TAB === "closed") {
-          title.textContent = "NO CLOSED PICKS";
+            "match kicks off the pick moves to RESULTS.";
+        } else if (STATUS_TAB === "results") {
+          title.textContent = "NO RESULTS YET";
           hint.textContent =
-            "Picks land here once their match kicks off: the line has closed, " +
-            "CLV is locked, and the close price shows in the Odds cell. This is " +
-            "the proof-of-edge ledger — Settle a finished game to record its result.";
-        } else if (STATUS_TAB === "settled") {
-          title.textContent = "NO SETTLED PICKS";
-          hint.textContent =
-            "Settled picks show their recorded result, P&L and final CLV " +
-            "here once you settle a match or auto-settlement records one.";
+            "Once a pick's match kicks off it lands here: the line closes, CLV " +
+            "locks, and its WON/LOST result + P&L auto-fill from the fetched " +
+            "final score — no manual settling. ROI is computed automatically.";
         } else {
           title.textContent = "NO PICKS MATCH";
           hint.textContent =
@@ -2458,7 +2451,6 @@
       // settled/superseded keep their own word. Adds the settle button for
       // past-kickoff open picks (LIVE/UNVERIFIED views only).
       function cellStatus(tr, p) {
-        const kickoffKnown = p.starts_at != null;
         const isVolume = tierOf(p) === "volume";
         const closed = hasStarted(p); // kicked off: line closed, awaiting result
         const statusBadge = badge(
@@ -2500,73 +2492,9 @@
         }
         const statusCell = td(tr, statusBadge);
         statusCell.dataset.label = "Status";
-        // Manual settle: past-kickoff open picks only. TBD kickoffs
-        // (starts_at null) must not invite settling an unstarted match.
-        if (
-          p.status === "alerted" &&
-          kickoffKnown &&
-          new Date(p.starts_at) < Date.now()
-        ) {
-          const btn = document.createElement("button");
-          btn.textContent = "settle";
-          btn.style.marginLeft = "6px";
-          btn.addEventListener("click", () => settleEvent(p));
-          statusCell.appendChild(btn);
-          // Best-effort scraped final score as a muted hint on the CLOSED tab:
-          // a CONVENIENCE preview of what the settle prompt will pre-fill, only
-          // when we scraped the match after it finished. NOT the confirmed
-          // result — that is the SETTLED Score column. textContent only.
-          // CLOSED-tab value-bet RESULT: how this pick landed from the scraped
-          // final score, BEFORE formal settlement, so you can compare it against
-          // the value bet you were given. PROVISIONAL — confirm by settling; the
-          // SETTLED tab carries the authoritative recorded outcome + P&L.
-          if (p.provisional_outcome) {
-            const rb = badge(
-              p.provisional_outcome.replace("_", " ").toUpperCase(),
-              _OUTCOME_CLS[p.provisional_outcome] || "b-neutral",
-            );
-            rb.style.marginLeft = "6px";
-            rb.title =
-              "PROVISIONAL result graded from the scraped final score — how this " +
-              "value bet landed, before formal settlement. Confirm by settling; " +
-              "the SETTLED tab shows the recorded outcome + P&L.";
-            statusCell.appendChild(rb);
-            const extra = [];
-            if (p.scraped_score) extra.push(p.scraped_score);
-            if (p.provisional_pnl != null) {
-              const v = Number(p.provisional_pnl);
-              extra.push((v >= 0 ? "+" : "") + v.toFixed(2));
-            }
-            if (extra.length) {
-              const s = document.createElement("span");
-              s.textContent = " " + extra.join("  ");
-              s.style.marginLeft = "4px";
-              s.style.color = "var(--faint)";
-              s.style.fontSize = "0.85em";
-              statusCell.appendChild(s);
-            }
-          } else if (p.scraped_score) {
-            const hint = document.createElement("span");
-            hint.textContent = "scraped: " + p.scraped_score;
-            hint.style.marginLeft = "6px";
-            hint.style.color = "var(--faint)";
-            hint.style.fontSize = "0.85em";
-            hint.title =
-              "Final score scraped from OddsPortal after the match finished. " +
-              "Pre-fills the Settle prompt — confirm or edit it; not a recorded result.";
-            statusCell.appendChild(hint);
-          } else {
-            const wait = document.createElement("span");
-            wait.textContent = "awaiting result";
-            wait.style.marginLeft = "6px";
-            wait.style.color = "var(--faint)";
-            wait.style.fontSize = "0.85em";
-            wait.title =
-              "Kicked off (line closed, CLV locked). The result shows here once " +
-              "the final score is available.";
-            statusCell.appendChild(wait);
-          }
-        }
+        // LIVE / UNVERIFIED only show here (both pre-kickoff). A kicked-off pick
+        // lives on the RESULTS tab, where its won/lost/awaiting outcome + P&L are
+        // shown and recorded by AUTO-settlement — there is no manual settle here.
       }
 
       // SETTLED-only cells: recorded result + realized P&L. outcome/pnl are
@@ -2584,30 +2512,50 @@
       // additive backend field (ResultTracking home_score/away_score); null on
       // CLOSED/unsettled rows or when no score was recorded -> "—".
       function cellScore(tr, p) {
-        const cell = td(tr, p.score ? p.score : "—");
+        // recorded score, else the auto-fetched scraped final score (RESULTS tab
+        // shows just-finished games before formal settlement records them).
+        const cell = td(tr, p.score || p.scraped_score || "—");
         cell.dataset.label = "Score";
       }
       function cellResult(tr, p) {
         let cell;
-        if (p.outcome) {
+        // recorded outcome wins; else the provisional grade from the auto-fetched
+        // score; else the game is still in play -> awaiting.
+        const oc = p.outcome || p.provisional_outcome;
+        if (oc) {
           cell = td(
             tr,
-            badge(p.outcome, _OUTCOME_CLS[p.outcome] || "b-neutral"),
+            badge(
+              oc.replace("_", " ").toUpperCase(),
+              _OUTCOME_CLS[oc] || "b-neutral",
+            ),
           );
+          cell.title = p.outcome
+            ? "recorded result"
+            : "PROVISIONAL — graded from the auto-fetched final score; " +
+              "auto-settlement records it (no manual entry).";
         } else {
-          cell = td(tr, badge("SETTLED", "b-neutral"));
-          cell.title = "result not recorded for this pick";
+          cell = td(tr, "awaiting result");
+          cell.style.color = "var(--faint)";
+          cell.title =
+            "Kicked off (line closed, CLV locked). Result + P&L auto-fill " +
+            "here once the final score is fetched.";
         }
         cell.dataset.label = "Result";
       }
       function cellPnl(tr, p) {
         let cell;
-        if (p.pnl === null || p.pnl === undefined) {
+        // recorded P&L, else the provisional P&L from the auto-fetched score.
+        const raw = p.pnl != null ? p.pnl : p.provisional_pnl;
+        if (raw === null || raw === undefined) {
           cell = td(tr, "—");
         } else {
-          const v = Number(p.pnl);
+          const v = Number(raw);
           cell = td(tr, (v >= 0 ? "+" : "") + v.toFixed(2));
           if (v < 0) cell.style.color = "var(--neg)";
+          if (p.pnl == null)
+            cell.title =
+              "provisional (from the auto-fetched score, pre-settlement)";
         }
         cell.dataset.label = "P&L";
       }
@@ -2843,15 +2791,16 @@
       function render() {
         const tier = $("f-tier").value;
         const q = $("f-search").value.trim().toLowerCase();
-        const settledView = STATUS_TAB === "settled";
-        // LIVE = freshly-repriced open picks that have NOT kicked off ·
-        // UNVERIFIED = open picks that are stale OR have kicked off (awaiting
-        // settle) · SETTLED = results recorded.
+        // RESULTS reuses the results-oriented (ex-SETTLED) column layout, so the
+        // long-standing `settledView` flag now means "the results view".
+        const settledView = STATUS_TAB === "results";
+        // LIVE = freshly-repriced open picks, pre-kickoff · UNVERIFIED = stale
+        // pre-kickoff · RESULTS = every kicked-off pick (won/lost/awaiting +
+        // recorded settlements) — the merged proof-of-edge + outcome ledger.
         const matchesTab = (p) => {
           if (STATUS_TAB === "live") return inLiveTab(p);
           if (STATUS_TAB === "unverified") return inUnverifiedTab(p);
-          if (STATUS_TAB === "closed") return inClosedTab(p);
-          if (STATUS_TAB === "settled") return p.status === "settled";
+          if (STATUS_TAB === "results") return inResultsTab(p);
           return true;
         };
         // tier+search scope (NOT tab-filtered) — used both for the tab counts
@@ -2879,14 +2828,12 @@
         const tabCounts = {
           live: scoped.filter(inLiveTab).length,
           unverified: scoped.filter(inUnverifiedTab).length,
-          closed: scoped.filter(inClosedTab).length,
-          settled: scoped.filter((p) => p.status === "settled").length,
+          results: scoped.filter(inResultsTab).length,
         };
         const TAB_LABELS = {
           live: "LIVE",
           unverified: "UNVERIFIED",
-          closed: "CLOSED",
-          settled: "SETTLED",
+          results: "RESULTS",
         };
         for (const b of document.querySelectorAll(
           "#status-tabs button[data-status]",
@@ -2899,10 +2846,34 @@
         // has a CLV row: how many beat the de-vigged close + the mean CLV.
         const scoreEl = $("clv-scorecard");
         if (scoreEl) {
-          if (STATUS_TAB === "closed") {
-            const graded = scoped
-              .filter(inClosedTab)
-              .filter((p) => p.clv_log != null);
+          if (STATUS_TAB === "results") {
+            const finished = scoped.filter(inResultsTab);
+            // Won-Lost-Push from the recorded outcome, else the provisional
+            // (scraped-score) grade so just-finished games count too. Stake-
+            // weighted ROI lives in the PROOF OF EDGE header above — it is never
+            // shown here (the dashboard does not surface stake sizing).
+            const resd = finished
+              .map((p) => p.outcome || p.provisional_outcome)
+              .filter(Boolean);
+            const w = resd.filter(
+              (o) => o === "won" || o === "half_won",
+            ).length;
+            const l = resd.filter(
+              (o) => o === "lost" || o === "half_lost",
+            ).length;
+            const pu = resd.filter((o) => o === "push" || o === "void").length;
+            const graded = finished.filter((p) => p.clv_log != null);
+            const parts = [];
+            if (resd.length)
+              parts.push(
+                resd.length +
+                  " settled · " +
+                  w +
+                  "W-" +
+                  l +
+                  "L" +
+                  (pu ? "-" + pu + "P" : ""),
+              );
             if (graded.length) {
               const beat = graded.filter((p) => p.beat_close).length;
               const meanClv =
@@ -2912,19 +2883,20 @@
                 ) /
                   graded.length) *
                 100;
-              scoreEl.textContent =
-                "CLV ledger — " +
-                graded.length +
-                " closed · " +
+              parts.push(
                 Math.round((beat / graded.length) * 100) +
-                "% beat the close · mean CLV " +
-                (meanClv >= 0 ? "+" : "") +
-                meanClv.toFixed(1) +
-                "%. Consistently positive CLV is the only proof of real edge.";
-            } else {
-              scoreEl.textContent =
-                "CLV ledger — no closed picks have a CLV row yet.";
+                  "% beat close · mean CLV " +
+                  (meanClv >= 0 ? "+" : "") +
+                  meanClv.toFixed(1) +
+                  "%",
+              );
             }
+            scoreEl.textContent = parts.length
+              ? "RESULTS — " +
+                parts.join(" · ") +
+                ". CLV is the leading proof of edge (ROI + record in the header above)."
+              : "RESULTS — no kicked-off picks yet. Won/lost auto-fills here " +
+                "automatically once games finish.";
             scoreEl.style.display = "";
           } else {
             scoreEl.style.display = "none";

@@ -668,22 +668,23 @@ def test_picks_serializer_exposes_closing_odds() -> None:
     assert "p.closing_odds" in src
 
 
-def test_dashboard_has_closed_tab_and_clv_scorecard() -> None:
-    """The CLOSED tab is the proof-of-edge ledger: every kicked-off pick (line
-    closed, CLV locked), split out of the old conflated UNVERIFIED tab. It is
-    topped by a CLV scorecard (% that beat the close + mean CLV), computed
-    client-side from the closed picks' clv_log/beat_close — text only."""
+def test_dashboard_has_results_tab_and_clv_scorecard() -> None:
+    """The RESULTS tab MERGES the old CLOSED + SETTLED tabs: every kicked-off
+    pick (line closed, CLV locked) — still-open ones show their won/lost/awaiting
+    result graded from the auto-fetched score, settled ones show the recorded
+    outcome + P&L. Topped by a scorecard (W-L-P record + % beat close + mean
+    CLV), computed client-side — text only. No separate CLOSED/SETTLED tabs."""
     text = TestClient(make_app()).get("/").text
-    # the 4-tab segmented control includes CLOSED, between UNVERIFIED and SETTLED
-    assert 'data-status="closed"' in text
-    assert ">\n          CLOSED\n        </button>" in text or "CLOSED" in text
-    # the tab predicate + router branch exist
-    assert "function inClosedTab(" in text
-    assert 'STATUS_TAB === "closed"' in text
-    # the CLV scorecard element + its proof-of-edge headline (textContent)
+    # the 3-tab segmented control: LIVE | UNVERIFIED | RESULTS (CLOSED+SETTLED merged)
+    assert 'data-status="results"' in text
+    assert 'data-status="closed"' not in text
+    assert 'data-status="settled"' not in text
+    # the merged tab predicate + router branch exist
+    assert "function inResultsTab(" in text
+    assert 'STATUS_TAB === "results"' in text
+    # the scorecard element + its proof-of-edge headline (textContent)
     assert 'id="clv-scorecard"' in text
-    assert "CLV ledger" in text
-    assert "beat the close" in text
+    assert "beat close" in text
     assert "innerHTML" not in text
 
 

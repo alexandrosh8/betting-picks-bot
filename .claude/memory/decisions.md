@@ -1,5 +1,28 @@
 # Decisions Log
 
+- 2026-06-20 (CLV close-anchor provenance — ADR-0017) — an adversarial review
+  found the CLV TRUST METRIC was partly contaminated: a pick's `anchor_type` is
+  the CREATION anchor, but the CLOSE (computed later by clv_trueup) can be
+  anchored by a soft-book CONSENSUS median, or be a poll-time REVALIDATION
+  FALLBACK (`closing_odds` NULL) — and both were reported under the creation
+  anchor and counted in the headline stake-weighted CLV with NO provenance
+  filter. Fix (additive, feature-detected like anchor_type): new
+  `Pick.closing_anchor_type` (migration d3b8f1c7a9e2) set by BOTH write paths
+  (revalidate_open_picks + finalize_closing_from_snapshots) from the anchor
+  event_fair_probs already returns (was discarded). A close is TRUSTED ("sharp
+  close") iff snapshot-sourced (closing_odds NOT NULL) AND named-sharp-anchored
+  (pinnacle/sharp, NOT consensus). live_evidence_report gains a `sharp_close`
+  stratum + `by_close_anchor`; performance_report/\_aggregate_settled gain
+  `n_sharp_close`/`sharp_stake_weighted_clv_log`/`sharp_beat_close_rate` —
+  alongside (not replacing) the blended headline, so the operator SEES how much
+  CLV is genuine sharp evidence. `by_anchor` keeps its CREATION-anchor contract
+  (the deliberate consensus-creation forward test). 957 tests green, ruff/mypy/
+  safety clean, migration up/down verified. NOTE: contested review finding —
+  soft-book consensus circular edge reaching premium — was NOT treated as a bug
+  (the team's pre-registered validation shows consensus is +CLV at the premium
+  threshold and is deliberately tracked forward via anchor_type). odds_api-only
+  anchor-freshness gap deferred (default oddsportal shares one captured_at).
+
 - 2026-06-20 (major-league PREMIUM gate — ADR-0016) — the honest-high-ROI lever
   is scoping the ALERTING tier to leagues with real sharp coverage, NOT looser
   matching. New `VALUE_MAJOR_LEAGUES` (csv of scraped `league_name`) → frozen

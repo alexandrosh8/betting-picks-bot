@@ -377,9 +377,14 @@ async def test_performance_report_aggregates(session) -> None:  # type: ignore[n
     won = await seed_pick(session, "evt-perf-1")  # Over 2.5, odds 2.10, stake 20
     won.clv_log = Decimal("0.05")
     won.beat_close = True
+    # Genuine sharp close: snapshot-sourced (closing_odds set) + Pinnacle anchor.
+    won.closing_anchor_type = "pinnacle"
+    won.closing_odds = Decimal("2.1000")
     lost = await seed_pick(session, "evt-perf-2")
     lost.clv_log = Decimal("-0.01")
     lost.beat_close = False
+    # The lost pick has NO sharp close (no closing_odds / anchor) -> excluded
+    # from the trusted sharp-close headline below.
     book = ScoreBook(
         [
             FinalScore(HOME, AWAY, KICKOFF.date(), 2, 1),  # only evt-perf-1's event? no —
@@ -401,6 +406,12 @@ async def test_performance_report_aggregates(session) -> None:  # type: ignore[n
     # stake-weighted clv: equal stakes -> mean of 0.05 and -0.01 = 0.02
     assert report["stake_weighted_clv_log"] == "0.02"
     assert report["beat_close_rate"] == "0.5"
+    # Trusted sharp-close subset: only the WON pick has a snapshot-sourced
+    # Pinnacle close, so the honest sharp-close headline reflects it alone
+    # (the blended headline above mixes in the non-sharp-close lost pick).
+    assert report["n_sharp_close"] == 1
+    assert report["sharp_stake_weighted_clv_log"] == "0.05"
+    assert report["sharp_beat_close_rate"] == "1"
     assert report["n_pending"] == 0
     # headline numbers are PREMIUM-scoped, and the payload says so
     assert report["tier_scope"] == "premium"

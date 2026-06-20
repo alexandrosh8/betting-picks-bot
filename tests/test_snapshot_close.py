@@ -201,6 +201,9 @@ async def test_settlement_prefers_snapshot_close_when_coverage_good(session) -> 
     # Provenance: closing_odds is written ONLY by the snapshot path — the
     # pick's own book's close-row price.
     assert pick.closing_odds == Decimal("2.3000")
+    # Close-anchor provenance: the close was anchored by Pinnacle (a named sharp
+    # book pricing the full market) — so this is a genuine sharp close.
+    assert pick.closing_anchor_type == "pinnacle"
 
 
 async def test_stale_coverage_falls_back_to_rescrape_close(session) -> None:  # type: ignore[no-untyped-def]

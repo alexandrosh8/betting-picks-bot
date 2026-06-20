@@ -26,7 +26,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import aliased
 
 from app.backtesting.clv import clv_log
-from app.edge.value import effective_odds
+from app.edge.value import anchor_type_for, effective_odds
 from app.ingestion.base import OddsLoader
 from app.pipeline import event_fair_probs, group_market_prices
 from app.probabilities.devig import DevigMethod
@@ -65,11 +65,13 @@ async def revalidate_open_picks(
     # disambiguate submarkets that share one Market enum value.
     grouped = group_market_prices(snapshots)
     fair_by_key: dict[tuple[str, str, str], float] = {}
-    for (event_id, market, _detail), (_book, fair) in event_fair_probs(
+    anchor_by_key: dict[tuple[str, str, str], str] = {}
+    for (event_id, market, _detail), (book, fair) in event_fair_probs(
         grouped, devig_method
     ).items():
         for sel, p in fair.items():
             fair_by_key[(event_id, str(market), sel)] = p
+            anchor_by_key[(event_id, str(market), sel)] = book
     prices_by_key: dict[tuple[str, str, str], dict[str, float]] = {}
     for (event_id, market, _detail), (prices, _captured) in grouped.items():
         for sel, books in prices.items():
@@ -108,6 +110,14 @@ async def revalidate_open_picks(
             pick.closing_fair_probability = Decimal(f"{closing_fair:.6f}")
             pick.clv_log = Decimal(f"{clv:.6f}")
             pick.beat_close = clv > 0
+            close_anchor = anchor_by_key.get(key)
+            if close_anchor:
+                # CLOSE-side provenance: the anchor that priced this re-scrape
+                # close. This path never writes closing_odds, so the close is a
+                # poll-time FALLBACK (not a snapshot close); honest CLV trusts it
+                # only if finalize_closing_from_snapshots later overwrites with a
+                # sharp anchor AND closing_odds (the snapshot-close marker).
+                pick.closing_anchor_type = anchor_type_for(close_anchor)
             books = prices_by_key.get(key) or {}
             # The pick's own book is the actionable price; if it dropped the
             # market, the best remaining price is what a bettor could take —
@@ -472,11 +482,13 @@ async def finalize_closing_from_snapshots(
             )
     grouped = group_market_prices(snaps)
     fair_by_key: dict[tuple[str, str], float] = {}
-    for (_event, market, _detail), (_anchor, fair_by_sel) in event_fair_probs(
+    anchor_by_key: dict[tuple[str, str], str] = {}
+    for (_event, market, _detail), (anchor, fair_by_sel) in event_fair_probs(
         grouped, devig_method
     ).items():
         for sel, p in fair_by_sel.items():
             fair_by_key[(str(market), sel)] = p
+            anchor_by_key[(str(market), sel)] = anchor
     fair = fair_by_key.get((pick.market, pick.selection))
     if fair is None or not 0.0 < fair < 1.0:
         logger.info(
@@ -502,6 +514,13 @@ async def finalize_closing_from_snapshots(
     pick.closing_fair_probability = Decimal(f"{fair:.6f}")
     pick.clv_log = Decimal(f"{clv:.6f}")
     pick.beat_close = clv > 0
+    close_anchor = anchor_by_key.get((pick.market, pick.selection))
+    if close_anchor:
+        # CLOSE-side provenance from the SNAPSHOT close (pinnacle/sharp/
+        # consensus). Together with closing_odds (written just below as the
+        # snapshot-close marker), a sharp value here marks a genuine sharp
+        # close the per-anchor and headline CLV can trust.
+        pick.closing_anchor_type = anchor_type_for(close_anchor)
     if close_odds is not None and close_odds > 1.0:
         pick.closing_odds = Decimal(f"{close_odds:.4f}")
     logger.info(

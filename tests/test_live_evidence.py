@@ -24,6 +24,8 @@ def row(
     stake: float = 10.0,
     pnl: float | None = 1.0,
     anchor: str | None = None,
+    closing_anchor: str | None = None,
+    has_snapshot: bool = False,
 ) -> SettledPickRow:
     return SettledPickRow(
         tier=tier,
@@ -33,7 +35,48 @@ def row(
         stake=stake,
         pnl=pnl,
         anchor_type=anchor,
+        closing_anchor_type=closing_anchor,
+        has_snapshot_close=has_snapshot,
     )
+
+
+def test_sharp_close_stratum_counts_only_genuine_sharp_snapshot_closes() -> None:
+    # Honest CLV: only a SNAPSHOT-sourced close anchored by a NAMED sharp book
+    # (pinnacle/exchange) is trusted. A consensus-median close and a
+    # revalidation FALLBACK close (no snapshot close = closing_odds NULL) are
+    # excluded — they contaminated the headline before this fix.
+    rows = [
+        row(clv=0.05, beat=True, stake=10.0, closing_anchor="pinnacle", has_snapshot=True),
+        row(clv=0.03, beat=True, stake=10.0, closing_anchor="sharp", has_snapshot=True),
+        row(clv=0.20, beat=True, stake=10.0, closing_anchor="consensus", has_snapshot=True),
+        row(clv=0.15, beat=True, stake=10.0, closing_anchor="pinnacle", has_snapshot=False),
+    ]
+    sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
+    assert sc["n"] == 2  # only the two trusted sharp snapshot closes
+    assert sc["stake_weighted_clv_log"] == pytest.approx((10 * 0.05 + 10 * 0.03) / 20)
+    assert sc["sufficient"] is True
+
+
+def test_sharp_close_stratum_is_zero_when_no_trusted_closes() -> None:
+    rows = [row(clv=0.5, closing_anchor="consensus", has_snapshot=True)]
+    sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
+    assert sc["n"] == 0
+    assert sc["sufficient"] is False
+
+
+def test_by_close_anchor_groups_on_the_close_anchor_not_creation() -> None:
+    # A pick CREATED pinnacle-anchored but CLOSED on consensus belongs in the
+    # consensus CLOSE bucket — that is the anchor CLV actually measures against.
+    rows = [
+        row(clv=0.02, anchor="pinnacle", closing_anchor="consensus", has_snapshot=True),
+        row(clv=0.04, anchor="consensus", closing_anchor="pinnacle", has_snapshot=True),
+    ]
+    report = live_evidence_report(rows, ml_threshold=None, min_n=1)
+    assert set(report["by_close_anchor"]) == {"consensus", "pinnacle"}
+    assert report["by_close_anchor"]["consensus"]["n"] == 1
+    assert report["by_close_anchor"]["pinnacle"]["n"] == 1
+    # by_anchor (CREATION anchor) keeps its existing contract, unchanged
+    assert set(report["by_anchor"]) == {"pinnacle", "consensus"}
 
 
 def test_score_buckets_split_on_q_star_inclusive() -> None:

@@ -152,6 +152,8 @@ async def test_true_up_fills_clv_fields(factory) -> None:  # type: ignore[no-unt
         # fill 2.50 vs close fair ~0.435 -> clv_log = ln(2.50*0.435) > 0
         assert float(pick.clv_log) > 0
         assert pick.beat_close is True
+        # Close-anchor provenance: the close fair was anchored by Pinnacle.
+        assert pick.closing_anchor_type == "pinnacle"
 
 
 async def test_true_up_includes_volume_tier_picks(factory) -> None:  # type: ignore[no-untyped-def]

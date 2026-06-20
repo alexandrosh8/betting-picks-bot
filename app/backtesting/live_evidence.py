@@ -36,6 +36,13 @@ from typing import Any
 #: dashboard shows the state instead of point estimates.
 MIN_STRATUM_N = 50
 
+#: Close anchors that make a close TRUSTABLE for honest CLV — a NAMED sharp
+#: book priced it, not a soft-book consensus median. Mirrors the persisted
+#: anchor_type values app/edge/value.anchor_type_for emits (pinnacle / sharp);
+#: kept local so this module stays stdlib-pure. "consensus" is deliberately
+#: excluded (a soft-book median close is not a sharp close).
+_SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
+
 
 @dataclass(frozen=True)
 class SettledPickRow:
@@ -47,7 +54,19 @@ class SettledPickRow:
     beat_close: bool | None
     stake: float  # recommended stake (same weighting as performance_report)
     pnl: float | None  # None = outcome recorded without a pnl figure
-    anchor_type: str | None = None  # None = column absent or value missing
+    anchor_type: str | None = None  # CREATION anchor — None = column absent or value missing
+    # CLOSE-side provenance (the anchor that produced closing_fair / clv_log):
+    closing_anchor_type: str | None = None  # pinnacle / sharp / consensus; None = unknown
+    has_snapshot_close: bool = False  # closing_odds present => a true snapshot close,
+    #                                   not a poll-time revalidation fallback
+
+    @property
+    def sharp_close(self) -> bool:
+        """A TRUSTED close for honest CLV: snapshot-sourced (not a poll-time
+        revalidation fallback) AND anchored by a named sharp book (not a
+        soft-book consensus median). These are the closes whose CLV the
+        platform can stand behind."""
+        return self.has_snapshot_close and self.closing_anchor_type in _SHARP_CLOSE_ANCHORS
 
 
 def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]:
@@ -123,11 +142,18 @@ def live_evidence_report(
     by_score: dict[str, list[SettledPickRow]] = {}
     by_tier: dict[str, list[SettledPickRow]] = {}
     by_anchor: dict[str, list[SettledPickRow]] = {}
+    by_close_anchor: dict[str, list[SettledPickRow]] = {}
     for row in rows:
         by_score.setdefault(_score_bucket(row.value_filter_score, ml_threshold), []).append(row)
         by_tier.setdefault(row.tier, []).append(row)
         if row.anchor_type is not None:
             by_anchor.setdefault(row.anchor_type, []).append(row)
+        if row.closing_anchor_type is not None:
+            by_close_anchor.setdefault(row.closing_anchor_type, []).append(row)
+    # The TRUSTED subset: closes the platform can stand behind for honest CLV
+    # (a genuine sharp snapshot close, not a consensus median or a poll-time
+    # revalidation fallback). Always reported — n=0 honestly says "none yet".
+    sharp_rows = [r for r in rows if r.sharp_close]
 
     return {
         "n_settled": len(rows),
@@ -135,9 +161,19 @@ def live_evidence_report(
         "min_n": min_n,
         "by_score": {k: _stratum_stats(v, min_n) for k, v in sorted(by_score.items())},
         "by_tier": {k: _stratum_stats(v, min_n) for k, v in sorted(by_tier.items())},
+        # by_anchor stratifies on the CREATION anchor (the consensus-fallback
+        # forward test); by_close_anchor stratifies on the anchor that produced
+        # each CLOSE — the anchor CLV is actually measured against, so a
+        # pinnacle-created/consensus-closed pick lands in the consensus stratum.
         "by_anchor": (
             {k: _stratum_stats(v, min_n) for k, v in sorted(by_anchor.items())}
             if by_anchor
             else None
         ),
+        "by_close_anchor": (
+            {k: _stratum_stats(v, min_n) for k, v in sorted(by_close_anchor.items())}
+            if by_close_anchor
+            else None
+        ),
+        "sharp_close": _stratum_stats(sharp_rows, min_n),
     }

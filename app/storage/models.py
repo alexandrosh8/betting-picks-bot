@@ -259,6 +259,13 @@ class Pick(Base):
     closing_fair_probability: Mapped[Decimal | None] = mapped_column(PROB)
     clv_log: Mapped[Decimal | None] = mapped_column(METRIC)
     beat_close: Mapped[bool | None] = mapped_column(Boolean)
+    # Anchor that produced the CLOSE (pinnacle/sharp/consensus) — independent of
+    # the creation anchor_type above. Together with closing_odds (NON-NULL =
+    # snapshot-sourced) it separates an honest sharp close from a consensus-
+    # median or a poll-time revalidation fallback, so the per-anchor and headline
+    # CLV can trust only genuine sharp closes. NULL = no close computed yet /
+    # pre-column row.
+    closing_anchor_type: Mapped[str | None] = mapped_column(String(16))
     # --- live revalidation (refreshed every poll while the pick is open) ----
     current_odds: Mapped[Decimal | None] = mapped_column(ODDS)
     current_edge: Mapped[Decimal | None] = mapped_column(METRIC)

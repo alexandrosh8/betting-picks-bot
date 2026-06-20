@@ -593,6 +593,8 @@ async def test_live_evidence_rows_reduce_settled_picks_to_floats(session) -> Non
             clv_log=Decimal("0.042"),
             beat_close=True,
             value_filter_score=Decimal("0.81"),
+            closing_anchor_type="pinnacle",
+            closing_odds=Decimal("2.1000"),  # snapshot-close marker => trusted
         )
     )
     await session.execute(
@@ -613,7 +615,12 @@ async def test_live_evidence_rows_reduce_settled_picks_to_floats(session) -> Non
     assert r.value_filter_score == 0.81
     assert r.beat_close is True
     assert r.pnl == 22.0
-    assert r.anchor_type is None  # column not landed yet -> feature-detected None
+    assert r.anchor_type is None  # creation anchor not set on this pick
+    # Close-side provenance: a snapshot-sourced (closing_odds set) Pinnacle close
+    # is a TRUSTED sharp close — the honest-CLV subset.
+    assert r.closing_anchor_type == "pinnacle"
+    assert r.has_snapshot_close is True
+    assert r.sharp_close is True
 
 
 async def test_anchor_type_roundtrips_and_serializes(session) -> None:  # type: ignore[no-untyped-def]

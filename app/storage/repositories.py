@@ -483,16 +483,34 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
     return changed
 
 
+# Close anchors that make a close TRUSTABLE for honest CLV — a NAMED sharp book
+# priced it, not a soft-book consensus median. Mirrors app/edge/value
+# anchor_type_for (pinnacle / sharp); kept local to avoid a heavy import here.
+_SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
+
+
 def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
-    """Aggregate (outcome, pnl, stake, clv_log, beat_close) rows into the
-    report fields. Decimals serialize as strings; undefined ratios are None."""
+    """Aggregate (outcome, pnl, stake, clv_log, beat_close, closing_odds,
+    closing_anchor_type) rows into the report fields. Decimals serialize as
+    strings; undefined ratios are None.
+
+    A TRUSTED sharp-close subset (``sharp_*``) is reported ALONGSIDE the blended
+    headline: a close counts only when it is snapshot-sourced (closing_odds NOT
+    NULL — not a poll-time revalidation fallback) AND anchored by a named sharp
+    book (closing_anchor_type in pinnacle/sharp — not a soft-book consensus
+    median). Those are the closes whose CLV the platform can stand behind; the
+    blended ``stake_weighted_clv_log`` still mixes every close in for continuity.
+    """
     counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
     total_pnl = Decimal("0")
     clv_weighted = Decimal("0")
     clv_stake = Decimal("0")
     beat_known = beat_true = 0
-    for outcome, pnl, stake, clv_log, beat_close in rows:
+    sharp_clv_weighted = Decimal("0")
+    sharp_clv_stake = Decimal("0")
+    sharp_beat_known = sharp_beat_true = n_sharp = 0
+    for outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor in rows:
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -503,6 +521,18 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         if beat_close is not None:
             beat_known += 1
             beat_true += int(beat_close)
+        if (
+            closing_odds is not None
+            and closing_anchor in _SHARP_CLOSE_ANCHORS
+            and clv_log is not None
+        ):
+            # Genuine sharp snapshot close with a measured CLV — the trusted subset.
+            n_sharp += 1
+            sharp_clv_weighted += stake * clv_log
+            sharp_clv_stake += stake
+            if beat_close is not None:
+                sharp_beat_known += 1
+                sharp_beat_true += int(beat_close)
     return {
         "n_settled": len(rows),
         **counts,
@@ -511,6 +541,10 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         "roi": _ratio(total_pnl, total_staked),
         "stake_weighted_clv_log": _ratio(clv_weighted, clv_stake),
         "beat_close_rate": _ratio(Decimal(beat_true), Decimal(beat_known)),
+        # TRUSTED subset — genuine sharp snapshot closes only (see docstring).
+        "n_sharp_close": n_sharp,
+        "sharp_stake_weighted_clv_log": _ratio(sharp_clv_weighted, sharp_clv_stake),
+        "sharp_beat_close_rate": _ratio(Decimal(sharp_beat_true), Decimal(sharp_beat_known)),
     }
 
 
@@ -527,17 +561,25 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     sizing the backtests report — while pnl/roi per pick already reflect
     the user's actual stake when they logged one.
     """
+    # closing_anchor_type is FEATURE-DETECTED (same migration contract as
+    # live_evidence_rows): until the ORM attr lands, the close anchor is None and
+    # the sharp-close subset is simply empty (n_sharp_close == 0).
+    close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
+    select_cols: list[Any] = [
+        ResultTracking.outcome,  # 0
+        ResultTracking.pnl,  # 1
+        Pick.recommended_stake_amount,  # 2
+        Pick.clv_log,  # 3
+        Pick.beat_close,  # 4
+        Pick.tier,  # 5 — split key, not passed to _aggregate_settled
+        Pick.closing_odds,  # 6 — snapshot-close marker
+    ]
+    close_anchor_idx = None
+    if close_anchor_attr is not None:
+        close_anchor_idx = len(select_cols)
+        select_cols.append(close_anchor_attr)  # 7
     rows = (
-        await session.execute(
-            select(
-                ResultTracking.outcome,
-                ResultTracking.pnl,
-                Pick.recommended_stake_amount,
-                Pick.clv_log,
-                Pick.beat_close,
-                Pick.tier,
-            ).join(Pick, ResultTracking.pick_id == Pick.id)
-        )
+        await session.execute(select(*select_cols).join(Pick, ResultTracking.pick_id == Pick.id))
     ).all()
     pending_by_tier: dict[str, int] = {
         tier: int(n)
@@ -548,8 +590,18 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         ).all()
     }
 
-    premium = _aggregate_settled([tuple(r)[:5] for r in rows if r[5] == "premium"])
-    volume = _aggregate_settled([tuple(r)[:5] for r in rows if r[5] == "volume"])
+    def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
+        # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor)
+        out: list[tuple[Any, ...]] = []
+        for r in rows:
+            if r[5] != tier_name:
+                continue
+            closing_anchor = r[close_anchor_idx] if close_anchor_idx is not None else None
+            out.append((r[0], r[1], r[2], r[3], r[4], r[6], closing_anchor))
+        return out
+
+    premium = _aggregate_settled(_tier_rows("premium"))
+    volume = _aggregate_settled(_tier_rows("volume"))
     volume["n_pending"] = pending_by_tier.get("volume", 0)
     return {
         **premium,
@@ -579,16 +631,26 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     from app.backtesting.live_evidence import SettledPickRow
 
     anchor_attr = getattr(Pick, "anchor_type", None)
+    close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
     columns = [
-        Pick.tier,
-        Pick.value_filter_score,
-        Pick.clv_log,
-        Pick.beat_close,
-        Pick.recommended_stake_amount,
-        ResultTracking.pnl,
+        Pick.tier,  # 0
+        Pick.value_filter_score,  # 1
+        Pick.clv_log,  # 2
+        Pick.beat_close,  # 3
+        Pick.recommended_stake_amount,  # 4
+        ResultTracking.pnl,  # 5
+        Pick.closing_odds,  # 6 — snapshot-close marker (NON-NULL = a true close)
     ]
+    # closing_anchor_type is FEATURE-DETECTED like anchor_type (same migration
+    # contract): until the ORM attr lands, every row's close anchor is None and
+    # the close-anchor grouping / sharp-close subset are simply empty.
+    anchor_idx = close_anchor_idx = None
     if anchor_attr is not None:
+        anchor_idx = len(columns)
         columns.append(anchor_attr)
+    if close_anchor_attr is not None:
+        close_anchor_idx = len(columns)
+        columns.append(close_anchor_attr)
     rows = (
         await session.execute(select(*columns).join(Pick, ResultTracking.pick_id == Pick.id))
     ).all()
@@ -600,7 +662,11 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             beat_close=row[3],
             stake=float(row[4]),
             pnl=float(row[5]) if row[5] is not None else None,
-            anchor_type=row[6] if anchor_attr is not None else None,
+            anchor_type=row[anchor_idx] if anchor_idx is not None else None,
+            closing_anchor_type=row[close_anchor_idx] if close_anchor_idx is not None else None,
+            # closing_odds NON-NULL marks a genuine snapshot close (not a
+            # poll-time revalidation fallback) — the SOURCE half of "trusted".
+            has_snapshot_close=row[6] is not None,
         )
         for row in rows
     ]

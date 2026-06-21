@@ -154,6 +154,24 @@ def test_feature_values_match_hand_computation() -> None:
     assert f["selection_type"] == "fav"  # 0.40 >= 0.305
 
 
+def test_is_argmax_edge_single_winner_on_tie() -> None:
+    # audit #8: on an edge TIE, exactly ONE selection (the first max index) is the
+    # argmax — parity with the trainer's single-winner argmax_i. The old
+    # `>= max(edges)` marked EVERY tied selection True.
+    prices = {
+        "Home FC": {"Pinnacle": 2.40, "SoftBook": 2.60},
+        "Draw": {"Pinnacle": 6.00, "SoftBook": 6.00},
+        "Away FC": {"Pinnacle": 2.50, "SoftBook": 2.60},
+    }
+    fair = {"Home FC": 0.42, "Draw": 0.16, "Away FC": 0.42}  # H,A tie on edge
+    home = feats_1x2(selection="Home FC", prices=prices, fair_by_sel=fair)
+    away = feats_1x2(selection="Away FC", prices=prices, fair_by_sel=fair)
+    assert home is not None and away is not None
+    assert home["edge"] == pytest.approx(away["edge"])  # genuine tie
+    assert home["is_argmax_edge"] is True  # first max index wins
+    assert away["is_argmax_edge"] is False  # the tied runner-up is NOT argmax
+
+
 def test_selection_type_draw_and_dog() -> None:
     draw = feats_1x2(selection="Draw")
     assert draw is not None and draw["selection_type"] == "draw"
@@ -163,8 +181,9 @@ def test_selection_type_draw_and_dog() -> None:
 
 
 def test_day_and_season_end_use_kickoff_date() -> None:
-    # June 30 convention (build_value_dataset._season_end): Jul-Dec roll to
-    # NEXT year's June 30; Jan-Jun use the same year.
+    # June 30 convention (build_value_dataset._season_end): only Aug-Dec roll to
+    # NEXT year's June 30; Jan-JUL use the same year (audit #9: July belongs to
+    # the just-ended Aug-Jun season, not the next one).
     aug = feats_1x2(kickoff_utc=datetime(2026, 8, 15, 14, 0, tzinfo=UTC))
     assert aug is not None
     assert aug["day_of_week"] == 5  # 2026-08-15 is a Saturday
@@ -172,6 +191,10 @@ def test_day_and_season_end_use_kickoff_date() -> None:
     mar = feats_1x2(kickoff_utc=datetime(2026, 3, 1, 20, 0, tzinfo=UTC))
     assert mar is not None
     assert mar["days_to_season_end"] == (datetime(2026, 6, 30) - datetime(2026, 3, 1)).days
+    # JULY -> this year's June 30 (just-ended season) -> NEGATIVE, not next-June.
+    jul = feats_1x2(kickoff_utc=datetime(2026, 7, 15, 14, 0, tzinfo=UTC))
+    assert jul is not None
+    assert jul["days_to_season_end"] == (datetime(2026, 6, 30) - datetime(2026, 7, 15)).days
     # kickoff unknown -> the cycle's `now` stands in (dated scrapes are
     # today..+1, so the drift is bounded by the scrape window)
     fallback = feats_1x2(kickoff_utc=None)

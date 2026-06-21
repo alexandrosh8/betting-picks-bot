@@ -116,9 +116,12 @@ def league_code(label: str) -> str | None:
 
 
 def _season_end(d: date) -> date:
-    """Nominal European season end — June 30 convention, parity with
-    build_value_dataset._season_end (Jul-Dec -> next year's June 30)."""
-    return date(d.year if d.month <= 6 else d.year + 1, 6, 30)
+    """Nominal European season end — June 30 convention, parity with the trainer's
+    season-LABEL basis (build_value_dataset._season_end). The season runs Aug-Jun,
+    so JULY belongs to the just-ended season (its June 30, this year) — matching how
+    the football-data season files label extended/late fixtures. Only Aug-Dec roll
+    to next year's June 30 (audit #9: the old <=6 cutoff sign-flipped July)."""
+    return date(d.year if d.month <= 7 else d.year + 1, 6, 30)
 
 
 def calibrate(calibrator: Mapping[str, Any], p_raw: np.ndarray) -> np.ndarray:
@@ -259,7 +262,10 @@ def live_features(
         "book_count": len(full_market_books or set()),
         "day_of_week": d.weekday(),
         "days_to_season_end": (_season_end(d) - d).days,
-        "is_argmax_edge": edges[i] >= max(edges),
+        # SINGLE-winner argmax (first max index) — parity with the trainer
+        # (build_value_dataset argmax_i + i==argmax_i). `>= max(edges)` marked
+        # EVERY tied selection as the argmax; train marks exactly one (audit #8).
+        "is_argmax_edge": i == max(range(len(edges)), key=lambda j: edges[j]),
         "league": code,
         "market": key,
         "selection_type": _selection_type(key, selection, fair_by_sel),

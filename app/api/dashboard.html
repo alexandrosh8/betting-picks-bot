@@ -1368,12 +1368,6 @@
       <!-- DROPPING ODDS — external betmonitor consensus feed, VIEW-ONLY.
            Never a pick/edge/CLV input; rendered only when the DROPPING tab is open. -->
       <div class="tablewrap" id="dropping-panel" hidden>
-        <div class="sub" id="dropping-banner">
-          External · <strong>betmonitor.com</strong> consensus-average dropping
-          odds · informational only. This is a market-AVERAGE line (not a
-          bookmaker price) and is <strong>never</strong> used for any pick,
-          edge, stake, or CLV.
-        </div>
         <table id="dropping-table">
           <thead>
             <tr>
@@ -3888,6 +3882,13 @@
         droppingMessage(tbody, null); // skeleton
         try {
           const res = await fetchWithTimeout("/dropping-odds");
+          // Same auth handling as the picks tabs: an expired/absent session
+          // (when dashboard auth is on) bounces to the login page, not a frozen
+          // "unavailable" panel.
+          if (res.status === 401) {
+            window.location.assign("/login");
+            return;
+          }
           renderDropping(await res.json());
         } catch (e) {
           droppingMessage(tbody, "Dropping-odds feed unavailable.");
@@ -3969,9 +3970,7 @@
         if (stamp)
           stamp.textContent =
             data && data.fetched_at
-              ? "betmonitor consensus · " +
-                (data.note || "") +
-                " · fetched " +
+              ? "betmonitor · fetched " +
                 new Date(data.fetched_at).toLocaleTimeString()
               : "";
       }
@@ -4044,10 +4043,23 @@
       );
       $("f-game-sport").addEventListener("change", renderGames);
       $("f-game-search").addEventListener("input", renderGames);
-      $("refresh").addEventListener("click", () => {
+      $("refresh").addEventListener("click", async () => {
         // Refresh whatever tab is showing — the DROPPING tab has its own feed.
-        if (STATUS_TAB === "dropping") loadDropping();
-        else load();
+        // Visible feedback so it's obvious it fired (picks rarely change between
+        // refreshes, which made it look dead on the picks tabs).
+        const btn = $("refresh");
+        const orig = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Refreshing…";
+        try {
+          const work = STATUS_TAB === "dropping" ? loadDropping() : load();
+          // keep "Refreshing…" visible for a beat even on a cache hit, so it's
+          // obvious the click did something on every tab.
+          await Promise.all([work, new Promise((r) => setTimeout(r, 450))]);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = orig;
+        }
       });
       // Optional dashboard auth: clear the session cookie server-side, then
       // land on the login page. Harmless when auth is OFF — /logout always

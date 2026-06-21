@@ -90,35 +90,22 @@ async def _get_or_create_event(
     away_id: int,
     external_ref: str,
     starts_at: datetime | None,
-    scraped_home_score: int | None = None,
-    scraped_away_score: int | None = None,
 ) -> int:
     """starts_at=None means the source reported no kickoff — stored as NULL
     (the dashboard's "TBD" signal), never as a pick-time placeholder.
 
-    scraped_home_score/scraped_away_score is the best-effort post-finish score
-    (a CONVENIENCE pre-fill for the manual settle prompt — never settlement).
-    A later scrape that carries the score updates a previously-None row; a
-    None never overwrites a captured score (a finished match's score is fixed,
-    and a subsequent pre-kickoff-shaped scrape must not erase it)."""
+    Event.scraped_home_score/away_score are written ONLY by the finished-gated
+    capture_finished_scores path (app/clv_trueup.py) — NEVER by this routine
+    scrape upsert. A pre-kickoff / in-play scrape carries no FINAL score
+    (OddsPortal shows a live running score, OddsHarvester exposes no finished
+    flag), so letting it write scraped_* could record an in-play partial as the
+    result and corrupt settlement + ROI (review 2026-06-21)."""
     existing = await session.scalar(select(Event).where(Event.external_ref == external_ref))
     if existing is not None:
-        changed = False
         # Earlier rows may be NULL (or carry a legacy placeholder); a real
         # kickoff from the source upgrades them to the true start.
         if starts_at is not None and existing.starts_at != starts_at:
             existing.starts_at = starts_at
-            changed = True
-        # Set the scraped score when this scrape carries one and it differs
-        # (covers the None->score capture and a corrected score); never write
-        # None over a captured score.
-        if scraped_home_score is not None and existing.scraped_home_score != scraped_home_score:
-            existing.scraped_home_score = scraped_home_score
-            changed = True
-        if scraped_away_score is not None and existing.scraped_away_score != scraped_away_score:
-            existing.scraped_away_score = scraped_away_score
-            changed = True
-        if changed:
             await session.flush()
         return existing.id
     event = Event(
@@ -128,8 +115,6 @@ async def _get_or_create_event(
         away_team_id=away_id,
         external_ref=external_ref,
         starts_at=starts_at,
-        scraped_home_score=scraped_home_score,
-        scraped_away_score=scraped_away_score,
     )
     session.add(event)
     await session.flush()
@@ -804,9 +789,8 @@ async def persist_odds_snapshots(
                         away_id,
                         external_ref,
                         starts_at=teams.starts_at,
-                        # best-effort scraped final score (pre-fills settle prompt)
-                        scraped_home_score=teams.home_score,
-                        scraped_away_score=teams.away_score,
+                        # scraped scores are NOT written here — only the finished-
+                        # gated capture_finished_scores path writes Event.scraped_*.
                     )
                     rows: list[dict[str, Any]] = [
                         {
@@ -1417,9 +1401,8 @@ async def persist_pick(
         pick.event_id,
         # real kickoff when the loader knows it; else NULL ("kickoff TBD")
         starts_at=teams.starts_at,
-        # best-effort scraped final score (pre-fills the manual settle prompt)
-        scraped_home_score=teams.home_score,
-        scraped_away_score=teams.away_score,
+        # scraped scores are NOT written here — only the finished-gated
+        # capture_finished_scores path writes Event.scraped_*.
     )
     model_version_id = await _get_or_create_model_version(
         session, sport_id, model_name, model_version

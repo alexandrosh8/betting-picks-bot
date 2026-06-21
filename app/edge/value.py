@@ -330,12 +330,17 @@ def _best_other_book(
     anchor_book: str,
     commissions: Mapping[str, float],
 ) -> tuple[str, float, float] | None:
-    """Best EFFECTIVE odds among books other than the anchor.
-    Returns (book, raw_odds, effective_odds)."""
+    """Best EFFECTIVE odds among SOFT books — never the anchor AND never any sharp
+    book. The actionable pick must be a price you bet at a SOFT bookmaker; a sharp
+    book (Pinnacle/Betfair/Smarkets, incl. an injected sharp-anchor line) sets the
+    fair value, so betting it is not the edge and may be unbettable (review
+    2026-06-21). Returns (book, raw_odds, effective_odds)."""
     anchor_norm = _norm(anchor_book)
+    sharp_norm = {_norm(b) for b in SHARP_BOOKS}
     best: tuple[str, float, float] | None = None
     for book, odds in book_odds.items():
-        if _norm(book) == anchor_norm:
+        norm_book = _norm(book)
+        if norm_book == anchor_norm or norm_book in sharp_norm:
             continue
         if odds <= 1.0:
             continue

@@ -297,7 +297,9 @@ async def test_capture_finished_scores_writes_score_for_settlement(factory) -> N
         await persist_pick(
             session,
             make_pick(event_id),
-            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=2)),
+            # 5h past kickoff -> past the soccer FINISHED floor (3.5h), so the
+            # scraped score is trusted as final (an in-play 2h-old match is not).
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=5)),
             "value-sharp-vs-soft",
             "v2-test",
         )
@@ -321,6 +323,51 @@ async def test_capture_finished_scores_writes_score_for_settlement(factory) -> N
         assert ev is not None
         assert ev.scraped_home_score == 2
         assert ev.scraped_away_score == 1
+
+
+async def test_capture_finished_scores_skips_in_play_match(factory) -> None:  # type: ignore[no-untyped-def]
+    # REGRESSION (review 2026-06-21 critical): a match only 2h past kickoff is
+    # still IN PLAY for soccer (floor 3.5h). OddsPortal shows a LIVE running
+    # score; it must NOT be captured as the final result (would corrupt ROI).
+    from datetime import timedelta
+
+    from app.clv_trueup import capture_finished_scores
+    from app.ingestion.base import EventDirectory
+    from app.storage.models import Event
+
+    event_id = "https://www.oddsportal.com/football/spain/laliga/inplay-fc-vs-other-fc/ZZ3/"
+    async with factory() as session:
+        from sqlalchemy import update as sa_update
+
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=2)),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+
+    directory = EventDirectory()
+
+    class InPlayLoader(FakeLoader):
+        async def fetch_match_odds(self, sport_key, match_links, markets=None):  # type: ignore[no-untyped-def]
+            for ref in match_links:  # an in-play partial score
+                directory.register(
+                    ref,
+                    EventTeams(home="Home FC", away="Away FC", home_score=1, away_score=0),
+                )
+            return []
+
+    written = await capture_finished_scores(InPlayLoader([]), factory, directory, "soccer", now=NOW)
+    assert written == 0  # in-play match excluded by the FINISHED floor
+    async with factory() as session:
+        ev = await session.scalar(select(Event).where(Event.external_ref == event_id))
+        assert ev is not None
+        assert ev.scraped_home_score is None  # no in-play score recorded
 
 
 async def test_offwindow_skips_picks_already_covered_by_cycle(factory) -> None:  # type: ignore[no-untyped-def]

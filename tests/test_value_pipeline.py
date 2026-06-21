@@ -230,6 +230,45 @@ async def test_sharp_anchor_loader_injects_betfair_as_live_anchor() -> None:
     assert any("betfair" in p.reason_summary.lower() for p in picks)
 
 
+async def test_sharp_anchor_pick_book_is_never_sharp() -> None:
+    # CRITICAL (review 2026-06-21): when BOTH Betfair + Pinnacle are injected as
+    # sharp anchors, the ACTIONABLE pick must still be a SOFT book — never the
+    # non-anchor sharp/exchange book (you cannot bet the injected anchor line).
+    from dataclasses import replace
+
+    soft = [
+        snap("SoftA", "Home FC", 2.45),
+        snap("SoftA", "Draw", 3.30),
+        snap("SoftA", "Away FC", 3.10),
+        snap("SoftB", "Home FC", 2.50),
+        snap("SoftB", "Draw", 3.25),
+        snap("SoftB", "Away FC", 3.05),
+        snap("SoftC", "Home FC", 2.95),
+        snap("SoftC", "Draw", 3.20),
+        snap("SoftC", "Away FC", 2.95),
+    ]
+
+    async def dual_sharp_loader(sport_key, snapshots):  # type: ignore[no-untyped-def]
+        # Betfair carries the JUICIEST Home price (3.40) — WITHOUT the fix the
+        # pick would recommend "at Betfair Exchange" (unbettable). Pinnacle anchors.
+        return [
+            snap("Betfair Exchange", "Home FC", 3.40),
+            snap("Betfair Exchange", "Draw", 3.50),
+            snap("Betfair Exchange", "Away FC", 3.20),
+            snap("Pinnacle", "Home FC", 2.40),
+            snap("Pinnacle", "Draw", 3.45),
+            snap("Pinnacle", "Away FC", 3.25),
+        ]
+
+    sink = RecordingSink()
+    deps = replace(make_deps(sink, FakeLoader(list(soft))), sharp_anchor_loader=dual_sharp_loader)
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks, "expected a value pick"
+    _SHARP = {"pinnacle", "pinnacle sports", "betfair exchange", "smarkets"}
+    for p in picks:
+        assert p.bookmaker.lower() not in _SHARP, f"pick recommends a sharp book: {p.bookmaker}"
+
+
 async def test_value_pipeline_records_poll_liveness() -> None:
     # The dashboard/health must be able to tell "engine alive" from "engine
     # dead showing day-old picks" — every cycle records itself, including

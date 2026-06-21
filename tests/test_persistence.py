@@ -887,17 +887,17 @@ async def test_open_pick_has_null_score(session) -> None:  # type: ignore[no-unt
     assert ours[0]["score"] is None
 
 
-async def test_scraped_score_lands_on_event_and_serializes(session) -> None:  # type: ignore[no-untyped-def]
-    # Best-effort scraped final score: a post-finish scrape carries the score on
-    # EventTeams; it must persist on the EVENT (scraped_home/away_score) and the
-    # /picks payload must serialize it HOME-first as "scraped_score" so the
-    # settle prompt can pre-fill it. This is the CONVENIENCE pre-fill, distinct
-    # from the confirmed `score` (which stays null until settlement).
+async def test_persist_pick_does_not_write_scraped_score(session) -> None:  # type: ignore[no-untyped-def]
+    # CORRECTNESS (review 2026-06-21 critical): the routine scrape/persist path
+    # must NOT write Event.scraped_* even when EventTeams carries a score — a
+    # pre-kickoff/in-play scrape's "score" can be an in-play PARTIAL (OddsPortal
+    # shows a live running score), which would corrupt settlement + ROI. Only the
+    # finished-gated capture_finished_scores path writes scraped_*.
     teams = EventTeams(
         home="Alpha FC",
         away="Beta United",
         league="test-league-persist",
-        home_score=2,
+        home_score=2,  # an in-play partial the routine path must IGNORE
         away_score=1,
     )
     await persist_pick(
@@ -906,14 +906,13 @@ async def test_scraped_score_lands_on_event_and_serializes(session) -> None:  # 
 
     event = await session.scalar(select(Event).where(Event.external_ref == "evt-scraped-score"))
     assert event is not None
-    assert event.scraped_home_score == 2
-    assert event.scraped_away_score == 1
+    assert event.scraped_home_score is None  # routine persist never writes scraped scores
+    assert event.scraped_away_score is None
 
     payload = await latest_picks_with_events(session, limit=200)
     ours = [p for p in payload if p["event_id"] == event.id]
     assert ours, "pick missing from /picks payload"
-    assert ours[0]["scraped_score"] == "2-1"
-    # the confirmed result is still unset on an open pick
+    assert ours[0]["scraped_score"] is None
     assert ours[0]["score"] is None
 
 
@@ -933,28 +932,3 @@ async def test_scraped_score_absent_serializes_null(session) -> None:  # type: i
     ours = [p for p in payload if p["event_id"] == event.id]
     assert ours
     assert ours[0]["scraped_score"] is None
-
-
-async def test_scraped_score_null_does_not_overwrite_captured(session) -> None:  # type: ignore[no-untyped-def]
-    # Once a finished match's score is captured, a later scrape that carries NO
-    # score (None — e.g. a re-list whose score cell was empty) must NOT erase it:
-    # a finished score is fixed. Re-detecting the same event with scored teams
-    # captures the score; re-detecting with unscored teams leaves it intact.
-    scored = EventTeams(
-        home="Alpha FC",
-        away="Beta United",
-        league="test-league-persist",
-        home_score=3,
-        away_score=0,
-    )
-    await persist_pick(session, make_pick("evt-score-keep"), scored, "value-sharp-vs-soft", "t-sk")
-    event = await session.scalar(select(Event).where(Event.external_ref == "evt-score-keep"))
-    assert event is not None
-    assert (event.scraped_home_score, event.scraped_away_score) == (3, 0)
-
-    unscored = EventTeams(home="Alpha FC", away="Beta United", league="test-league-persist")
-    await persist_pick(
-        session, make_pick("evt-score-keep"), unscored, "value-sharp-vs-soft", "t-sk"
-    )
-    await session.refresh(event)
-    assert (event.scraped_home_score, event.scraped_away_score) == (3, 0)

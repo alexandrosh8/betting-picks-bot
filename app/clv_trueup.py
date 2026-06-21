@@ -398,6 +398,22 @@ RESULTS_SCRAPE_WINDOW = timedelta(days=3)
 #: Cap finished-score scrapes per cycle so one backlog can't drive 100s of
 #: browser pages at once; the un-scored remainder drains over the next cycles.
 RESULTS_SCRAPE_MAX_PER_CYCLE = 40
+#: Minimum age PAST KICKOFF before a scraped score is trusted as FINAL. OddsPortal
+#: shows a LIVE running score in-play and OddsHarvester exposes no finished flag,
+#: so without this floor an in-play partial score could be recorded as the result
+#: (corrupting outcome + ROI). Sport-specific + generous: a still-running match is
+#: never captured (it settles on a later cycle once truly final).
+_FINISHED_FLOOR = {
+    "soccer": timedelta(hours=3, minutes=30),
+    "basketball": timedelta(hours=3, minutes=30),
+    "american_football": timedelta(hours=4, minutes=30),
+    "tennis": timedelta(hours=6),
+}
+_FINISHED_FLOOR_DEFAULT = timedelta(hours=4)
+
+
+def _finished_floor(sport_key: str) -> timedelta:
+    return _FINISHED_FLOOR.get(sport_key, _FINISHED_FLOOR_DEFAULT)
 
 
 async def capture_finished_scores(
@@ -436,7 +452,9 @@ async def capture_finished_scores(
                     .where(
                         Pick.status == "alerted",
                         Event.starts_at.is_not(None),
-                        Event.starts_at < now,
+                        # FINISHED floor: only re-scrape matches plausibly final,
+                        # so an in-play partial score is never captured as final.
+                        Event.starts_at < now - _finished_floor(sport_key),
                         Event.starts_at > now - window,
                         Event.scraped_home_score.is_(None),
                     )
@@ -699,6 +717,7 @@ def build_sharp_anchor_loader(
     *,
     use_betfair: bool,
     use_pinnacle: bool,
+    max_age_seconds: float,
 ) -> Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[list[OddsSnapshotIn]]]:
     """Pick-time SHARP-ANCHOR loader for PipelineDeps.sharp_anchor_loader.
 
@@ -708,6 +727,11 @@ def build_sharp_anchor_loader(
     the soft-book consensus median. Reuses the SAME resolution as the
     settlement-time CLV close — no new false-match surface. Per-event failures
     propagate to the pipeline's isolated try/except (picking never breaks).
+
+    FRESHNESS-GATED (review 2026-06-21): a LIVE pick must anchor on a CURRENT
+    sharp line, so any captured snapshot older than ``max_age_seconds`` is
+    dropped. The 'old price still valid' (change-only) reasoning applies to the
+    settlement CLOSE, never to a live pick-time anchor.
     """
     from app.storage.repositories import resolve_pinnacle_close_snaps
 
@@ -737,7 +761,9 @@ def build_sharp_anchor_loader(
                             kickoff=teams.starts_at,
                         )
                     )
-        return out
+        # Drop stale captured lines — a live pick-time anchor must be current.
+        cutoff = datetime.now(tz=UTC) - timedelta(seconds=max_age_seconds)
+        return [s for s in out if s.captured_at is not None and s.captured_at >= cutoff]
 
     return loader
 

@@ -703,6 +703,18 @@
         background-size: 200% 100%;
         animation: shimmer 1.2s linear infinite;
       }
+      /* Brief highlight on a DROPPING row whose odds just changed on refresh. */
+      @keyframes dropflash {
+        from {
+          background: rgba(234, 179, 8, 0.22);
+        }
+        to {
+          background: transparent;
+        }
+      }
+      tr.drop-changed td {
+        animation: dropflash 1.4s ease-out;
+      }
       @keyframes shimmer {
         to {
           background-position: -200% 0;
@@ -3928,7 +3940,7 @@
       async function loadDropping(force) {
         const tbody = $("dropping-rows");
         const stamp = $("dropping-stamp");
-        droppingMessage(tbody, null); // skeleton
+        if (DROPPING_ROWS.size === 0) droppingMessage(tbody, null); // skeleton only before first data
         try {
           const qs = new URLSearchParams({
             interval: String(DROPPING_INTERVAL),
@@ -3948,8 +3960,9 @@
           if (stamp) stamp.textContent = "";
         }
       }
-      // One outcome cell: opening (faded) -> current (bold) + drop% (green if it
-      // dropped, muted if it rose). All via textContent — no raw-HTML assignment.
+      // One outcome cell: opening (faded) -> current (bold) + drop% colored like
+      // oddsmath — big drop RED, smaller drop YELLOW, a rise muted. textContent
+      // only (no raw-HTML assignment).
       function outcomeCell(tr, o) {
         const cell = document.createElement("td");
         if (!o || (o.open == null && o.current == null)) {
@@ -3971,41 +3984,98 @@
           const pct = document.createElement("span");
           pct.textContent = " " + o.drop_pct.toFixed(1) + "%";
           pct.style.fontSize = "11px";
-          pct.style.color = o.drop_pct < 0 ? "#22c55e" : "var(--muted, #888)";
+          pct.style.fontWeight = "700";
+          pct.style.color =
+            o.drop_pct <= -20
+              ? "#f4525f" // big drop -> red
+              : o.drop_pct < 0
+                ? "#eab308" // smaller drop -> yellow
+                : "var(--muted, #888)"; // rose
           cell.appendChild(pct);
         }
         tr.appendChild(cell);
       }
+      // Build one match row's cells (Kickoff | League | Match | 1 | X | 2).
+      function renderDroppingRow(tr, r) {
+        tr.replaceChildren();
+        td(tr, r.kickoff_utc ? fmtLocal(r.kickoff_utc) : "");
+        const parts = (r.league || "").split(" · ");
+        td(tr, parts.length > 1 ? parts.slice(1).join(" · ") : r.league || "");
+        td(tr, r.match || "");
+        const byLabel = {};
+        for (const o of r.outcomes || []) byLabel[o.label] = o;
+        for (const lbl of ["1", "X", "2"]) outcomeCell(tr, byLabel[lbl]);
+      }
+      function dropSig(r) {
+        return (r.outcomes || [])
+          .map(
+            (o) => o.label + ":" + o.open + ">" + o.current + ":" + o.drop_pct,
+          )
+          .join("|");
+      }
+      // Keyed diff: a refresh updates ONLY the matches whose odds changed (those
+      // rows briefly flash) — the rest stay put, so the table never blanks on a tick.
+      const DROPPING_ROWS = new Map(); // key -> { tr, sig }
+      let DROPPING_DATA = null; // last response, for re-filtering on search
       function renderDropping(data) {
         const stamp = $("dropping-stamp");
         if (data) {
+          DROPPING_DATA = data;
           if (DROPPING_PROVIDER == null && data.selected_provider != null)
             DROPPING_PROVIDER = data.selected_provider;
           fillDroppingSelectors(data);
         }
         const tbody = $("dropping-rows");
-        const rows = (data && data.rows) || [];
+        let rows = (data && data.rows) || [];
+        // Search filters the matches on THIS tab (team / league text).
+        const q = ($("f-search").value || "").trim().toLowerCase();
+        if (q)
+          rows = rows.filter((r) =>
+            (r.match + " " + r.league).toLowerCase().includes(q),
+          );
         if (!data || !data.available || rows.length === 0) {
+          DROPPING_ROWS.clear();
           droppingMessage(
             tbody,
-            "No dropping odds for this book/window right now.",
+            q
+              ? "No matches for that search."
+              : "No dropping odds for this book/window right now.",
           );
         } else {
-          tbody.replaceChildren();
+          if (DROPPING_ROWS.size === 0) tbody.replaceChildren(); // clear skeleton once
+          const seen = new Set();
           for (const r of rows) {
-            const tr = document.createElement("tr");
-            td(tr, r.kickoff_utc ? fmtLocal(r.kickoff_utc) : "");
-            const parts = (r.league || "").split(" · ");
-            td(
-              tr,
-              parts.length > 1 ? parts.slice(1).join(" · ") : r.league || "",
+            const key = (r.match || "") + "|" + (r.league || "");
+            seen.add(key);
+            const sig = dropSig(r);
+            const existing = DROPPING_ROWS.get(key);
+            if (existing) {
+              if (existing.sig !== sig) {
+                renderDroppingRow(existing.tr, r);
+                existing.sig = sig;
+                existing.tr.classList.remove("drop-changed");
+                void existing.tr.offsetWidth; // restart the flash
+                existing.tr.classList.add("drop-changed");
+              }
+            } else {
+              const tr = document.createElement("tr");
+              renderDroppingRow(tr, r);
+              tbody.appendChild(tr);
+              DROPPING_ROWS.set(key, { tr, sig });
+            }
+          }
+          for (const [key, v] of DROPPING_ROWS) {
+            if (!seen.has(key)) {
+              v.tr.remove();
+              DROPPING_ROWS.delete(key);
+            }
+          }
+          // Keep the biggest-drop order without recreating rows (move only).
+          for (const r of rows) {
+            const v = DROPPING_ROWS.get(
+              (r.match || "") + "|" + (r.league || ""),
             );
-            td(tr, r.match || "");
-            // Per-outcome cells in 1 / X / 2 order.
-            const byLabel = {};
-            for (const o of r.outcomes || []) byLabel[o.label] = o;
-            for (const lbl of ["1", "X", "2"]) outcomeCell(tr, byLabel[lbl]);
-            tbody.appendChild(tr);
+            if (v) tbody.appendChild(v.tr);
           }
         }
         if (stamp)
@@ -4030,12 +4100,10 @@
         const dropPanel = $("dropping-panel");
         if (picksWrap) picksWrap.hidden = dropping;
         if (dropPanel) dropPanel.hidden = !dropping;
-        // Tier + search are picks-only controls — gray them out on DROPPING so
-        // they don't look broken (they don't filter the external feed).
-        for (const id of ["f-tier", "f-search"]) {
-          const el = $(id);
-          if (el) el.disabled = dropping;
-        }
+        // Tier is picks-only — gray it out on DROPPING. Search DOES work on
+        // DROPPING (filters the matches), so it stays enabled everywhere.
+        const tierEl = $("f-tier");
+        if (tierEl) tierEl.disabled = dropping;
         if (DROPPING_TIMER) {
           clearInterval(DROPPING_TIMER);
           DROPPING_TIMER = null;
@@ -4060,7 +4128,10 @@
       });
       $("f-search").addEventListener("input", () => {
         rememberView("pt_search", $("f-search").value);
-        render();
+        // On DROPPING, search filters the external matches (re-render the last
+        // payload); on the picks tabs it filters the picks table.
+        if (STATUS_TAB === "dropping") renderDropping(DROPPING_DATA);
+        else render();
       });
       // Restore the saved view BEFORE the first render (validate against known
       // values so a stale key can never blank the table).

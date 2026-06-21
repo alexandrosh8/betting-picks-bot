@@ -1,350 +1,134 @@
 {
   "_comment": "Starter cross-source club-name alias table. Format: {\"teams\": {\"canonical\": [\"alias\", ...]}}. Names are normalized on load (matching.normalize_name strips accents/FC-noise), so list human-readable forms. Expand from withqwerty/reep (CC0) data/names.csv + custom_aliases.json over time. Do NOT add men's/women's-conflating aliases.",
   "teams": {
-    "AC Milan": [
-      "Milan"
-    ],
-    "AS Roma": [
-      "Roma"
-    ],
-    "Adamstown Rosebuds FC": [
-      "Adamstown Rosebud"
-    ],
-    "Akademia Ontustik": [
-      "Akademiya Ontustik"
-    ],
-    "Al-Shabab Football Club": [
-      "Al-Shabab Club"
-    ],
-    "Al-Tadamon SC": [
-      "Al-Tadhamon"
-    ],
-    "América Futebol Clube": [
-      "América Mineiro"
-    ],
-    "Athletic Club": [
-      "Athletic Bilbao"
-    ],
-    "Athlone Town F.C.": [
-      "Athlone Town"
-    ],
-    "Atlas F.C.": [
-      "Atlas",
-      "Club de Futbol Rojinegros S.A. de C.V."
-    ],
-    "Atletico Goianiense": [
-      "Atletico GO"
-    ],
-    "Atletico Madrid": [
-      "Atletico",
-      "Atletico de Madrid",
-      "Atl Madrid"
-    ],
-    "Atleticos de San German": [
-      "San German"
-    ],
-    "Ballyclare Comrades F.C.": [
-      "Ballyclare Comrades"
-    ],
-    "Ballymena United F.C.": [
-      "Ballymena United"
-    ],
-    "Bangor F.C.": [
-      "Bangor"
-    ],
-    "Barracas Central": [
-      "Club Atlético Barracas Central"
-    ],
-    "Bayer Leverkusen": [
-      "Leverkusen"
-    ],
-    "Bayern Munich": [
-      "Bayern Munchen",
-      "Bayern",
-      "FC Bayern"
-    ],
-    "Belmont Swansea Utd": [
-      "Belmont Swansea United"
-    ],
-    "Boca Juniors": [
-      "CA Boca Juniors",
-      "CABJ",
-      "Club Atletico Boca Juniors"
-    ],
-    "Borussia Dortmund": [
-      "Dortmund",
-      "BVB"
-    ],
-    "Borussia Monchengladbach": [
-      "Monchengladbach",
-      "Gladbach"
-    ],
-    "Bosnia and Herzegovina": [
-      "Bosnia & Herzegovina"
-    ],
-    "Bray Wanderers A.F.C.": [
-      "Bray Wanderers"
-    ],
-    "Brighton and Hove Albion": [
-      "Brighton"
-    ],
-    "Bulleen Lions": [
-      "Bulleen"
-    ],
-    "CD Pamplona": [
-      "Pamplona"
-    ],
-    "CD Universidad César Vallejo": [
-      "Universidad César Vallejo"
-    ],
-    "Club Athletico Paranaense": [
-      "Clube Atlético Paranaense"
-    ],
-    "Cobh Ramblers F.C.": [
-      "Cobh Ramblers"
-    ],
-    "Colon de Santa Fe": [
-      "Colon Santa Fe"
-    ],
-    "Colón F.C.": [
-      "Colón FC"
-    ],
-    "Comunicaciones F.C.": [
-      "Comunicaciones"
-    ],
-    "Coritiba F.C.": [
-      "Coritiba",
-      "Coritiba Foot Ball Club"
-    ],
-    "Czechia": [
-      "Czech Republic"
-    ],
-    "DR Congo": [
-      "D.R. Congo"
-    ],
-    "Defensa y Justicia": [
-      "Club Social y Deportivo Defensa y Justicia"
-    ],
-    "Derry City F.C.": [
-      "Derry City"
-    ],
-    "Difaa El Jadida": [
-      "Difaa El Jadidi"
-    ],
-    "Drogheda United F.C.": [
-      "Drogheda United"
-    ],
-    "Dundalk F.C.": [
-      "Dundalk"
-    ],
-    "Finn Harps F.C.": [
-      "Finn Harps"
-    ],
-    "Fluminense F.C.": [
-      "Fluminense",
-      "Fluminense Football Club"
-    ],
-    "Galway United F.C.": [
-      "Galway United"
-    ],
-    "Gareji": [
-      "Gareji Sagarejo"
-    ],
-    "Glentoran F.C.": [
-      "Glentoran"
-    ],
-    "Grindavik": [
-      "UMF Grindavik"
-    ],
-    "Hammarby Fotboll": [
-      "Hammarby IF"
-    ],
-    "Hangzhou Linping Wuyue": [
-      "Hangzhou Linping"
-    ],
-    "Helsingin Jalkapalloklubi": [
-      "HJK Helsinki"
-    ],
-    "Henan Songshan Longmen": [
-      "Henan"
-    ],
-    "IF Brommapojkarna": [
-      "Idrottsföreningen  Brommapojkarna"
-    ],
-    "IF Elfsborg": [
-      "Idrottsföreningen Elfsborg"
-    ],
-    "IK Franke": [
-      "Franke"
-    ],
-    "Ikorodu City F.C.": [
-      "Ikorodu City"
-    ],
-    "Independiente Rivadavia": [
-      "Club Sportivo Independiente Rivadavia"
-    ],
-    "Internazionale": [
-      "Inter",
-      "Inter Milan"
-    ],
-    "Juventus FC": [
-      "Juventus Football Club"
-    ],
-    "Kolkheti 1913 Poti": [
-      "Kolkheti 1913"
-    ],
-    "Labasa F.C.": [
-      "Labasa"
-    ],
-    "Landvetter": [
-      "Landvetter IS"
-    ],
-    "Lautoka F.C.": [
-      "Lautoka"
-    ],
-    "Leeds United": [
-      "Leeds"
-    ],
-    "Longford Town F.C.": [
-      "Longford Town"
-    ],
-    "Macae Esporte RJ": [
-      "Macae"
-    ],
-    "Maghreb Fes": [
-      "Maghreb Fez"
-    ],
-    "Malmö FF": [
-      "Malmö Fotbollförening"
-    ],
-    "Manchester City": [
-      "Man City"
-    ],
-    "Manchester United": [
-      "Man Utd",
-      "Man United",
-      "Manchester Utd"
-    ],
-    "Molde FK": [
-      "Molde Fotballklubb"
-    ],
-    "Monaco": [
-      "AS Monaco"
-    ],
-    "Málaga CF": [
-      "Málaga Club de Fútbol"
-    ],
-    "Nasinu F.C.": [
-      "Nasinu"
-    ],
-    "Navua F.C.": [
-      "Navua"
-    ],
-    "Newcastle United": [
-      "Newcastle"
-    ],
-    "Nottingham Forest": [
-      "Nottm Forest",
-      "Notts Forest"
-    ],
-    "Odishi 1919 Zugdidi": [
-      "Odishi 1919"
-    ],
-    "Paris Saint-Germain": [
-      "PSG",
-      "Paris SG"
-    ],
-    "Paysandú F.C.": [
-      "Paysandú FC"
-    ],
-    "Racing Club": [
-      "Racing Club Asociación Civil de Avellaneda"
-    ],
-    "Real Betis": [
-      "Betis"
-    ],
-    "Real Sociedad": [
-      "Sociedad"
-    ],
-    "Rewa F.C.": [
-      "Rewa"
-    ],
-    "Rosenborg BK": [
-      "Rosenborg Ballklub"
-    ],
-    "SK Austria Klagenfurt": [
-      "Austria Klagenfurt"
-    ],
-    "SSC Napoli": [
-      "Napoli"
-    ],
-    "SV Wals-Grünau": [
-      "Wals-Grünau"
-    ],
+    "Atlanta Dream": ["Atlanta Dream W"],
+    "Chicago Sky": ["Chicago Sky W"],
+    "Connecticut Sun": ["Connecticut Sun W"],
+    "Dallas Wings": ["Dallas Wings W"],
+    "Golden State Valkyries": ["Golden State Valkyries W"],
+    "Indiana Fever": ["Indiana Fever W"],
+    "Las Vegas Aces": ["Las Vegas Aces W"],
+    "Los Angeles Sparks": ["Los Angeles Sparks W"],
+    "Minnesota Lynx": ["Minnesota Lynx W"],
+    "New York Liberty": ["New York Liberty W"],
+    "Phoenix Mercury": ["Phoenix Mercury W"],
+    "Seattle Storm": ["Seattle Storm W"],
+    "Washington Mystics": ["Washington Mystics W"],
+    "Legia": ["Legia Warszawa"],
+    "Barangay Ginebra": ["Barangay Ginebra San Miguel"],
+    "Fubon Braves": ["Taipei Fubon Braves"],
+    "Pau-Orthez": ["Pau Lacq Orthez", "Pau Orthez"],
+    "AC Milan": ["Milan"],
+    "AS Roma": ["Roma"],
+    "Adamstown Rosebuds FC": ["Adamstown Rosebud"],
+    "Akademia Ontustik": ["Akademiya Ontustik"],
+    "Al-Shabab Football Club": ["Al-Shabab Club"],
+    "Al-Tadamon SC": ["Al-Tadhamon"],
+    "América Futebol Clube": ["América Mineiro"],
+    "Athletic Club": ["Athletic Bilbao"],
+    "Athlone Town F.C.": ["Athlone Town"],
+    "Atlas F.C.": ["Atlas", "Club de Futbol Rojinegros S.A. de C.V."],
+    "Atletico Goianiense": ["Atletico GO"],
+    "Atletico Madrid": ["Atletico", "Atletico de Madrid", "Atl Madrid"],
+    "Atleticos de San German": ["San German"],
+    "Ballyclare Comrades F.C.": ["Ballyclare Comrades"],
+    "Ballymena United F.C.": ["Ballymena United"],
+    "Bangor F.C.": ["Bangor"],
+    "Barracas Central": ["Club Atlético Barracas Central"],
+    "Bayer Leverkusen": ["Leverkusen"],
+    "Bayern Munich": ["Bayern Munchen", "Bayern", "FC Bayern"],
+    "Belmont Swansea Utd": ["Belmont Swansea United"],
+    "Boca Juniors": ["CA Boca Juniors", "CABJ", "Club Atletico Boca Juniors"],
+    "Borussia Dortmund": ["Dortmund", "BVB"],
+    "Borussia Monchengladbach": ["Monchengladbach", "Gladbach"],
+    "Bosnia and Herzegovina": ["Bosnia & Herzegovina"],
+    "Bray Wanderers A.F.C.": ["Bray Wanderers"],
+    "Brighton and Hove Albion": ["Brighton"],
+    "Bulleen Lions": ["Bulleen"],
+    "CD Pamplona": ["Pamplona"],
+    "CD Universidad César Vallejo": ["Universidad César Vallejo"],
+    "Club Athletico Paranaense": ["Clube Atlético Paranaense"],
+    "Cobh Ramblers F.C.": ["Cobh Ramblers"],
+    "Colon de Santa Fe": ["Colon Santa Fe"],
+    "Colón F.C.": ["Colón FC"],
+    "Comunicaciones F.C.": ["Comunicaciones"],
+    "Coritiba F.C.": ["Coritiba", "Coritiba Foot Ball Club"],
+    "Czechia": ["Czech Republic"],
+    "DR Congo": ["D.R. Congo"],
+    "Defensa y Justicia": ["Club Social y Deportivo Defensa y Justicia"],
+    "Derry City F.C.": ["Derry City"],
+    "Difaa El Jadida": ["Difaa El Jadidi"],
+    "Drogheda United F.C.": ["Drogheda United"],
+    "Dundalk F.C.": ["Dundalk"],
+    "Finn Harps F.C.": ["Finn Harps"],
+    "Fluminense F.C.": ["Fluminense", "Fluminense Football Club"],
+    "Galway United F.C.": ["Galway United"],
+    "Gareji": ["Gareji Sagarejo"],
+    "Glentoran F.C.": ["Glentoran"],
+    "Grindavik": ["UMF Grindavik"],
+    "Hammarby Fotboll": ["Hammarby IF"],
+    "Hangzhou Linping Wuyue": ["Hangzhou Linping"],
+    "Helsingin Jalkapalloklubi": ["HJK Helsinki"],
+    "Henan Songshan Longmen": ["Henan"],
+    "IF Brommapojkarna": ["Idrottsföreningen  Brommapojkarna"],
+    "IF Elfsborg": ["Idrottsföreningen Elfsborg"],
+    "IK Franke": ["Franke"],
+    "Ikorodu City F.C.": ["Ikorodu City"],
+    "Independiente Rivadavia": ["Club Sportivo Independiente Rivadavia"],
+    "Internazionale": ["Inter", "Inter Milan"],
+    "Juventus FC": ["Juventus Football Club"],
+    "Kolkheti 1913 Poti": ["Kolkheti 1913"],
+    "Labasa F.C.": ["Labasa"],
+    "Landvetter": ["Landvetter IS"],
+    "Lautoka F.C.": ["Lautoka"],
+    "Leeds United": ["Leeds"],
+    "Longford Town F.C.": ["Longford Town"],
+    "Macae Esporte RJ": ["Macae"],
+    "Maghreb Fes": ["Maghreb Fez"],
+    "Malmö FF": ["Malmö Fotbollförening"],
+    "Manchester City": ["Man City"],
+    "Manchester United": ["Man Utd", "Man United", "Manchester Utd"],
+    "Molde FK": ["Molde Fotballklubb"],
+    "Monaco": ["AS Monaco"],
+    "Málaga CF": ["Málaga Club de Fútbol"],
+    "Nasinu F.C.": ["Nasinu"],
+    "Navua F.C.": ["Navua"],
+    "Newcastle United": ["Newcastle"],
+    "Nottingham Forest": ["Nottm Forest", "Notts Forest"],
+    "Odishi 1919 Zugdidi": ["Odishi 1919"],
+    "Paris Saint-Germain": ["PSG", "Paris SG"],
+    "Paysandú F.C.": ["Paysandú FC"],
+    "Racing Club": ["Racing Club Asociación Civil de Avellaneda"],
+    "Real Betis": ["Betis"],
+    "Real Sociedad": ["Sociedad"],
+    "Rewa F.C.": ["Rewa"],
+    "Rosenborg BK": ["Rosenborg Ballklub"],
+    "SK Austria Klagenfurt": ["Austria Klagenfurt"],
+    "SSC Napoli": ["Napoli"],
+    "SV Wals-Grünau": ["Wals-Grünau"],
     "San Martin de San Juan": [
       "San Martin T.",
       "San Martin S.J.",
       "CA San Martín (San Juan)"
     ],
-    "Sarpsborg 08 FF": [
-      "Sarpsborg 08 Fotballforening"
-    ],
-    "Sheffield United": [
-      "Sheffield Utd"
-    ],
-    "Shenavar Sazi Qeshm F.C.": [
-      "Shenavarsazi Qeshm"
-    ],
-    "Shenzhen Peng City": [
-      "Shenzhen Xinpengcheng"
-    ],
-    "Sporting CP": [
-      "Sporting Lisbon",
-      "Sporting"
-    ],
-    "St Patrick's Athletic F.C.": [
-      "St Patrick's Athletic"
-    ],
-    "Strabane Athletic F.C.": [
-      "Strabane Athletic"
-    ],
-    "Suva F.C.": [
-      "Suva"
-    ],
-    "São Paulo FC": [
-      "São Paulo Futebol Clube"
-    ],
-    "Tacuarembó F.C.": [
-      "Tacuarembó"
-    ],
-    "Talleres de Córdoba": [
-      "Club Atlético Talleres"
-    ],
-    "Tolka Rovers F.C.": [
-      "Tolka Rovers"
-    ],
-    "Tottenham Hotspur": [
-      "Tottenham",
-      "Spurs"
-    ],
-    "Turkiye": [
-      "Turkey"
-    ],
-    "Unión de Santa Fe": [
-      "Club Atlético Unión"
-    ],
-    "Viking FK": [
-      "Viking Fotballklubb"
-    ],
-    "West Ham United": [
-      "West Ham"
-    ],
-    "Wolverhampton Wanderers": [
-      "Wolves",
-      "Wolverhampton"
-    ],
-    "Wolverhampton Wanderers Women": [
-      "Wolves Women"
-    ]
+    "Sarpsborg 08 FF": ["Sarpsborg 08 Fotballforening"],
+    "Sheffield United": ["Sheffield Utd"],
+    "Shenavar Sazi Qeshm F.C.": ["Shenavarsazi Qeshm"],
+    "Shenzhen Peng City": ["Shenzhen Xinpengcheng"],
+    "Sporting CP": ["Sporting Lisbon", "Sporting"],
+    "St Patrick's Athletic F.C.": ["St Patrick's Athletic"],
+    "Strabane Athletic F.C.": ["Strabane Athletic"],
+    "Suva F.C.": ["Suva"],
+    "São Paulo FC": ["São Paulo Futebol Clube"],
+    "Tacuarembó F.C.": ["Tacuarembó"],
+    "Talleres de Córdoba": ["Club Atlético Talleres"],
+    "Tolka Rovers F.C.": ["Tolka Rovers"],
+    "Tottenham Hotspur": ["Tottenham", "Spurs"],
+    "Turkiye": ["Turkey"],
+    "Unión de Santa Fe": ["Club Atlético Unión"],
+    "Viking FK": ["Viking Fotballklubb"],
+    "West Ham United": ["West Ham"],
+    "Wolverhampton Wanderers": ["Wolves", "Wolverhampton"],
+    "Wolverhampton Wanderers Women": ["Wolves Women"]
   }
 }

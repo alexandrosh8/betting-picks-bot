@@ -278,3 +278,28 @@ def test_reep_import_did_not_introduce_fuzzy_pairing() -> None:
     # collisions): every alias key maps to exactly one canonical by construction.
     table_alias_to_canon = table._alias_to_canon  # noqa: SLF001 (invariant check)
     assert len(table_alias_to_canon) == len(set(table_alias_to_canon))
+
+
+def test_basketball_seed_bridges_real_pinnacle_vs_oddsportal_names() -> None:
+    # Data-driven (2026-06-21 live DB): Pinnacle prices WNBA/club basketball
+    # WITHOUT OddsPortal's "W" women-league suffix or sponsor/city tail, so the
+    # sharp anchor failed to attach. WNBA names are gender-unique (no NBA team
+    # shares them) -> bridging the "W" form cannot conflate men's/women's.
+    table = AliasTable.from_seed()
+
+    # WNBA "W" suffix (in-season) — Pinnacle name vs OddsPortal "<team> W"
+    sparks = _cand("w1", "Los Angeles Sparks W", "Minnesota Lynx W")
+    assert (
+        match_event("Los Angeles Sparks", "Minnesota Lynx", KO, [sparks], aliases=table) is sparks
+    )
+    sky = _cand("w2", "Chicago Sky W", "New York Liberty W")
+    assert match_event("Chicago Sky", "New York Liberty", KO, [sky], aliases=table) is sky
+
+    # Sponsor / city tail
+    legia = _cand("c1", "Legia Warszawa", "Zielona Gora")
+    assert match_event("Legia", "Zielona Gora", KO, [legia], aliases=table) is legia
+    ginebra = _cand("c2", "Barangay Ginebra San Miguel", "Fubon Braves")
+    assert (
+        match_event("Barangay Ginebra", "Taipei Fubon Braves", KO, [ginebra], aliases=table)
+        is ginebra
+    )

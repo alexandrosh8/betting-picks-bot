@@ -1409,7 +1409,6 @@
               aria-label="Dropping-odds window"
             ></select>
           </label>
-          <span class="sub" id="dropping-stamp"></span>
         </div>
         <table id="dropping-table">
           <thead>
@@ -1428,6 +1427,7 @@
             </tr>
           </tbody>
         </table>
+        <div class="sub" id="dropping-stamp"></div>
       </div>
       <!-- CLV scorecard — proof-of-edge ledger headline (CLOSED tab only) -->
       <div class="sub" id="clv-scorecard" style="display: none"></div>
@@ -4071,6 +4071,14 @@
                 existing.tr.classList.remove("drop-changed");
                 void existing.tr.offsetWidth; // restart the flash
                 existing.tr.classList.add("drop-changed");
+                // Drop the class once the flash finishes, so the periodic
+                // reorder (which re-inserts every row) can't restart the
+                // animation on a row that hasn't changed since.
+                const changed = existing.tr;
+                setTimeout(
+                  () => changed.classList.remove("drop-changed"),
+                  1500,
+                );
               }
             } else {
               const tr = document.createElement("tr");

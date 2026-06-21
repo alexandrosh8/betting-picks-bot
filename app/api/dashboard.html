@@ -4021,10 +4021,11 @@
         for (const lbl of ["1", "X", "2"]) outcomeCell(tr, byLabel[lbl]);
       }
       function dropSig(r) {
+        // Flash a row ONLY when a CURRENT (live) odd actually moves — not when the
+        // opening reference drifts or drop% recomputes below the shown decimal
+        // (those changed the old signature, flashing rows that looked unchanged).
         return (r.outcomes || [])
-          .map(
-            (o) => o.label + ":" + o.open + ">" + o.current + ":" + o.drop_pct,
-          )
+          .map((o) => o.label + ":" + (o.current == null ? "" : o.current))
           .join("|");
       }
       // Keyed diff: a refresh updates ONLY the matches whose odds changed (those

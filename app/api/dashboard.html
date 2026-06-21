@@ -1312,7 +1312,7 @@
             role="tab"
             data-status="dropping"
             aria-selected="false"
-            title="External betmonitor consensus-average dropping odds — view only, not our picks"
+            title="External oddsmath attributed per-book dropping odds — view only, not our picks"
           >
             DROPPING ⚡
           </button>
@@ -1365,7 +1365,7 @@
           </tbody>
         </table>
       </div>
-      <!-- DROPPING ODDS — external betmonitor consensus feed, VIEW-ONLY.
+      <!-- DROPPING ODDS — external oddsmath attributed feed, VIEW-ONLY.
            Never a pick/edge/CLV input; rendered only when the DROPPING tab is open. -->
       <div class="tablewrap" id="dropping-panel" hidden>
         <table id="dropping-table">
@@ -1374,8 +1374,8 @@
               <th>Kickoff</th>
               <th>League</th>
               <th>Match</th>
-              <th>Market</th>
-              <th>Dropped</th>
+              <th>Book</th>
+              <th>Sel</th>
               <th>Open&nbsp;→&nbsp;Now</th>
               <th>Drop&nbsp;%</th>
             </tr>
@@ -3858,9 +3858,9 @@
           /* storage disabled — non-fatal */
         }
       }
-      // --- DROPPING ODDS (external betmonitor consensus feed, VIEW-ONLY) ------
-      // Rendered ONLY in its own tab. This is a market-AVERAGE line, never an
-      // input to picks/edges/stakes/CLV. All betmonitor strings go through td()
+      // --- DROPPING ODDS (external oddsmath attributed feed, VIEW-ONLY) -------
+      // Rendered ONLY in its own tab. Attributed per-book moves, never an input
+      // to picks/edges/stakes/CLV. All external strings go through td()
       // (textContent only, never raw-HTML assignment) so the untrusted feed
       // cannot inject markup (dashboard-wide guardrail).
       function droppingMessage(tbody, text) {
@@ -3907,17 +3907,10 @@
         } else {
           tbody.replaceChildren();
           for (const r of rows) {
-            const sels = r.selections || [];
-            const dropped = sels.find((s) => s.dropped) || sels[0] || {};
             const tr = document.createElement("tr");
-            // Kickoff: use the SAME local formatter as the other tabs (Cyprus tz,
-            // "Jun 25, 04:00") off the UTC field — not betmonitor's own label.
-            td(
-              tr,
-              r.kickoff_utc ? fmtLocal(r.kickoff_utc) : r.kickoff_label || "",
-            );
-            // League cell: league name (minus the "Sport ·" prefix) + a sport
-            // badge below it, matching how the other tabs surface the game type.
+            // Kickoff via the shared local formatter (Cyprus tz, "Jun 25, 04:00").
+            td(tr, r.kickoff_utc ? fmtLocal(r.kickoff_utc) : "");
+            // League (minus the "Sport ·" prefix) + a sport badge, like other tabs.
             const lc = document.createElement("td");
             const parts = (r.league || "").split(" · ");
             lc.textContent =
@@ -3928,23 +3921,12 @@
             }
             tr.appendChild(lc);
             td(tr, r.match || "");
-            td(tr, r.market || "");
-            // Dropped: resolve 1/X/2 to the actual side (home/Draw/away) from the
-            // match; Over/Under pass through. The bare code is meaningless alone.
-            const sides = (r.match || "").split("—");
-            const home = (sides[0] || "").trim();
-            const away = sides.slice(1).join("—").trim();
-            const lbl = dropped.label || "";
-            const droppedName =
-              lbl === "1"
-                ? home || lbl
-                : lbl === "2"
-                  ? away || lbl
-                  : lbl === "X"
-                    ? "Draw"
-                    : lbl;
-            td(tr, droppedName);
-            // Odds cell: OPENING -> CURRENT (dropped) price, like the site.
+            // Book: the named bookmaker this drop is attributed to.
+            td(tr, r.book || "");
+            // Selection as the CODE (1/X/2/Over/Under) — the match column already
+            // carries the team names.
+            td(tr, r.selection || "");
+            // Open -> Now: this book's opening vs current price for that outcome.
             const oc = document.createElement("td");
             if (r.open_odds != null) {
               const o = document.createElement("span");
@@ -3955,7 +3937,7 @@
             const cur = document.createElement("span");
             cur.style.fontWeight = "700";
             cur.textContent =
-              dropped.decimal_odds == null ? "—" : String(dropped.decimal_odds);
+              r.current_odds == null ? "—" : String(r.current_odds);
             oc.appendChild(cur);
             tr.appendChild(oc);
             const dp = td(
@@ -3970,7 +3952,8 @@
         if (stamp)
           stamp.textContent =
             data && data.fetched_at
-              ? "betmonitor · fetched " +
+              ? (data.source || "external") +
+                " · fetched " +
                 new Date(data.fetched_at).toLocaleTimeString()
               : "";
       }
@@ -3995,7 +3978,7 @@
         if (dropping) {
           loadDropping();
           // Keep the odds current as they drop/rise. Server-cached, so this is
-          // polite to betmonitor — most ticks are served from cache.
+          // polite to oddsmath — most ticks are served from cache.
           DROPPING_TIMER = setInterval(loadDropping, 60000);
           return;
         }

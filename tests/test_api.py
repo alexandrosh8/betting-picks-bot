@@ -744,39 +744,39 @@ def test_dashboard_picks_table_columns_are_sortable() -> None:
     assert "confLevel" in text
 
 
-def test_dropping_odds_endpoint_serves_external_consensus_view(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_dropping_odds_endpoint_serves_attributed_view(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from app.api import routes
-    from app.ingestion.betmonitor_dropping import DroppingRow, DroppingSelection
+    from app.ingestion.oddsmath_dropping import DropRow
 
     routes._DROPPING_CACHE.clear()
 
     async def fake_fetch(_client, **_kw):  # type: ignore[no-untyped-def]
         return [
-            DroppingRow(
-                event_id="109599057",
+            DropRow(
+                sport="soccer",
                 kickoff_utc=None,
-                kickoff_label="Today 22:30",
-                sport="Football",
-                league="Football · Peru · Peru Copa de la Liga",
-                match="A — B",
-                market="3-Way",
-                drop_pct=-24.0,
-                open_odds=2.50,
-                selections=(DroppingSelection("1", 2.09, True),),
+                league="FIFA - World Cup 2026",
+                match="Netherlands — Tunisia",
+                market="1X2",
+                book="1XBET",
+                selection="1",
+                open_odds=1.32,
+                current_odds=1.14,
+                drop_pct=-13.64,
             )
         ]
 
-    monkeypatch.setattr(routes, "fetch_dropping_odds", fake_fetch)
+    monkeypatch.setattr(routes, "fetch_oddsmath_drops", fake_fetch)
     body = TestClient(make_app()).get("/dropping-odds").json()
     assert body["available"] is True
-    assert body["source"] == "betmonitor.com"
-    assert "NOT used for any" in body["note"]  # the informational-only guardrail
+    assert body["source"] == "oddsmath.com"
     row = body["rows"][0]
-    assert row["event_id"] == "109599057"
-    assert row["sport"] == "Football"  # split for the league-column badge
-    assert row["drop_pct"] == -24.0
-    assert row["open_odds"] == 2.50  # opening price for the open -> current view
-    assert row["selections"][0] == {"label": "1", "decimal_odds": 2.09, "dropped": True}
+    assert row["book"] == "1XBET"  # attributed to a named book
+    assert row["selection"] == "1"  # code, not a team name
+    assert row["open_odds"] == 1.32
+    assert row["current_odds"] == 1.14
+    assert row["drop_pct"] == -13.64
+    assert row["match"] == "Netherlands — Tunisia"
 
 
 def test_dropping_odds_endpoint_fails_soft_when_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -787,7 +787,7 @@ def test_dropping_odds_endpoint_fails_soft_when_unavailable(monkeypatch) -> None
     async def empty(_client, **_kw):  # type: ignore[no-untyped-def]
         return []
 
-    monkeypatch.setattr(routes, "fetch_dropping_odds", empty)
+    monkeypatch.setattr(routes, "fetch_oddsmath_drops", empty)
     body = TestClient(make_app()).get("/dropping-odds").json()
     assert body["available"] is False
     assert body["rows"] == []

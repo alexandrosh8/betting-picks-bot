@@ -36,7 +36,7 @@ from app.api.auth import (
 from app.api.deps import get_session
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
-from app.ingestion.betmonitor_dropping import DroppingRow, fetch_dropping_odds
+from app.ingestion.oddsmath_dropping import DropRow, fetch_oddsmath_drops
 from app.resolution.shadow import summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
@@ -729,49 +729,46 @@ async def resolution_match_rate(
     return report
 
 
-# --- view-only external feed: betmonitor dropping odds -----------------------
+# --- view-only external feed: oddsmath ATTRIBUTED dropping odds --------------
 # Cached 2 min — short enough that the tab's 60s auto-refresh shows odds moving
-# (drop/rise) within a couple minutes, long enough to stay polite to betmonitor's
-# small host (it only recomputes its own list every ~5 min anyway). CONSENSUS-
-# AVERAGE data, informational ONLY: never an input to any pick, edge, stake, CLV.
+# within a couple minutes, polite to oddsmath. ATTRIBUTED per-book data (a named
+# bookmaker's open->current), informational ONLY: never an input to any pick,
+# edge, stake, or CLV.
 _DROPPING_TTL = timedelta(minutes=2)
-_DROPPING_CACHE: dict[str, tuple[datetime, list[DroppingRow]]] = {}
+_DROPPING_CACHE: dict[str, tuple[datetime, list[DropRow]]] = {}
 
 
-def _dropping_row_json(row: DroppingRow) -> dict[str, object]:
+def _dropping_row_json(row: DropRow) -> dict[str, object]:
     return {
-        "event_id": row.event_id,
         "kickoff_utc": row.kickoff_utc.isoformat() if row.kickoff_utc else None,
-        "kickoff_label": row.kickoff_label,
         "sport": row.sport,
         "league": row.league,
         "match": row.match,
         "market": row.market,
-        "drop_pct": row.drop_pct,
+        "book": row.book,
+        "selection": row.selection,
         "open_odds": row.open_odds,
-        "selections": [
-            {"label": s.label, "decimal_odds": s.decimal_odds, "dropped": s.dropped}
-            for s in row.selections
-        ],
+        "current_odds": row.current_odds,
+        "drop_pct": row.drop_pct,
     }
 
 
 @router.get("/dropping-odds", dependencies=[Depends(require_dashboard_auth)])
-async def dropping_odds(sport: str = "all", time_window: str = "2") -> dict[str, object]:
-    """VIEW-ONLY external feed — betmonitor.com "dropping odds".
+async def dropping_odds(interval: int = 1440) -> dict[str, object]:
+    """VIEW-ONLY external feed — oddsmath.com ATTRIBUTED per-book dropping odds.
 
-    A CONSENSUS-AVERAGE line-movement list (not a bookmaker price), ~5 min stale,
-    top-20 only. Shown for human browsing; NEVER used for any pick, edge, stake,
-    or CLV — the math never sees it. Cached ~5 min, fails soft (the tab shows
-    "unavailable" rather than erroring)."""
-    key = f"{sport}:{time_window}"
+    Each row is one NAMED bookmaker's opening->current move on a fixture (not a
+    blended average). Shown for human browsing; NEVER used for any pick, edge,
+    stake, or CLV — the math never sees it. Cached 2 min, fails soft.
+    interval: 60=1h, 360=6h, 1440=24h."""
+    key = str(interval)
     now = datetime.now(tz=UTC)
     cached = _DROPPING_CACHE.get(key)
     if cached is not None and now - cached[0] < _DROPPING_TTL:
         rows, fetched_at = cached[1], cached[0]
     else:
         async with httpx.AsyncClient() as client:
-            rows = await fetch_dropping_odds(client, sport=sport, time_window=time_window)
+            rows = await fetch_oddsmath_drops(client, interval=interval)
         if rows:
             _DROPPING_CACHE[key] = (now, rows)
             fetched_at = now
@@ -780,12 +777,8 @@ async def dropping_odds(sport: str = "all", time_window: str = "2") -> dict[str,
         else:
             fetched_at = now
     return {
-        "source": "betmonitor.com",
-        "kind": "external · consensus-average dropping odds · informational only",
-        "note": (
-            "Market-AVERAGE line movement (not a bookmaker price). NOT used for any "
-            "pick, edge, stake, or CLV — shown for browsing only."
-        ),
+        "source": "oddsmath.com",
+        "kind": "external · attributed per-book dropping odds · informational only",
         "fetched_at": fetched_at.isoformat(),
         "available": bool(rows),
         "rows": [_dropping_row_json(r) for r in rows],

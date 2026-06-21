@@ -17,6 +17,7 @@ never crash the app; only the exception TYPE is logged (never the URL).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -32,6 +33,10 @@ _HEADERS = {
 }
 #: betmonitor data-bet code -> human selection label.
 _BET_LABELS = {"q1": "1", "qx": "X", "q2": "2", "qo": "Over", "qu": "Under"}
+#: First decimal odd in a row's inline ChartSetup(...) price history — the
+#: OPENING price of the dropped selection over the window (the row's chart is
+#: keyed to the dropped leg). Shape: ChartSetup(sel, 2, false, [['HH:MM','4.85',…
+_CHART_FIRST_ODD = re.compile(r"\[\s*\[\s*'[^']*'\s*,\s*'([\d.]+)'")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,15 +52,22 @@ class DroppingSelection:
 
 @dataclass(frozen=True, slots=True)
 class DroppingRow:
-    """One betmonitor dropping-odds entry, for view-only display."""
+    """One betmonitor dropping-odds entry, for view-only display.
+
+    ``sport`` is split from the league string ("Football · …"). ``open_odds`` is
+    the dropped leg's OPENING price (first chart point) so the view can show the
+    open -> current move, like the site. Both are consensus averages, display
+    only."""
 
     event_id: str
     kickoff_utc: datetime | None
     kickoff_label: str
+    sport: str
     league: str
     match: str
     market: str
     drop_pct: float | None
+    open_odds: float | None
     selections: tuple[DroppingSelection, ...]
 
 
@@ -89,9 +101,16 @@ def parse_dropping_odds(html: str) -> list[DroppingRow]:
         ts = _to_float(_attr(ev, "data-value")) if ev else None
         kickoff = datetime.fromtimestamp(ts, tz=UTC) if ts is not None else None
         league_a = cont.select_one("div.league a")
+        league = league_a.get_text(strip=True) if league_a else ""
         teams_a = cont.select_one("div.teams a")
         bettype = cont.select_one("div.bettype-string")
         value = cont.select_one("div.value")
+        script = cont.select_one("script")
+        open_odds: float | None = None
+        if script is not None:
+            chart = _CHART_FIRST_ODD.search(script.get_text())
+            if chart:
+                open_odds = _to_float(chart.group(1))
         selections: list[DroppingSelection] = []
         for link in cont.select("div.odds > a.odd-link"):
             label = _BET_LABELS.get((_attr(link, "data-bet") or "").strip())
@@ -111,10 +130,14 @@ def parse_dropping_odds(html: str) -> list[DroppingRow]:
                 event_id=event_id,
                 kickoff_utc=kickoff,
                 kickoff_label=ev.get_text(" ", strip=True) if ev else "",
-                league=league_a.get_text(strip=True) if league_a else "",
+                # league string is "Sport · Country · League" — split the sport so
+                # the view can badge it like the other tabs.
+                sport=league.split(" · ", 1)[0] if league else "",
+                league=league,
                 match=teams_a.get_text(strip=True) if teams_a else "",
                 market=bettype.get_text(strip=True) if bettype else "",
                 drop_pct=_to_float(_attr(value, "data-value")) if value else None,
+                open_odds=open_odds,
                 selections=tuple(selections),
             )
         )

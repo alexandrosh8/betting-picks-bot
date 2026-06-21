@@ -730,10 +730,11 @@ async def resolution_match_rate(
 
 
 # --- view-only external feed: betmonitor dropping odds -----------------------
-# Cached ~5 min (betmonitor is itself ~5 min stale) — snappy for the dashboard
-# and polite to its small host. CONSENSUS-AVERAGE data, informational ONLY:
-# never an input to any pick, edge, stake, or CLV.
-_DROPPING_TTL = timedelta(minutes=5)
+# Cached 2 min — short enough that the tab's 60s auto-refresh shows odds moving
+# (drop/rise) within a couple minutes, long enough to stay polite to betmonitor's
+# small host (it only recomputes its own list every ~5 min anyway). CONSENSUS-
+# AVERAGE data, informational ONLY: never an input to any pick, edge, stake, CLV.
+_DROPPING_TTL = timedelta(minutes=2)
 _DROPPING_CACHE: dict[str, tuple[datetime, list[DroppingRow]]] = {}
 
 
@@ -742,10 +743,12 @@ def _dropping_row_json(row: DroppingRow) -> dict[str, object]:
         "event_id": row.event_id,
         "kickoff_utc": row.kickoff_utc.isoformat() if row.kickoff_utc else None,
         "kickoff_label": row.kickoff_label,
+        "sport": row.sport,
         "league": row.league,
         "match": row.match,
         "market": row.market,
         "drop_pct": row.drop_pct,
+        "open_odds": row.open_odds,
         "selections": [
             {"label": s.label, "decimal_odds": s.decimal_odds, "dropped": s.dropped}
             for s in row.selections

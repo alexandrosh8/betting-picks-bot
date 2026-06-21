@@ -2,10 +2,10 @@
 
 The parsed data is a CONSENSUS AVERAGE line (not a book), informational only —
 it never enters devig/edge/CLV/persistence. These tests pin the parse contract
-against a real (script-stripped) 2-row sample fragment.
+against a real 2-row sample fragment (with its inline chart history).
 """
 
-from datetime import UTC, datetime
+from datetime import UTC
 from pathlib import Path
 
 import httpx
@@ -28,24 +28,28 @@ def test_parse_three_way_row() -> None:
     assert len(rows) == 2
     r = rows[0]
     assert isinstance(r, DroppingRow)
-    assert r.event_id == "109599057"
-    assert r.league == "Football · Peru · Peru Copa de la Liga"
-    assert r.match == "CD Estudiantil CNI — Sporting Cristal"
+    assert r.event_id == "109600130"
+    assert r.sport == "Football"  # split from the "Sport · Country · League" string
+    assert r.league == "Football · Iceland · Iceland Urvalsdeild Women"
+    assert r.match == "Thor KA Akureyri (W) — Throttur Reykjavik (W)"
     assert r.market == "3-Way"
-    assert r.drop_pct == -24.0
-    assert r.kickoff_utc == datetime.fromtimestamp(1782073800, tz=UTC)
+    assert r.drop_pct == -22.7
+    assert r.open_odds == 2.32  # first chart point = the dropped leg's OPENING price
+    assert r.kickoff_utc is not None and r.kickoff_utc.tzinfo == UTC
     assert [(s.label, s.decimal_odds, s.dropped) for s in r.selections] == [
-        ("1", 2.09, True),
-        ("X", 3.18, False),
-        ("2", 3.17, False),
+        ("1", 4.82, False),
+        ("X", 4.31, False),
+        ("2", 1.52, True),
     ]
 
 
 def test_parse_two_way_row_skips_empty_slot() -> None:
     r = parse_dropping_odds(_SAMPLE)[1]
     assert r.event_id == "109600476"
+    assert r.sport == "Tennis"
     assert r.market == "Match Winner"
     assert r.drop_pct == -16.1
+    assert r.open_odds == 3.7
     # the empty third 'q ' slot carries no price -> dropped from the parse
     assert [(s.label, s.decimal_odds, s.dropped) for s in r.selections] == [
         ("1", 1.54, False),
@@ -64,7 +68,7 @@ async def test_fetch_parses_transport_response() -> None:
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         rows = await fetch_dropping_odds(client)
-    assert [r.event_id for r in rows] == ["109599057", "109600476"]
+    assert [r.event_id for r in rows] == ["109600130", "109600476"]
 
 
 async def test_fetch_is_graceful_on_error() -> None:

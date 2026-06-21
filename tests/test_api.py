@@ -756,10 +756,12 @@ def test_dropping_odds_endpoint_serves_external_consensus_view(monkeypatch) -> N
                 event_id="109599057",
                 kickoff_utc=None,
                 kickoff_label="Today 22:30",
+                sport="Football",
                 league="Football · Peru · Peru Copa de la Liga",
                 match="A — B",
                 market="3-Way",
                 drop_pct=-24.0,
+                open_odds=2.50,
                 selections=(DroppingSelection("1", 2.09, True),),
             )
         ]
@@ -771,7 +773,9 @@ def test_dropping_odds_endpoint_serves_external_consensus_view(monkeypatch) -> N
     assert "NOT used for any" in body["note"]  # the informational-only guardrail
     row = body["rows"][0]
     assert row["event_id"] == "109599057"
+    assert row["sport"] == "Football"  # split for the league-column badge
     assert row["drop_pct"] == -24.0
+    assert row["open_odds"] == 2.50  # opening price for the open -> current view
     assert row["selections"][0] == {"label": "1", "decimal_odds": 2.09, "dropped": True}
 
 

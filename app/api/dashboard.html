@@ -1382,7 +1382,7 @@
               <th>Match</th>
               <th>Market</th>
               <th>Dropped</th>
-              <th>Odds</th>
+              <th>Open&nbsp;→&nbsp;Now</th>
               <th>Drop&nbsp;%</th>
             </tr>
           </thead>
@@ -3878,6 +3878,7 @@
         }
         tbody.appendChild(tr);
       }
+      let DROPPING_TIMER = null; // auto-refresh handle while the DROPPING tab is open
       async function loadDropping() {
         const tbody = $("dropping-rows");
         const stamp = $("dropping-stamp");
@@ -3906,14 +3907,34 @@
             const dropped = sels.find((s) => s.dropped) || sels[0] || {};
             const tr = document.createElement("tr");
             td(tr, r.kickoff_label || "");
-            td(tr, r.league || "");
+            // League cell: league name (minus the "Sport ·" prefix) + a sport
+            // badge below it, matching how the other tabs surface the game type.
+            const lc = document.createElement("td");
+            const parts = (r.league || "").split(" · ");
+            lc.textContent =
+              parts.length > 1 ? parts.slice(1).join(" · ") : r.league || "";
+            if (r.sport) {
+              lc.appendChild(document.createElement("br"));
+              lc.appendChild(badge(r.sport, "b-neutral"));
+            }
+            tr.appendChild(lc);
             td(tr, r.match || "");
             td(tr, r.market || "");
             td(tr, dropped.label || "");
-            td(
-              tr,
-              dropped.decimal_odds == null ? "—" : String(dropped.decimal_odds),
-            );
+            // Odds cell: OPENING -> CURRENT (dropped) price, like the site.
+            const oc = document.createElement("td");
+            if (r.open_odds != null) {
+              const o = document.createElement("span");
+              o.textContent = String(r.open_odds);
+              o.style.opacity = "0.55";
+              oc.append(o, document.createTextNode(" → "));
+            }
+            const cur = document.createElement("span");
+            cur.style.fontWeight = "700";
+            cur.textContent =
+              dropped.decimal_odds == null ? "—" : String(dropped.decimal_odds);
+            oc.appendChild(cur);
+            tr.appendChild(oc);
             const dp = td(
               tr,
               r.drop_pct == null ? "—" : r.drop_pct.toFixed(1) + "%",
@@ -3946,8 +3967,15 @@
         const dropPanel = $("dropping-panel");
         if (picksWrap) picksWrap.hidden = dropping;
         if (dropPanel) dropPanel.hidden = !dropping;
+        if (DROPPING_TIMER) {
+          clearInterval(DROPPING_TIMER);
+          DROPPING_TIMER = null;
+        }
         if (dropping) {
           loadDropping();
+          // Keep the odds current as they drop/rise. Server-cached, so this is
+          // polite to betmonitor — most ticks are served from cache.
+          DROPPING_TIMER = setInterval(loadDropping, 60000);
           return;
         }
         render();

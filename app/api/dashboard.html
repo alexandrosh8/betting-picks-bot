@@ -1307,6 +1307,15 @@
           >
             RESULTS
           </button>
+          <button
+            type="button"
+            role="tab"
+            data-status="dropping"
+            aria-selected="false"
+            title="External betmonitor consensus-average dropping odds — view only, not our picks"
+          >
+            DROPPING ⚡
+          </button>
         </div>
         <div class="toolbar-filters">
           <select id="f-tier" aria-label="Filter picks by tier">
@@ -1326,7 +1335,7 @@
       </div>
 
       <!-- 3) full-width picks table -->
-      <div class="tablewrap">
+      <div class="tablewrap" id="picks-wrap">
         <table id="picks-table">
           <thead>
             <tr id="picks-head">
@@ -1355,6 +1364,35 @@
             </tr>
           </tbody>
         </table>
+      </div>
+      <!-- DROPPING ODDS — external betmonitor consensus feed, VIEW-ONLY.
+           Never a pick/edge/CLV input; rendered only when the DROPPING tab is open. -->
+      <div class="tablewrap" id="dropping-panel" hidden>
+        <div class="sub" id="dropping-banner">
+          External · <strong>betmonitor.com</strong> consensus-average dropping
+          odds · informational only. This is a market-AVERAGE line (not a
+          bookmaker price) and is <strong>never</strong> used for any pick,
+          edge, stake, or CLV.
+        </div>
+        <table id="dropping-table">
+          <thead>
+            <tr>
+              <th>Kickoff</th>
+              <th>League</th>
+              <th>Match</th>
+              <th>Market</th>
+              <th>Dropped</th>
+              <th>Odds</th>
+              <th>Drop&nbsp;%</th>
+            </tr>
+          </thead>
+          <tbody id="dropping-rows">
+            <tr>
+              <td colspan="7"><div class="skelbar"></div></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="sub" id="dropping-stamp"></div>
       </div>
       <!-- CLV scorecard — proof-of-edge ledger headline (CLOSED tab only) -->
       <div class="sub" id="clv-scorecard" style="display: none"></div>
@@ -2817,6 +2855,9 @@
       }
 
       function render() {
+        // DROPPING is an external, view-only tab with its own panel + render —
+        // the picks pipeline below does not apply to it.
+        if (STATUS_TAB === "dropping") return;
         const tier = $("f-tier").value;
         const q = $("f-search").value.trim().toLowerCase();
         // RESULTS reuses the results-oriented (ex-SETTLED) column layout, so the
@@ -3820,6 +3861,77 @@
           /* storage disabled — non-fatal */
         }
       }
+      // --- DROPPING ODDS (external betmonitor consensus feed, VIEW-ONLY) ------
+      // Rendered ONLY in its own tab. This is a market-AVERAGE line, never an
+      // input to picks/edges/stakes/CLV. All betmonitor strings go through td()
+      // (textContent only, never raw-HTML assignment) so the untrusted feed
+      // cannot inject markup (dashboard-wide guardrail).
+      function droppingMessage(tbody, text) {
+        tbody.replaceChildren();
+        const tr = document.createElement("tr");
+        const cell = td(tr, text === null ? "" : text);
+        cell.colSpan = 7;
+        if (text === null) {
+          const bar = document.createElement("div");
+          bar.className = "skelbar";
+          cell.replaceChildren(bar);
+        }
+        tbody.appendChild(tr);
+      }
+      async function loadDropping() {
+        const tbody = $("dropping-rows");
+        const stamp = $("dropping-stamp");
+        droppingMessage(tbody, null); // skeleton
+        try {
+          const res = await fetchWithTimeout("/dropping-odds");
+          renderDropping(await res.json());
+        } catch (e) {
+          droppingMessage(tbody, "Dropping-odds feed unavailable.");
+          if (stamp) stamp.textContent = "";
+        }
+      }
+      function renderDropping(data) {
+        const tbody = $("dropping-rows");
+        const stamp = $("dropping-stamp");
+        const rows = (data && data.rows) || [];
+        if (!data || !data.available || rows.length === 0) {
+          droppingMessage(
+            tbody,
+            "No dropping odds right now (or feed unavailable).",
+          );
+        } else {
+          tbody.replaceChildren();
+          for (const r of rows) {
+            const sels = r.selections || [];
+            const dropped = sels.find((s) => s.dropped) || sels[0] || {};
+            const tr = document.createElement("tr");
+            td(tr, r.kickoff_label || "");
+            td(tr, r.league || "");
+            td(tr, r.match || "");
+            td(tr, r.market || "");
+            td(tr, dropped.label || "");
+            td(
+              tr,
+              dropped.decimal_odds == null ? "—" : String(dropped.decimal_odds),
+            );
+            const dp = td(
+              tr,
+              r.drop_pct == null ? "—" : r.drop_pct.toFixed(1) + "%",
+            );
+            if (r.drop_pct != null && r.drop_pct < 0)
+              dp.style.color = "#22c55e";
+            tbody.appendChild(tr);
+          }
+        }
+        if (stamp)
+          stamp.textContent =
+            data && data.fetched_at
+              ? "betmonitor consensus · " +
+                (data.note || "") +
+                " · fetched " +
+                new Date(data.fetched_at).toLocaleTimeString()
+              : "";
+      }
       function setStatusTab(tab) {
         STATUS_TAB = tab;
         document
@@ -3828,6 +3940,16 @@
             b.setAttribute("aria-selected", String(b.dataset.status === tab));
           });
         rememberView("pt_tab", tab);
+        // The DROPPING tab swaps the picks table for the external panel.
+        const dropping = tab === "dropping";
+        const picksWrap = $("picks-wrap");
+        const dropPanel = $("dropping-panel");
+        if (picksWrap) picksWrap.hidden = dropping;
+        if (dropPanel) dropPanel.hidden = !dropping;
+        if (dropping) {
+          loadDropping();
+          return;
+        }
         render();
       }
       document
@@ -3859,7 +3981,7 @@
         const savedSortDir = localStorage.getItem("pt_sortdir");
         if (["asc", "desc"].includes(savedSortDir)) SORT_DIR = savedSortDir;
         const savedTab = localStorage.getItem("pt_tab");
-        if (["live", "unverified", "settled"].includes(savedTab))
+        if (["live", "unverified", "results", "dropping"].includes(savedTab))
           setStatusTab(savedTab);
       } catch (e) {
         /* storage unavailable — defaults stand */

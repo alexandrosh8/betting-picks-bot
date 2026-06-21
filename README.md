@@ -33,10 +33,10 @@ The honest result of backtesting (`docs/backtesting/`): a goals model (Dixon-Col
 
 The v3 maximal-data run (18 leagues × 7 seasons × two markets, **46k matches**; devig × edge threshold swept on TRAIN only, then a single pre-registered holdout) chose **shin devig, edge ≥ 0.03**. Held-out 2024–26:
 
-| Tier | n | ROI | Incremental CLV | Notes |
-| --- | --- | --- | --- | --- |
-| **Premium** (live default) | 62 | **+22.4%** | **+0.107** ( > 2 SE ) | positive even vs the Max-of-books close; 1X2 and OU2.5 each positive |
-| Volume (shadow) | 379 | +2.5% | +0.019 | tracked, never alerted |
+| Tier                       | n   | ROI        | Incremental CLV       | Notes                                                                |
+| -------------------------- | --- | ---------- | --------------------- | -------------------------------------------------------------------- |
+| **Premium** (live default) | 62  | **+22.4%** | **+0.107** ( > 2 SE ) | positive even vs the Max-of-books close; 1X2 and OU2.5 each positive |
+| Volume (shadow)            | 379 | +2.5%      | +0.019                | tracked, never alerted                                               |
 
 The number to trust is the **CLV** — small-sample ROI is noisy. A sport only earns **alerting picks** after its own held-out incremental CLV clears **> 2 SE**; everything else is visibility-only (scraped, shown, tracked — but pick-free and exposure-free, enforced in both the scheduler and the warehouse path).
 
@@ -49,14 +49,14 @@ uv run python scripts/value_picks.py --league world-cup --min-edge 0.015
 
 ## Sports coverage
 
-| Sport | Status | Notes |
-| --- | --- | --- |
-| **Football / Soccer** | ✅ Pick source *(validated)* | The held-out CLV edge lives here — sharp-vs-soft line shopping. |
-| **Basketball** (NBA / EuroLeague) | ✅ Pick source | Moneyline + main totals; same devig → edge gate. |
-| **Tennis** (ATP / WTA) | 👁 Visibility-only | Scraped and shown `UNVALIDATED`; mints **no** picks until matched closing-line volume clears the CLV bar (data-short today). |
-| **American football** (NFL / NCAA / CFL) | 👁 Visibility-only | In-season games shown; a free Pinnacle close is forward-captured so it can eventually be CLV-graded. |
+| Sport                                    | Status                       | Notes                                                                                                                        |
+| ---------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **Football / Soccer**                    | ✅ Pick source _(validated)_ | The held-out CLV edge lives here — sharp-vs-soft line shopping.                                                              |
+| **Basketball** (NBA / EuroLeague)        | ✅ Pick source               | Moneyline + main totals; same devig → edge gate.                                                                             |
+| **Tennis** (ATP / WTA)                   | 👁 Visibility-only           | Scraped and shown `UNVALIDATED`; mints **no** picks until matched closing-line volume clears the CLV bar (data-short today). |
+| **American football** (NFL / NCAA / CFL) | 👁 Visibility-only           | In-season games shown; a free Pinnacle close is forward-captured so it can eventually be CLV-graded.                         |
 
-> **Getting odds ≠ getting picks.** A sport is shown the moment we can scrape it, but it only mints picks once its *own* closing-line evidence proves an edge. Tennis and American football have odds flowing but not yet enough matched sharp closes to graduate.
+> **Getting odds ≠ getting picks.** A sport is shown the moment we can scrape it, but it only mints picks once its _own_ closing-line evidence proves an edge. Tennis and American football have odds flowing but not yet enough matched sharp closes to graduate.
 
 ## Install &amp; run
 
@@ -130,31 +130,31 @@ bash scripts/safety_audit.sh     # no-autobet + secret-leak greps (CI-gated)
 
 All secrets live in `.env` only (copy from `.env.example`; `.env` is `0600` and gitignored — **never commit it**). Highlights:
 
-| Key | Default | What it does |
-| --- | --- | --- |
-| `ODDS_SOURCE` | `oddsportal` | Free OddsPortal scrape (default) or `odds_api` (The Odds API, includes Pinnacle). |
-| `DASHBOARD_AUTH_ENABLED` | `true` | First-run `/setup` creates the admin password (stored hashed). `false` = no login. |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty | Pick alerts. Blank just disables alerts; the dashboard still works. |
-| `SCRAPER_PROXY_POOL` | empty | Optional rotating proxy pool for the scrape — see below. |
-| `BETFAIR_EXCHANGE_ENABLED` | `false` | Optional read-only Betfair Exchange BACK-odds capture — see below. |
+| Key                                       | Default      | What it does                                                                       |
+| ----------------------------------------- | ------------ | ---------------------------------------------------------------------------------- |
+| `ODDS_SOURCE`                             | `oddsportal` | Free OddsPortal scrape (default) or `odds_api` (The Odds API, includes Pinnacle).  |
+| `DASHBOARD_AUTH_ENABLED`                  | `true`       | First-run `/setup` creates the admin password (stored hashed). `false` = no login. |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | empty        | Pick alerts. Blank just disables alerts; the dashboard still works.                |
+| `SCRAPER_PROXY_POOL`                      | empty        | Optional rotating proxy pool for the scrape — see below.                           |
+| `BETFAIR_EXCHANGE_ENABLED`                | `false`      | Optional read-only Betfair Exchange BACK-odds capture — see below.                 |
 
 ### Rotating scrape proxies (more soft books, no IP throttle)
 
-The free OddsPortal scrape runs from your host IP — which OddsPortal can throttle (it starts returning empty pages) and which only shows the books available in *your* region (often a thin, crypto-heavy set). A proxy pool rotates the outbound IP (no single IP gets throttled) and, via a deeper-market region, surfaces far more soft books to shop — a **UK** exit lists ~18 mainstream books (Sky Bet, Paddy Power, William Hill, BetVictor, Betfred, Betway, bet365…) vs ~5 from a region-restricted IP.
+The free OddsPortal scrape runs from your host IP — which OddsPortal can throttle (it starts returning empty pages) and which only shows the books available in _your_ region (often a thin, crypto-heavy set). A proxy pool rotates the outbound IP (no single IP gets throttled) and, via a deeper-market region, surfaces far more soft books to shop — a **UK** exit lists ~18 mainstream books (Sky Bet, Paddy Power, William Hill, BetVictor, Betfred, Betway, bet365…) vs ~5 from a region-restricted IP.
 
 ```bash
 # .env — comma-separated host|port|user|pass quads. Empty = scrape from the host IP.
 SCRAPER_PROXY_POOL=host1|port1|user1|pass1,host2|port2|user2|pass2
 ```
 
-- **Rotation + failover** — the scraper tries proxies in turn and fails over on an error *or* a zero-match result (the throttle signature), capped so an empty slate never burns the whole pool.
-- **Read-only + safe** — the proxy only changes the outbound IP of GET odds requests; no login, cookies, or order path. Credentials reach the browser as separate fields (never in a logged URL) and live only in `.env`. These are *infrastructure* proxies, not betting accounts.
+- **Rotation + failover** — the scraper tries proxies in turn and fails over on an error _or_ a zero-match result (the throttle signature), capped so an empty slate never burns the whole pool.
+- **Read-only + safe** — the proxy only changes the outbound IP of GET odds requests; no login, cookies, or order path. Credentials reach the browser as separate fields (never in a logged URL) and live only in `.env`. These are _infrastructure_ proxies, not betting accounts.
 
 > A UK exit hides **Pinnacle** (UK-restricted); the primary sharp anchor is the free Pinnacle **ARCADIA** close (a geo-independent read-only feed), not the scrape.
 
 ### Betfair Exchange capture (optional second sharp anchor)
 
-OddsPortal *does* list **Betfair Exchange** — in a separate "Betting exchanges" table that the default scrape doesn't parse. An optional, **off-by-default**, read-only reader (`app/ingestion/betfair_exchange.py`, [ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) captures its BACK odds (fractional → decimal, liquidity-gated) as a second free sharp reference, stored in an **isolated** `betfair_<sport>` namespace that mints nothing — mirroring the Pinnacle ARCADIA pattern. Coverage is liquidity-gated (major matches yes, obscure ones no). Set `BETFAIR_EXCHANGE_ENABLED=true` to enable.
+OddsPortal _does_ list **Betfair Exchange** — in a separate "Betting exchanges" table that the default scrape doesn't parse. An optional, **off-by-default**, read-only reader (`app/ingestion/betfair_exchange.py`, [ADR-0015](docs/adr/adr-0015-betfair-exchange-back-odds-capture.md)) captures its BACK odds (fractional → decimal, liquidity-gated) as a second free sharp reference, stored in an **isolated** `betfair_<sport>` namespace that mints nothing — mirroring the Pinnacle ARCADIA pattern. Coverage is liquidity-gated (major matches yes, obscure ones no). Set `BETFAIR_EXCHANGE_ENABLED=true` to enable.
 
 ## Architecture
 
@@ -178,23 +178,23 @@ open http://localhost:8000/                       # the picks dashboard
 
 ## Project status
 
-- [x] Validated pick finder — sharp-vs-soft value strategy, v3 maximal-data backtest (46k matches, holdout incremental CLV > 2 SE), wired as the default live pipeline with 30-min CLV true-up (800+ tests).
+- [x] Validated pick finder — sharp-vs-soft value strategy, v3 maximal-data backtest (46k matches, holdout incremental CLV > 2 SE), wired as the default live pipeline with 30-min CLV true-up (1000+ tests).
 - [x] Settlement engine — soccer auto-settles from free results feeds; NBA/EuroLeague settle manually; the dashboard SETTLED view shows the final **Score** + result + P&amp;L + CLV, and the manual settle prompt **pre-fills** the scraped final score when available.
 - [x] Sharp anchors — free Pinnacle ARCADIA close (forward-captured) + optional isolated Betfair Exchange BACK-odds capture (off-by-default).
 - [x] Multisport visibility — Tennis (ATP/WTA) + American football (NFL/NCAA/CFL) as visibility-only feeds (scraped, shown `UNVALIDATED`, no picks); per-sport CLV-readiness probe; tennis surname-initial name reconciliation + CC0 cross-source alias seed for soccer coverage.
-- [x] Dashboard "PICKS TERMINAL" — proof-led redesign (desktop + mobile, 1–5★ confidence, clickable sorting, segmented LIVE / UNVERIFIED / CLOSED / SETTLED tabs, first-run `/setup` admin password stored hashed).
+- [x] Dashboard "PICKS TERMINAL" — proof-led redesign (desktop + mobile, 1–5★ confidence, clickable sorting, segmented LIVE / UNVERIFIED / RESULTS tabs, first-run `/setup` admin password stored hashed), plus a **view-only DROPPING tab** (external betmonitor consensus-average steam, read-only — informational, never a pick/edge/CLV input).
 - [x] Rotating scrape proxies — optional `SCRAPER_PROXY_POOL` (rotation + capped failover, off by default) widening soft-book coverage (~18 UK books vs ~5 from a region-restricted IP). Read-only; creds in `.env` only.
 - [ ] Next: bankroll tracking (phase 6) + a validated NBA model (phase 5).
 
 ## Documentation
 
-| Path | Contents |
-| --- | --- |
-| [`docs/adr/`](docs/adr/) | Architecture decision records |
-| [`docs/research/`](docs/research/) | Repository &amp; data-source research logs |
-| [`docs/backtesting/`](docs/backtesting/) | Backtesting methodology &amp; results |
-| [`docs/deployment/`](docs/deployment/) | Mac dev + Ubuntu/OpenClaw deployment guides |
-| [`docs/security/`](docs/security/) | Security notes &amp; reviews |
+| Path                                       | Contents                                                 |
+| ------------------------------------------ | -------------------------------------------------------- |
+| [`docs/adr/`](docs/adr/)                   | Architecture decision records                            |
+| [`docs/research/`](docs/research/)         | Repository &amp; data-source research logs               |
+| [`docs/backtesting/`](docs/backtesting/)   | Backtesting methodology &amp; results                    |
+| [`docs/deployment/`](docs/deployment/)     | Mac dev + Ubuntu/OpenClaw deployment guides              |
+| [`docs/security/`](docs/security/)         | Security notes &amp; reviews                             |
 | [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md) | End-to-end verify-the-backtest &amp; live-picks commands |
 
 ---

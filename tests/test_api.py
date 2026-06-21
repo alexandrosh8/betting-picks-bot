@@ -742,3 +742,48 @@ def test_dashboard_picks_table_columns_are_sortable() -> None:
     assert "SORT_COLS[savedSortCol]" in text
     # the default best-on-top sort is still the no-active-column fallback
     assert "confLevel" in text
+
+
+def test_dropping_odds_endpoint_serves_external_consensus_view(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.api import routes
+    from app.ingestion.betmonitor_dropping import DroppingRow, DroppingSelection
+
+    routes._DROPPING_CACHE.clear()
+
+    async def fake_fetch(_client, **_kw):  # type: ignore[no-untyped-def]
+        return [
+            DroppingRow(
+                event_id="109599057",
+                kickoff_utc=None,
+                kickoff_label="Today 22:30",
+                league="Football · Peru · Peru Copa de la Liga",
+                match="A — B",
+                market="3-Way",
+                drop_pct=-24.0,
+                selections=(DroppingSelection("1", 2.09, True),),
+            )
+        ]
+
+    monkeypatch.setattr(routes, "fetch_dropping_odds", fake_fetch)
+    body = TestClient(make_app()).get("/dropping-odds").json()
+    assert body["available"] is True
+    assert body["source"] == "betmonitor.com"
+    assert "NOT used for any" in body["note"]  # the informational-only guardrail
+    row = body["rows"][0]
+    assert row["event_id"] == "109599057"
+    assert row["drop_pct"] == -24.0
+    assert row["selections"][0] == {"label": "1", "decimal_odds": 2.09, "dropped": True}
+
+
+def test_dropping_odds_endpoint_fails_soft_when_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.api import routes
+
+    routes._DROPPING_CACHE.clear()
+
+    async def empty(_client, **_kw):  # type: ignore[no-untyped-def]
+        return []
+
+    monkeypatch.setattr(routes, "fetch_dropping_odds", empty)
+    body = TestClient(make_app()).get("/dropping-odds").json()
+    assert body["available"] is False
+    assert body["rows"] == []

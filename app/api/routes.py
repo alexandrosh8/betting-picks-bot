@@ -14,6 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
@@ -35,6 +36,7 @@ from app.api.auth import (
 from app.api.deps import get_session
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
+from app.ingestion.betmonitor_dropping import DroppingRow, fetch_dropping_odds
 from app.resolution.shadow import summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
@@ -725,6 +727,66 @@ async def resolution_match_rate(
     # liquid majors behind a UK/EU proxy only).
     report["betfair_capture"] = await betfair_archive_capture_by_sport(session)
     return report
+
+
+# --- view-only external feed: betmonitor dropping odds -----------------------
+# Cached ~5 min (betmonitor is itself ~5 min stale) — snappy for the dashboard
+# and polite to its small host. CONSENSUS-AVERAGE data, informational ONLY:
+# never an input to any pick, edge, stake, or CLV.
+_DROPPING_TTL = timedelta(minutes=5)
+_DROPPING_CACHE: dict[str, tuple[datetime, list[DroppingRow]]] = {}
+
+
+def _dropping_row_json(row: DroppingRow) -> dict[str, object]:
+    return {
+        "event_id": row.event_id,
+        "kickoff_utc": row.kickoff_utc.isoformat() if row.kickoff_utc else None,
+        "kickoff_label": row.kickoff_label,
+        "league": row.league,
+        "match": row.match,
+        "market": row.market,
+        "drop_pct": row.drop_pct,
+        "selections": [
+            {"label": s.label, "decimal_odds": s.decimal_odds, "dropped": s.dropped}
+            for s in row.selections
+        ],
+    }
+
+
+@router.get("/dropping-odds", dependencies=[Depends(require_dashboard_auth)])
+async def dropping_odds(sport: str = "all", time_window: str = "2") -> dict[str, object]:
+    """VIEW-ONLY external feed — betmonitor.com "dropping odds".
+
+    A CONSENSUS-AVERAGE line-movement list (not a bookmaker price), ~5 min stale,
+    top-20 only. Shown for human browsing; NEVER used for any pick, edge, stake,
+    or CLV — the math never sees it. Cached ~5 min, fails soft (the tab shows
+    "unavailable" rather than erroring)."""
+    key = f"{sport}:{time_window}"
+    now = datetime.now(tz=UTC)
+    cached = _DROPPING_CACHE.get(key)
+    if cached is not None and now - cached[0] < _DROPPING_TTL:
+        rows, fetched_at = cached[1], cached[0]
+    else:
+        async with httpx.AsyncClient() as client:
+            rows = await fetch_dropping_odds(client, sport=sport, time_window=time_window)
+        if rows:
+            _DROPPING_CACHE[key] = (now, rows)
+            fetched_at = now
+        elif cached is not None:
+            rows, fetched_at = cached[1], cached[0]  # serve last-good on a transient miss
+        else:
+            fetched_at = now
+    return {
+        "source": "betmonitor.com",
+        "kind": "external · consensus-average dropping odds · informational only",
+        "note": (
+            "Market-AVERAGE line movement (not a bookmaker price). NOT used for any "
+            "pick, edge, stake, or CLV — shown for browsing only."
+        ),
+        "fetched_at": fetched_at.isoformat(),
+        "available": bool(rows),
+        "rows": [_dropping_row_json(r) for r in rows],
+    }
 
 
 @router.post("/events/{event_id}/result", dependencies=[Depends(require_dashboard_auth)])

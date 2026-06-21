@@ -1,5 +1,27 @@
 # Decisions Log
 
+- 2026-06-21 (multi-sport historical-ODDS dataset deep-scan — repo-researcher,
+  file-inspected) — hunted GitHub+Kaggle for repos/datasets that VENDOR historical
+  odds CSV/parquet (not scrapers) carrying odds + results, judged vs the sharp-vs-soft
+  CLV backtest gate. VERDICT: **no new ADOPT**. Best FREE+permissive finds are
+  results-rich but SOFT/consensus-close-only -> fail the incremental-CLV-vs-Pinnacle
+  gate (same failure as nflverse/SBR): (a) **cviaxmiwnptr/nba-betting-data** (Kaggle,
+  CC0, 24.4k NBA games 2007-2026, ML/spread/total + scores + cover/total result flags,
+  free 2.49MB CSV, src SportsbookReviewsOnline consensus) -> REFERENCE/backfill for NBA
+  only; (b) **jonathanncoletti/nhl-historical-game-data** (Kaggle, CC0, 60k NHL rows
+  2004-2026, ESPN-sourced soft odds) -> reference; (c) **ArnavSaraogi/mlb-odds-scraper**
+  (GH, NO LICENSE, 76MB JSON release MLB 2021-2025, per-book OPEN+CLOSE FanDuel/DK/Bet365
+  - scores, scraper inspected = GET-only no-autobet) -> reference, unliftable+soft.
+    The ONLY true sharp Pinnacle OPEN+CLOSE+novig+movement dataset found
+    (**oliviersportsdata/tennis-grand-slam-pinnacle-pure**, ATP/WTA Grand Slams 2016-2026,
+    113 cols Blocks A-H w/ CLV signals) is a 257-match Kaggle TEASER; full 10,266-match set
+    is PAID on Gumroad (CC-BY-NC sample only) -> REJECT (paid), schema REFERENCE only.
+    REJECTS: ovignez-hash/\* + oliviersportsdata "US Sports Master 9 sports" = same Gumroad
+    vendor, 50-row Kaggle samples, closing-only single consensus, paid full; tayfunakcay/
+    football-data-collection = empty README pointer to football-data.co.uk (already used).
+    Confirms the standing gap: NO free historical Pinnacle open+close beyond football
+    (football-data.co.uk PSH/PSCH). marcoblume/pinnacle.data re-confirmed MLB+election only.
+
 - 2026-06-20 (RESULTS-tab merge + auto-settlement + live sharp-anchor verified +
   goal audit — local main, 974 green) — (1) **Sharp anchor ENABLED + live-proven**:
   set VALUE*SHARP_ANCHOR_FROM_ARCHIVES=true in .env; live run logged "merged 93
@@ -902,3 +924,43 @@ value): pipeline \_fair_probabilities fusion (~5-10% cycle time, touches the
 validated hot path), ETag/304 on /picks+/performance, live-CLV drift ALERT
 gates (need live data, alert-only never auto-tune), more aliases as Arcadia
 coverage accrues.
+
+- 2026-06-21 (basketball research sweep — NBA/EuroLeague/WNBA/NBL, NEW repos +
+  literature; quant-sports-researcher) — extends nba-repo-evaluations.md (kyleskom/
+  NBA_AI/NBA_Betting already settled). NEW VERDICTS: (1) **genehuh39/sports-projection**
+  (MIT, 0★, push 2026-04-30) = best new NBA repo, ON-DOCTRINE — shift(1).rolling +
+  sorted walk-forward CV (strict train<test windows, explicit leakage comment),
+  PlattCalibrator (sigmoid>isotonic on small sets), Brier/log_loss, Kalshi+Polymarket
+  READ-ONLY price compare, PAPER-TRADE only (no autobet). CAVEAT: value_engine uses
+  raw single-side implied (NO devig — we have penaltyblog); 0★ unproven. VERDICT
+  reference (mine walk-forward+calibration patterns, don't depend). (2)
+  **ianalloway/nba-ratings** (pkg nba-edge, MIT, push 2026-06-18) = tiny clean Elo+
+  logistic+Kelly primitives lib w/ CI+tests; sibling nba-edge (archived,1★,"top
+  contributor: claude") has SUSPICIOUSLY-CLEAN backtest table (55%+,+6-7%ROI,
+  +1.8-2.1%CLV) = AI portfolio project, DO NOT TRUST numbers. Kelly hardcaps 0.25.
+  VERDICT reference-only (we have kelly-bankroll+odds-math). (3) **conorwalsh99/
+  ml-for-sports-betting** (MIT, archived 2025, 2★) = VERIFIED reproduction code of
+  Walsh&Joshi 2024 (calibration vs accuracy); has model_selection.py+simulate.py+8
+  test files. VERDICT reference (cite the paper, mine the sim harness). (4)
+  **giasemidis/euroleague_api** (86★, push 2026-04, GPLv3/NOASSERTION) = canonical
+  EuroLeague+EuroCup wrapper (PBP/boxscore/shots) BUT COPYLEFT -> reference/clean-
+  room only, NOT adoptable. (5) **sfendourakis/py-euroleague** (MIT, 1★, push
+  2026-01) = real async EuroLeague v1/v2/v3+live client, MIT-liftable but unproven.
+  (6) **sportsdataverse/wehoop** (R, NOASSERTION, 45★) WNBA/WBB ESPN data — R not
+  our stack; sportsdataverse-py already settled as adopt-pattern for ESPN. REJECTS:
+  davideganna/NBA_Bet (RF+Elo, MIT, reaches bookmaker for ODDS only=GET, no autobet
+  found, but 7★ toy 2024); whisdev/NBA-prediction-sports-betting (TS, ONNX, accuracy-
+  led); IdoBelyaev/UndrOdds.nba (0★ "place bets one click"=journaling UI, reject);
+  paulkellar2023/\* + dozens of "nba-betting-model" = low-quality/SEO. LITERATURE
+  (load-bearing): Walsh&Joshi 2024 MLWA 16:100539 (calibration sel +34.69% vs
+  accuracy -35.17% ROI, NBA, CC-BY) = our calibration-first backbone; Wang 2026
+  MDPI Information 17(1):56 (uncertainty-aware RNN+MC-dropout, strict chrono split
+  +SHAP leakage check, 0.3-Kelly sim -> EDGE IN MONEYLINES, spreads/totals near-
+  efficient) = validates model-as-screen + market efficiency; Paul&Weinbach / early-
+  season totals bias (56.72% vs close, 20yr) = practitioner-known soft inefficiency.
+  DATA GATE for new basketball leagues: OddsPortal covers EuroLeague (2003/04+) so
+  OddsHarvester extends free (no Pinnacle there as always); Odds API has
+  basketball_euroleague(2020)/wnba(2022)/nbl(2024)/nba w/ Pinnacle on PAID; arcadia
+  Pinnacle = free live sharp anchor for NBA going forward (EuroLeague/WNBA/NBL arcadia
+  coverage = verify in-app, not researchable). NO free historical Pinnacle open+close
+  for any basketball league (unchanged gate). See research output for full brief.

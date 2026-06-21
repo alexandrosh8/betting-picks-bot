@@ -57,3 +57,23 @@ positive ROI, beating the Max-of-books close) on deep historical data — the
 doctrine holds where it can be tested. The live system's job is to surface these
 same high-threshold edges; realized ROI hinges on actually getting the soft price
 before it moves and not being limited.
+
+## Anchor validation — devig(Pinnacle) calibration on 22 countries (2026-06-21)
+
+The whole +EV system rests on devig(Pinnacle) being a TRUSTWORTHY fair. Tested on
+an independent sample the project had never touched — `jokecamp/FootballData`
+(`app/ingestion/jokecamp_football.py`), 86,332 odds-bearing matches across 22
+countries, 2004-2016 → 258,996 selection observations (home/draw/away),
+`calibration_report`:
+
+| devig          | n       | log-loss | Brier  | ECE        | MCE    |
+| -------------- | ------- | -------- | ------ | ---------- | ------ |
+| **shin**       | 258,996 | 0.5883   | 0.2011 | **0.0023** | 0.0209 |
+| power          | 258,996 | 0.5883   | 0.2011 | 0.0026     | 0.0214 |
+| multiplicative | 258,996 | 0.5884   | 0.2011 | 0.0032     | 0.0511 |
+
+**ECE 0.23% (shin)** — devigged Pinnacle probabilities match observed frequencies
+to within a quarter of a percent. The sharp anchor is empirically near-perfectly
+calibrated on a fully independent 22-country sample, and **shin is the best devig**
+(lowest ECE + MCE) — confirming the project's choice. jokecamp carries no soft
+best-price column, so this is anchor CALIBRATION, not a sharp-vs-soft ROI test.

@@ -191,16 +191,27 @@ async def settle_event_picks(
     home_score: int,
     away_score: int,
     now: datetime,
+    *,
+    devig_method: DevigMethod | None = None,
+    use_pinnacle_archive: bool = False,
+    use_betfair_exchange: bool = False,
 ) -> tuple[int, int]:
     """Settle every open pick of one event from a user-entered final score
     (the manual path for leagues without a free results feed).
 
+    When `devig_method` is given, each settled pick ALSO gets its closing
+    fair/CLV finalized from our own odds_snapshots — a mirror of the auto path
+    (settle_open_picks). Without it the snapshot close is skipped, so a
+    manually-settled pick would never enter the sharp-CLV subset (audit #4).
+
     Returns (settled, skipped). The caller owns the transaction.
     """
+    from app.clv_trueup import finalize_closing_from_snapshots  # lazy: circular
+
     home, away = aliased(Team), aliased(Team)
     rows = (
         await session.execute(
-            select(Pick, home.name, away.name)
+            select(Pick, home.name, away.name, Event.external_ref, Event.starts_at)
             .join(Event, Pick.event_id == Event.id)
             .join(home, Event.home_team_id == home.id)
             .join(away, Event.away_team_id == away.id)
@@ -208,9 +219,22 @@ async def settle_event_picks(
         )
     ).all()
     settled = skipped = 0
-    for pick, home_name, away_name in rows:
+    for pick, home_name, away_name, external_ref, starts_at in rows:
         if await _settle_one(session, pick, home_name, away_name, home_score, away_score, now):
             settled += 1
+            # Snapshot close AFTER the status flip, same transaction — mirror of
+            # the auto path so manual settles also enter the CLV subset (audit #4).
+            # starts_at None (kickoff unknown) has no freshness anchor -> skip.
+            if devig_method is not None and starts_at is not None:
+                await finalize_closing_from_snapshots(
+                    session,
+                    pick,
+                    external_ref,
+                    starts_at,
+                    devig_method,
+                    use_pinnacle_archive=use_pinnacle_archive,
+                    use_betfair_exchange=use_betfair_exchange,
+                )
         else:
             skipped += 1
     if settled:

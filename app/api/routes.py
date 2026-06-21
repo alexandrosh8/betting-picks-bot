@@ -17,7 +17,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
-from sqlalchemy import insert, update
+from sqlalchemy import insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -741,8 +741,27 @@ async def settle_event(
     event = await session.get(Event, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="event not found")
+    # Finalize the snapshot close for the picks we settle (audit #4) so a manual
+    # settle, like the auto path, enters the sharp-CLV subset. Resolve the devig
+    # the same way run_settlement_cycle does.
+    from app.config import get_settings
+    from app.probabilities.devig import DevigMethod
+
+    settings = get_settings()
+    devig = (
+        DevigMethod(settings.value_devig)
+        if settings.pick_strategy == "value"
+        else DevigMethod.POWER
+    )
     settled, skipped = await settle_event_picks(
-        session, event_id, payload.home_score, payload.away_score, datetime.now(tz=UTC)
+        session,
+        event_id,
+        payload.home_score,
+        payload.away_score,
+        datetime.now(tz=UTC),
+        devig_method=devig,
+        use_pinnacle_archive=settings.clv_use_pinnacle_archive,
+        use_betfair_exchange=settings.clv_use_betfair_exchange,
     )
     await session.commit()
     return {"settled": settled, "skipped": skipped}
@@ -805,6 +824,31 @@ async def record_result(
         },
     )
     await session.execute(result_stmt)
-    await session.execute(update(Pick).where(Pick.id == pick_id).values(status="settled"))
+    # Flip status on the OBJECT (not a bulk update) so finalize sees it settled.
+    pick.status = "settled"
+    # audit #4: logging a result settles the pick, removing it from the auto-settle
+    # cycle — so without finalizing the snapshot close here, a pick the user logs
+    # BEFORE the cycle runs would never enter the sharp-CLV subset.
+    event = await session.get(Event, pick.event_id)
+    if event is not None and event.starts_at is not None:
+        from app.clv_trueup import finalize_closing_from_snapshots
+        from app.config import get_settings
+        from app.probabilities.devig import DevigMethod
+
+        settings = get_settings()
+        devig = (
+            DevigMethod(settings.value_devig)
+            if settings.pick_strategy == "value"
+            else DevigMethod.POWER
+        )
+        await finalize_closing_from_snapshots(
+            session,
+            pick,
+            event.external_ref,
+            event.starts_at,
+            devig,
+            use_pinnacle_archive=settings.clv_use_pinnacle_archive,
+            use_betfair_exchange=settings.clv_use_betfair_exchange,
+        )
     await session.commit()
     return {"status": "recorded", "outcome": str(payload.outcome)}

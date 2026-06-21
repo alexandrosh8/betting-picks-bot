@@ -20,7 +20,7 @@ from app.ingestion.base import EventTeams
 from app.probabilities.devig import DevigMethod, devig
 from app.schemas.base import Market
 from app.schemas.picks import PickOut, StakeBreakdownOut
-from app.settlement.engine import settle_open_picks
+from app.settlement.engine import settle_event_picks, settle_open_picks
 from app.settlement.results import FinalScore, ScoreBook
 from app.storage.models import Event, OddsSnapshot, Pick
 from app.storage.repositories import (
@@ -204,6 +204,42 @@ async def test_settlement_prefers_snapshot_close_when_coverage_good(session) -> 
     # Close-anchor provenance: the close was anchored by Pinnacle (a named sharp
     # book pricing the full market) — so this is a genuine sharp close.
     assert pick.closing_anchor_type == "pinnacle"
+
+
+async def test_manual_event_settle_finalizes_snapshot_close(session) -> None:  # type: ignore[no-untyped-def]
+    # audit #4: the MANUAL event-settle path must finalize the snapshot close too,
+    # else a manually-settled pick never enters the sharp-CLV subset.
+    pick = await seed_pick(session, "evt-snapclose-manual")
+    await preset_rescrape_close(session, pick)
+    close = KICKOFF - timedelta(hours=1)
+    await seed_1x2_snaps(session, pick.event_id, "Pinnacle", PINNACLE_CLOSE, close)
+    await seed_1x2_snaps(session, pick.event_id, "SoftBook", SOFTBOOK_CLOSE, close)
+
+    settled, _ = await settle_event_picks(
+        session, pick.event_id, 2, 1, NOW, devig_method=DevigMethod.SHIN
+    )
+    assert settled == 1
+    await session.refresh(pick)
+    assert pick.status == "settled"
+    fair = devig(PINNACLE_CLOSE, method=DevigMethod.SHIN)[0]
+    assert pick.closing_fair_probability is not None
+    assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
+    assert pick.closing_anchor_type == "pinnacle"  # entered the sharp-CLV subset
+
+
+async def test_manual_event_settle_without_devig_keeps_rescrape_close(session) -> None:  # type: ignore[no-untyped-def]
+    # Backward-compatible: no devig_method -> the snapshot close is NOT finalized;
+    # the pick keeps whatever the re-scrape path last wrote (0.400000).
+    pick = await seed_pick(session, "evt-snapclose-nodevig")
+    await preset_rescrape_close(session, pick)
+    await seed_1x2_snaps(
+        session, pick.event_id, "Pinnacle", PINNACLE_CLOSE, KICKOFF - timedelta(hours=1)
+    )
+    settled, _ = await settle_event_picks(session, pick.event_id, 2, 1, NOW)
+    assert settled == 1
+    await session.refresh(pick)
+    assert pick.closing_fair_probability is not None
+    assert float(pick.closing_fair_probability) == pytest.approx(0.400000)  # unchanged
 
 
 async def test_stale_coverage_falls_back_to_rescrape_close(session) -> None:  # type: ignore[no-untyped-def]

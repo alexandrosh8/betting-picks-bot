@@ -128,6 +128,8 @@ def calibrate(calibrator: Mapping[str, Any], p_raw: np.ndarray) -> np.ndarray:
     isotonic: piecewise-linear interpolation over (x_thresholds,
     y_thresholds); np.interp clamps to the end values, equivalent to
     IsotonicRegression(out_of_bounds="clip"). platt: sigmoid(coef*p + b).
+    beta (Kull/Silva-Filho/Flach, AISTATS 2017): sigmoid(a*ln(p) - b*ln(1-p) + c)
+    — the 3-parameter map; p is clipped off {0,1} before the logs.
     """
     kind = calibrator.get("kind")
     if kind == "isotonic":
@@ -136,6 +138,14 @@ def calibrate(calibrator: Mapping[str, Any], p_raw: np.ndarray) -> np.ndarray:
         p = np.interp(p_raw, x, y)
     elif kind == "platt":
         z = float(calibrator["coef"]) * p_raw + float(calibrator["intercept"])
+        p = 1.0 / (1.0 + np.exp(-z))
+    elif kind == "beta":
+        pr = np.clip(p_raw, 1e-6, 1.0 - 1e-6)
+        z = (
+            float(calibrator["a"]) * np.log(pr)
+            - float(calibrator["b"]) * np.log(1.0 - pr)
+            + float(calibrator["c"])
+        )
         p = 1.0 / (1.0 + np.exp(-z))
     else:
         raise ValueError(f"unknown calibrator kind: {kind!r}")

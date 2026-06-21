@@ -197,6 +197,23 @@ def test_platt_calibration_is_the_sigmoid() -> None:
     assert p[0] == pytest.approx(1.0 / (1.0 + math.exp(-(2.0 * 0.5 - 1.0))))
 
 
+def test_beta_calibration_is_the_beta_map() -> None:
+    # Beta calibration (Kull/Silva-Filho/Flach, AISTATS 2017):
+    # mu(p) = sigmoid(a*ln(p) - b*ln(1-p) + c). Clean-room numpy replay of the
+    # trainer's 3-parameter fit, mirroring the isotonic/platt replay.
+    cal = {"kind": "beta", "a": 1.5, "b": 0.8, "c": -0.3}
+    p = calibrate(cal, np.array([0.4]))
+    z = 1.5 * math.log(0.4) - 0.8 * math.log(1.0 - 0.4) + (-0.3)
+    assert p[0] == pytest.approx(1.0 / (1.0 + math.exp(-z)))
+
+
+def test_beta_calibration_identity_when_a1_b1_c0() -> None:
+    # a=1, b=1, c=0 -> sigmoid(ln(p) - ln(1-p)) = sigmoid(logit(p)) = p.
+    cal = {"kind": "beta", "a": 1.0, "b": 1.0, "c": 0.0}
+    p = calibrate(cal, np.array([0.25, 0.6, 0.9]))
+    assert p == pytest.approx([0.25, 0.6, 0.9], abs=1e-9)
+
+
 def test_calibration_output_never_reaches_0_or_1() -> None:
     cal = {"kind": "isotonic", "x_thresholds": [0.0, 1.0], "y_thresholds": [0.0, 1.0]}
     p = calibrate(cal, np.array([0.0, 1.0]))
@@ -205,7 +222,7 @@ def test_calibration_output_never_reaches_0_or_1() -> None:
 
 def test_unknown_calibrator_kind_raises() -> None:
     with pytest.raises(ValueError, match="unknown calibrator kind"):
-        calibrate({"kind": "beta"}, np.array([0.5]))
+        calibrate({"kind": "bogus"}, np.array([0.5]))
 
 
 # ---------------------------------------------------------------------------

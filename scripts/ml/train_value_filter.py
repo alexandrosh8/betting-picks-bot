@@ -460,13 +460,68 @@ def fit_calibrator(p_raw: np.ndarray, y: np.ndarray) -> tuple[str, Any]:
     return "platt", lr
 
 
+def fit_beta_calibration(p_raw: np.ndarray, y: np.ndarray) -> dict[str, float]:
+    """Beta calibration (Kull/Silva-Filho/Flach, AISTATS 2017): fit
+    sigmoid(a*ln(p) - b*ln(1-p) + c) by logistic regression on features
+    [ln(p), -ln(1-p)], dropping a feature whose coefficient turns negative and
+    refitting so the map stays monotone (the betacal algorithm) — clean-room, no
+    betacal dependency. Returns the JSON-serializable params the sklearn-free
+    runtime replay in app.models.value_filter.calibrate consumes (kind='beta')."""
+    pr = np.clip(p_raw, 1e-6, 1.0 - 1e-6)
+    f_a = np.log(pr)
+    f_b = -np.log(1.0 - pr)
+    lr = LogisticRegression(C=1e6, max_iter=1000, random_state=SEED)
+    lr.fit(np.column_stack([f_a, f_b]), y)
+    a, b = float(lr.coef_[0][0]), float(lr.coef_[0][1])
+    c = float(lr.intercept_[0])
+    if a < 0.0:  # drop ln(p); refit on -ln(1-p) only
+        lr.fit(f_b.reshape(-1, 1), y)
+        a, b, c = 0.0, float(lr.coef_[0][0]), float(lr.intercept_[0])
+    elif b < 0.0:  # drop -ln(1-p); refit on ln(p) only
+        lr.fit(f_a.reshape(-1, 1), y)
+        a, b, c = float(lr.coef_[0][0]), 0.0, float(lr.intercept_[0])
+    return {"kind": "beta", "a": a, "b": b, "c": c}
+
+
 def apply_calibrator(cal: tuple[str, Any], p_raw: np.ndarray) -> np.ndarray:
     kind, m = cal
     if kind == "isotonic":
         p = np.asarray(m.transform(p_raw), dtype=float)
+    elif kind == "beta":  # m is the JSON params dict from fit_beta_calibration
+        pr = np.clip(p_raw, 1e-6, 1.0 - 1e-6)
+        z = m["a"] * np.log(pr) - m["b"] * np.log(1.0 - pr) + m["c"]
+        p = 1.0 / (1.0 + np.exp(-z))
     else:
         p = np.asarray(m.predict_proba(p_raw.reshape(-1, 1))[:, 1], dtype=float)
     return np.clip(p, 1e-6, 1.0 - 1e-6)
+
+
+def rank_calibrators(
+    p_cal: np.ndarray, y_cal: np.ndarray, p_eval: np.ndarray, y_eval: np.ndarray
+) -> list[dict[str, float]]:
+    """OFFLINE calibrator bake-off: fit isotonic + platt + beta on (p_cal, y_cal)
+    and score each on the held-out (p_eval, y_eval) by log-loss + Brier, ranked
+    best (lowest) log-loss first. Decision support ONLY — held-out incremental
+    CLV (> 2 SE) remains the sole arbiter of swapping the live calibrator
+    (ADR-0017); a lower offline log-loss never auto-promotes a method."""
+    iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    iso.fit(p_cal, y_cal)
+    platt = LogisticRegression(C=1e6, max_iter=1000, random_state=SEED)
+    platt.fit(p_cal.reshape(-1, 1), y_cal)
+    candidates: dict[str, tuple[str, Any]] = {
+        "isotonic": ("isotonic", iso),
+        "platt": ("platt", platt),
+        "beta": ("beta", fit_beta_calibration(p_cal, y_cal)),
+    }
+    rows = [
+        {
+            "kind": name,
+            "log_loss": float(log_loss(y_eval, apply_calibrator(cal, p_eval), labels=[0, 1])),
+            "brier": float(brier_score_loss(y_eval, apply_calibrator(cal, p_eval))),
+        }
+        for name, cal in candidates.items()
+    ]
+    return sorted(rows, key=lambda r: r["log_loss"])
 
 
 # ---------------------------------------------------------------------------

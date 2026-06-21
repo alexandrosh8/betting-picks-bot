@@ -746,37 +746,37 @@ def test_dashboard_picks_table_columns_are_sortable() -> None:
 
 def test_dropping_odds_endpoint_serves_attributed_view(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from app.api import routes
-    from app.ingestion.oddsmath_dropping import DropRow
+    from app.ingestion.oddsmath_dropping import MatchDrop, OutcomeMove
 
     routes._DROPPING_CACHE.clear()
 
     async def fake_fetch(_client, **_kw):  # type: ignore[no-untyped-def]
         return [
-            DropRow(
+            MatchDrop(
                 sport="soccer",
                 kickoff_utc=None,
                 league="FIFA - World Cup 2026",
                 match="Netherlands — Tunisia",
                 market="1X2",
                 book="1XBET",
-                selection="1",
-                open_odds=1.32,
-                current_odds=1.14,
-                drop_pct=-13.64,
+                outcomes=(
+                    OutcomeMove("1", 1.32, 1.14, -13.64),
+                    OutcomeMove("X", 5.1, 8.0, 56.86),
+                    OutcomeMove("2", 7.5, 17.0, 126.67),
+                ),
+                max_drop=-13.64,
             )
         ]
 
-    monkeypatch.setattr(routes, "fetch_oddsmath_drops", fake_fetch)
+    monkeypatch.setattr(routes, "fetch_oddsmath_book", fake_fetch)
     body = TestClient(make_app()).get("/dropping-odds").json()
     assert body["available"] is True
     assert body["source"] == "oddsmath.com"
+    assert any(p["name"] == "1XBET" for p in body["providers"])  # bookmaker selector list
     row = body["rows"][0]
     assert row["book"] == "1XBET"  # attributed to a named book
-    assert row["selection"] == "1"  # code, not a team name
-    assert row["open_odds"] == 1.32
-    assert row["current_odds"] == 1.14
-    assert row["drop_pct"] == -13.64
     assert row["match"] == "Netherlands — Tunisia"
+    assert row["outcomes"][0] == {"label": "1", "open": 1.32, "current": 1.14, "drop_pct": -13.64}
 
 
 def test_dropping_odds_endpoint_fails_soft_when_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -787,15 +787,16 @@ def test_dropping_odds_endpoint_fails_soft_when_unavailable(monkeypatch) -> None
     async def empty(_client, **_kw):  # type: ignore[no-untyped-def]
         return []
 
-    monkeypatch.setattr(routes, "fetch_oddsmath_drops", empty)
+    monkeypatch.setattr(routes, "fetch_oddsmath_book", empty)
     body = TestClient(make_app()).get("/dropping-odds").json()
     assert body["available"] is False
     assert body["rows"] == []
+    assert body["providers"]  # the bookmaker selector list is still served
 
 
 def test_dropping_odds_fresh_param_bypasses_cache(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from app.api import routes
-    from app.ingestion.oddsmath_dropping import DropRow
+    from app.ingestion.oddsmath_dropping import MatchDrop, OutcomeMove
 
     routes._DROPPING_CACHE.clear()
     calls = {"n": 0}
@@ -803,13 +804,22 @@ def test_dropping_odds_fresh_param_bypasses_cache(monkeypatch) -> None:  # type:
     async def fetch(_client, **_kw):  # type: ignore[no-untyped-def]
         calls["n"] += 1
         return [
-            DropRow("soccer", None, "L", f"A{calls['n']} — B", "1X2", "1XBET", "1", 2.0, 1.5, -25.0)
+            MatchDrop(
+                "soccer",
+                None,
+                "L",
+                f"A{calls['n']} — B",
+                "1X2",
+                "1XBET",
+                (OutcomeMove("1", 2.0, 1.5, -25.0),),
+                -25.0,
+            )
         ]
 
-    monkeypatch.setattr(routes, "fetch_oddsmath_drops", fetch)
+    monkeypatch.setattr(routes, "fetch_oddsmath_book", fetch)
     client = TestClient(make_app())
     b1 = client.get("/dropping-odds").json()
-    b2 = client.get("/dropping-odds").json()  # served from the 60s cache
+    b2 = client.get("/dropping-odds").json()  # served from the 5s cache
     assert calls["n"] == 1
     assert b2["rows"][0]["match"] == b1["rows"][0]["match"]
     # manual Refresh -> ?fresh=1 bypasses the cache, fetching new data instantly

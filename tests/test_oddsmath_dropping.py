@@ -1,7 +1,7 @@
-"""Parser for oddsmath.com dropping-odds JSON (VIEW-ONLY feature).
+"""Parser for oddsmath.com per-book dropping-odds JSON (VIEW-ONLY feature).
 
-Attributed per-book drops (open->current), informational only — never enters
-devig/edge/CLV/persistence. Pinned against a real 2-event sample.
+Attributed per-outcome moves (open->current + drop%), informational only — never
+enters devig/edge/CLV/persistence. Pinned against a real 2-event sample.
 """
 
 import json
@@ -12,9 +12,10 @@ import httpx
 import pytest
 
 from app.ingestion.oddsmath_dropping import (
-    DropRow,
-    fetch_oddsmath_drops,
-    parse_oddsmath_drops,
+    MatchDrop,
+    OutcomeMove,
+    fetch_oddsmath_book,
+    parse_oddsmath,
 )
 
 _SAMPLE = json.loads(
@@ -24,56 +25,47 @@ _SAMPLE = json.loads(
 )
 
 
-def test_parse_picks_most_dropped_outcome_per_fixture() -> None:
-    rows = parse_oddsmath_drops(_SAMPLE, "SBOBET")
+def test_parse_per_outcome_moves() -> None:
+    rows = parse_oddsmath(_SAMPLE, "SBOBET")
     assert len(rows) == 2
     r = rows[0]
-    assert isinstance(r, DropRow)
+    assert isinstance(r, MatchDrop)
     assert r.book == "SBOBET"
     assert r.sport == "soccer"
     assert r.league == "FIFA - World Cup 2026"
     assert r.match == "Netherlands — Tunisia"
     assert r.market == "1X2"
-    assert r.selection == "1"  # most-negative dropping%
-    assert r.open_odds == 1.32
-    assert r.current_odds == 1.14
-    assert r.drop_pct == -13.64
     assert r.kickoff_utc == datetime(2026, 6, 25, 23, 5, tzinfo=UTC)
-    # second fixture: the away side (2) dropped hardest
-    r2 = rows[1]
-    assert (r2.selection, r2.open_odds, r2.current_odds, r2.drop_pct) == ("2", 5.0, 3.57, -28.6)
+    assert [(o.label, o.open, o.current, o.drop_pct) for o in r.outcomes] == [
+        ("1", 1.32, 1.14, -13.64),
+        ("X", 5.1, 8.0, 56.86),
+        ("2", 7.5, 17.0, 126.67),
+    ]
+    assert r.max_drop == -13.64  # most-negative outcome, used for sorting
 
 
-def test_parse_skips_non_dict_empty_and_rose_only() -> None:
-    assert parse_oddsmath_drops({}, "X") == []
-    assert parse_oddsmath_drops({"schema": ["1", "X", "2"], "data": {}}, "X") == []
-    rose = {
-        "schema": ["1", "X", "2"],
-        "data": {
-            "e": {
-                "hometeam": "A",
-                "awayteam": "B",
-                "first": {"1": 2.0},
-                "last": {"1": 2.2},
-                "dropping%": {"1": 10.0},  # rose, not a drop
-            }
-        },
-    }
-    assert parse_oddsmath_drops(rose, "X") == []
+def test_parse_second_fixture_max_drop() -> None:
+    g = parse_oddsmath(_SAMPLE, "SBOBET")[1]
+    assert g.match == "Germany — Ecuador"
+    two = next(o for o in g.outcomes if o.label == "2")
+    assert (two.open, two.current, two.drop_pct) == (5.0, 3.57, -28.6)
+    assert g.max_drop == -28.6
 
 
-async def test_fetch_merges_books_and_sorts_by_biggest_drop() -> None:
+def test_parse_empty_and_non_dict() -> None:
+    assert parse_oddsmath({}, "X") == []
+    assert parse_oddsmath({"schema": ["1", "X", "2"], "data": {}}, "X") == []
+
+
+async def test_fetch_book_sorts_by_biggest_drop() -> None:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_SAMPLE)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        rows = await fetch_oddsmath_drops(client, providers=(8, 32), top=10)
-    # 2 books x 2 events = 4 rows, most-negative drop first
-    assert len(rows) == 4
-    assert rows[0].drop_pct == -28.6
-    assert rows[0].selection == "2"
-    assert rows[-1].drop_pct == -13.64
-    assert {r.book for r in rows} == {"SBOBET", "1XBET"}
+        rows = await fetch_oddsmath_book(client, provider_id=32)
+    assert [r.book for r in rows] == ["1XBET", "1XBET"]  # provider 32
+    assert rows[0].max_drop == -28.6  # Germany (biggest) sorts first
+    assert rows[1].max_drop == -13.64
 
 
 async def test_fetch_is_graceful_on_error() -> None:
@@ -81,10 +73,10 @@ async def test_fetch_is_graceful_on_error() -> None:
         raise httpx.ConnectError("down")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as client:
-        assert await fetch_oddsmath_drops(client, providers=(8,)) == []
+        assert await fetch_oddsmath_book(client, provider_id=32) == []
 
 
-def test_droprow_is_frozen() -> None:
-    r = DropRow("soccer", None, "L", "A — B", "1X2", "SBOBET", "1", 2.0, 1.8, -10.0)
+def test_outcome_move_is_frozen() -> None:
+    o = OutcomeMove("1", 2.0, 1.8, -10.0)
     with pytest.raises(Exception):  # noqa: B017 — frozen dataclass
-        r.book = "X"  # type: ignore[misc]
+        o.label = "X"  # type: ignore[misc]

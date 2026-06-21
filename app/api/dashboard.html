@@ -1368,25 +1368,40 @@
       <!-- DROPPING ODDS — external oddsmath attributed feed, VIEW-ONLY.
            Never a pick/edge/CLV input; rendered only when the DROPPING tab is open. -->
       <div class="tablewrap" id="dropping-panel" hidden>
+        <div class="toolbar-filters" id="dropping-controls">
+          <label class="sub"
+            >Bookmaker
+            <select
+              id="drop-book"
+              aria-label="Dropping-odds bookmaker"
+            ></select>
+          </label>
+          <label class="sub"
+            >Window
+            <select
+              id="drop-interval"
+              aria-label="Dropping-odds window"
+            ></select>
+          </label>
+          <span class="sub" id="dropping-stamp"></span>
+        </div>
         <table id="dropping-table">
           <thead>
             <tr>
               <th>Kickoff</th>
               <th>League</th>
               <th>Match</th>
-              <th>Book</th>
-              <th>Sel</th>
-              <th>Open&nbsp;→&nbsp;Now</th>
-              <th>Drop&nbsp;%</th>
+              <th>1</th>
+              <th>X</th>
+              <th>2</th>
             </tr>
           </thead>
           <tbody id="dropping-rows">
             <tr>
-              <td colspan="7"><div class="skelbar"></div></td>
+              <td colspan="6"><div class="skelbar"></div></td>
             </tr>
           </tbody>
         </table>
-        <div class="sub" id="dropping-stamp"></div>
       </div>
       <!-- CLV scorecard — proof-of-edge ledger headline (CLOSED tab only) -->
       <div class="sub" id="clv-scorecard" style="display: none"></div>
@@ -3867,7 +3882,7 @@
         tbody.replaceChildren();
         const tr = document.createElement("tr");
         const cell = td(tr, text === null ? "" : text);
-        cell.colSpan = 7;
+        cell.colSpan = 6;
         if (text === null) {
           const bar = document.createElement("div");
           bar.className = "skelbar";
@@ -3875,19 +3890,54 @@
         }
         tbody.appendChild(tr);
       }
+      // Selected bookmaker + window (mirror oddsmath's own filters).
+      let DROPPING_PROVIDER = null; // from the first response's selected_provider
+      let DROPPING_INTERVAL = 1440;
       let DROPPING_TIMER = null; // auto-refresh handle while the DROPPING tab is open
+      function fillDroppingSelectors(data) {
+        const bookSel = $("drop-book");
+        if (bookSel && !bookSel.options.length && data.providers) {
+          for (const p of data.providers) {
+            const opt = document.createElement("option");
+            opt.value = String(p.id);
+            opt.textContent = p.name;
+            bookSel.appendChild(opt);
+          }
+          if (data.selected_provider != null)
+            bookSel.value = String(data.selected_provider);
+          bookSel.addEventListener("change", () => {
+            DROPPING_PROVIDER = Number(bookSel.value);
+            loadDropping(true);
+          });
+        }
+        const intSel = $("drop-interval");
+        if (intSel && !intSel.options.length && data.intervals) {
+          for (const it of data.intervals) {
+            const opt = document.createElement("option");
+            opt.value = String(it.value);
+            opt.textContent = it.label;
+            intSel.appendChild(opt);
+          }
+          if (data.interval != null) intSel.value = String(data.interval);
+          intSel.addEventListener("change", () => {
+            DROPPING_INTERVAL = Number(intSel.value);
+            loadDropping(true);
+          });
+        }
+      }
       async function loadDropping(force) {
         const tbody = $("dropping-rows");
         const stamp = $("dropping-stamp");
         droppingMessage(tbody, null); // skeleton
         try {
-          // manual Refresh forces a cache-bypass for instant fresh data + time.
-          const res = await fetchWithTimeout(
-            "/dropping-odds" + (force ? "?fresh=1" : ""),
-          );
-          // Same auth handling as the picks tabs: an expired/absent session
-          // (when dashboard auth is on) bounces to the login page, not a frozen
-          // "unavailable" panel.
+          const qs = new URLSearchParams({
+            interval: String(DROPPING_INTERVAL),
+          });
+          if (DROPPING_PROVIDER != null)
+            qs.set("provider_id", String(DROPPING_PROVIDER));
+          if (force) qs.set("fresh", "1"); // manual Refresh -> bypass the 5s cache
+          const res = await fetchWithTimeout("/dropping-odds?" + qs.toString());
+          // Same auth handling as the picks tabs: an expired session -> login.
           if (res.status === 401) {
             window.location.assign("/login");
             return;
@@ -3898,57 +3948,63 @@
           if (stamp) stamp.textContent = "";
         }
       }
+      // One outcome cell: opening (faded) -> current (bold) + drop% (green if it
+      // dropped, muted if it rose). All via textContent — no raw-HTML assignment.
+      function outcomeCell(tr, o) {
+        const cell = document.createElement("td");
+        if (!o || (o.open == null && o.current == null)) {
+          cell.textContent = "—";
+          tr.appendChild(cell);
+          return;
+        }
+        if (o.open != null) {
+          const op = document.createElement("span");
+          op.textContent = String(o.open);
+          op.style.opacity = "0.5";
+          cell.append(op, document.createTextNode(" → "));
+        }
+        const cur = document.createElement("span");
+        cur.style.fontWeight = "700";
+        cur.textContent = o.current == null ? "—" : String(o.current);
+        cell.appendChild(cur);
+        if (o.drop_pct != null) {
+          const pct = document.createElement("span");
+          pct.textContent = " " + o.drop_pct.toFixed(1) + "%";
+          pct.style.fontSize = "11px";
+          pct.style.color = o.drop_pct < 0 ? "#22c55e" : "var(--muted, #888)";
+          cell.appendChild(pct);
+        }
+        tr.appendChild(cell);
+      }
       function renderDropping(data) {
-        const tbody = $("dropping-rows");
         const stamp = $("dropping-stamp");
+        if (data) {
+          if (DROPPING_PROVIDER == null && data.selected_provider != null)
+            DROPPING_PROVIDER = data.selected_provider;
+          fillDroppingSelectors(data);
+        }
+        const tbody = $("dropping-rows");
         const rows = (data && data.rows) || [];
         if (!data || !data.available || rows.length === 0) {
           droppingMessage(
             tbody,
-            "No dropping odds right now (or feed unavailable).",
+            "No dropping odds for this book/window right now.",
           );
         } else {
           tbody.replaceChildren();
           for (const r of rows) {
             const tr = document.createElement("tr");
-            // Kickoff via the shared local formatter (Cyprus tz, "Jun 25, 04:00").
             td(tr, r.kickoff_utc ? fmtLocal(r.kickoff_utc) : "");
-            // League (minus the "Sport ·" prefix) + a sport badge, like other tabs.
-            const lc = document.createElement("td");
             const parts = (r.league || "").split(" · ");
-            lc.textContent =
-              parts.length > 1 ? parts.slice(1).join(" · ") : r.league || "";
-            if (r.sport) {
-              lc.appendChild(document.createElement("br"));
-              lc.appendChild(badge(r.sport, "b-neutral"));
-            }
-            tr.appendChild(lc);
-            td(tr, r.match || "");
-            // Book: the named bookmaker this drop is attributed to.
-            td(tr, r.book || "");
-            // Selection as the CODE (1/X/2/Over/Under) — the match column already
-            // carries the team names.
-            td(tr, r.selection || "");
-            // Open -> Now: this book's opening vs current price for that outcome.
-            const oc = document.createElement("td");
-            if (r.open_odds != null) {
-              const o = document.createElement("span");
-              o.textContent = String(r.open_odds);
-              o.style.opacity = "0.55";
-              oc.append(o, document.createTextNode(" → "));
-            }
-            const cur = document.createElement("span");
-            cur.style.fontWeight = "700";
-            cur.textContent =
-              r.current_odds == null ? "—" : String(r.current_odds);
-            oc.appendChild(cur);
-            tr.appendChild(oc);
-            const dp = td(
+            td(
               tr,
-              r.drop_pct == null ? "—" : r.drop_pct.toFixed(1) + "%",
+              parts.length > 1 ? parts.slice(1).join(" · ") : r.league || "",
             );
-            if (r.drop_pct != null && r.drop_pct < 0)
-              dp.style.color = "#22c55e";
+            td(tr, r.match || "");
+            // Per-outcome cells in 1 / X / 2 order.
+            const byLabel = {};
+            for (const o of r.outcomes || []) byLabel[o.label] = o;
+            for (const lbl of ["1", "X", "2"]) outcomeCell(tr, byLabel[lbl]);
             tbody.appendChild(tr);
           }
         }
@@ -3986,9 +4042,9 @@
         }
         if (dropping) {
           loadDropping();
-          // Keep the odds current as they drop/rise. Server-cached, so this is
-          // polite to oddsmath — most ticks are served from cache.
-          DROPPING_TIMER = setInterval(loadDropping, 60000);
+          // oddsmath refreshes ~5s; track it (server-cached 5s, so most ticks are
+          // served from cache — one upstream fetch per 5s per book).
+          DROPPING_TIMER = setInterval(loadDropping, 5000);
           return;
         }
         render();

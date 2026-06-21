@@ -36,7 +36,13 @@ from app.api.auth import (
 from app.api.deps import get_session
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
-from app.ingestion.oddsmath_dropping import DropRow, fetch_oddsmath_drops
+from app.ingestion.oddsmath_dropping import (
+    DEFAULT_PROVIDER,
+    INTERVALS,
+    PROVIDERS,
+    MatchDrop,
+    fetch_oddsmath_book,
+)
 from app.resolution.shadow import summarize_match_rate
 from app.schemas.events import EventResultIn, ResultIn
 from app.settlement.engine import settle_event_picks
@@ -729,16 +735,16 @@ async def resolution_match_rate(
     return report
 
 
-# --- view-only external feed: oddsmath ATTRIBUTED dropping odds --------------
-# Cached 60s so the tab's 60s auto-refresh shows fresh odds each minute; a manual
-# Refresh passes ?fresh=1 to BYPASS the cache and fetch instantly. ATTRIBUTED
-# per-book data (a named bookmaker's open->current), informational ONLY: never an
-# input to any pick, edge, stake, or CLV.
-_DROPPING_TTL = timedelta(seconds=60)
-_DROPPING_CACHE: dict[str, tuple[datetime, list[DropRow]]] = {}
+# --- view-only external feed: oddsmath per-book dropping odds ----------------
+# Cached 5s — oddsmath itself refreshes ~5s, so the tab's 5s auto-refresh tracks
+# it; a manual Refresh passes ?fresh=1 to bypass the cache entirely. ATTRIBUTED
+# per-book data (a named bookmaker's per-outcome open->current), informational
+# ONLY: never an input to any pick, edge, stake, or CLV.
+_DROPPING_TTL = timedelta(seconds=5)
+_DROPPING_CACHE: dict[str, tuple[datetime, list[MatchDrop]]] = {}
 
 
-def _dropping_row_json(row: DropRow) -> dict[str, object]:
+def _match_json(row: MatchDrop) -> dict[str, object]:
     return {
         "kickoff_utc": row.kickoff_utc.isoformat() if row.kickoff_utc else None,
         "sport": row.sport,
@@ -746,30 +752,33 @@ def _dropping_row_json(row: DropRow) -> dict[str, object]:
         "match": row.match,
         "market": row.market,
         "book": row.book,
-        "selection": row.selection,
-        "open_odds": row.open_odds,
-        "current_odds": row.current_odds,
-        "drop_pct": row.drop_pct,
+        "outcomes": [
+            {"label": o.label, "open": o.open, "current": o.current, "drop_pct": o.drop_pct}
+            for o in row.outcomes
+        ],
     }
 
 
 @router.get("/dropping-odds", dependencies=[Depends(require_dashboard_auth)])
-async def dropping_odds(interval: int = 1440, fresh: bool = False) -> dict[str, object]:
-    """VIEW-ONLY external feed — oddsmath.com ATTRIBUTED per-book dropping odds.
+async def dropping_odds(
+    provider_id: int = DEFAULT_PROVIDER, interval: int = 1440, fresh: bool = False
+) -> dict[str, object]:
+    """VIEW-ONLY external feed — oddsmath.com per-book dropping odds.
 
-    Each row is one NAMED bookmaker's opening->current move on a fixture (not a
-    blended average). Shown for human browsing; NEVER used for any pick, edge,
-    stake, or CLV — the math never sees it. Cached 60s (auto-refresh); fresh=true
-    (manual Refresh) bypasses the cache for instant data. Fails soft.
-    interval: 60=1h, 360=6h, 1440=24h."""
-    key = str(interval)
+    Mirrors oddsmath's page: one selected BOOKMAKER's per-outcome opening->current
+    move + drop% over a window. Shown for browsing; NEVER used for any pick, edge,
+    stake, or CLV. Cached 5s (auto-refresh); fresh=true (manual Refresh) bypasses
+    the cache. Fails soft. interval: 60=1h, 360=6h, 1440=24h."""
+    if provider_id not in PROVIDERS:
+        provider_id = DEFAULT_PROVIDER
+    key = f"{provider_id}:{interval}"
     now = datetime.now(tz=UTC)
     cached = _DROPPING_CACHE.get(key)
     if not fresh and cached is not None and now - cached[0] < _DROPPING_TTL:
         rows, fetched_at = cached[1], cached[0]
     else:
         async with httpx.AsyncClient() as client:
-            rows = await fetch_oddsmath_drops(client, interval=interval)
+            rows = await fetch_oddsmath_book(client, provider_id=provider_id, interval=interval)
         if rows:
             _DROPPING_CACHE[key] = (now, rows)
             fetched_at = now
@@ -779,10 +788,16 @@ async def dropping_odds(interval: int = 1440, fresh: bool = False) -> dict[str, 
             fetched_at = now
     return {
         "source": "oddsmath.com",
-        "kind": "external · attributed per-book dropping odds · informational only",
+        "selected_provider": provider_id,
+        "providers": [
+            {"id": pid, "name": name}
+            for pid, name in sorted(PROVIDERS.items(), key=lambda kv: kv[1].lower())
+        ],
+        "intervals": [{"value": v, "label": lbl} for v, lbl in INTERVALS.items()],
+        "interval": interval,
         "fetched_at": fetched_at.isoformat(),
         "available": bool(rows),
-        "rows": [_dropping_row_json(r) for r in rows],
+        "rows": [_match_json(r) for r in rows],
     }
 
 

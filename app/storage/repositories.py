@@ -931,7 +931,13 @@ async def resolve_pinnacle_close_snaps(
     kickoff window; NO fuzzy). Selections that cannot be mapped to the pick's
     home/away/Draw outcome are dropped rather than mis-attached.
     """
-    from app.resolution import EventCandidate, default_aliases, match_event, normalize_name
+    from app.resolution import (
+        EventCandidate,
+        default_aliases,
+        match_event,
+        normalize_name,
+        oddsportal_slug_names,
+    )
 
     home_t, away_t = aliased(Team), aliased(Team)
     window = timedelta(days=max_day_drift + 1)
@@ -955,9 +961,21 @@ async def resolve_pinnacle_close_snaps(
     candidates = [
         EventCandidate(ref=str(eid), home=h, away=a, kickoff=ko) for eid, _ext, h, a, ko in rows
     ]
+    aliases = default_aliases()
     matched = match_event(
-        home, away, kickoff, candidates, aliases=default_aliases(), max_day_drift=max_day_drift
+        home, away, kickoff, candidates, aliases=aliases, max_day_drift=max_day_drift
     )
+    if matched is None:
+        # Fallback: OddsPortal's URL slug is a cleaner match key than the scraped
+        # display name (it drops the women-league "W" suffix + sponsor tails) — so
+        # retry with it. Still STRICT + unique-candidate, so it cannot attach a
+        # wrong close (the cardinal sin); it only recovers fixtures the display
+        # name spelled differently (live basketball match rate 36% -> 41%).
+        slug = oddsportal_slug_names(pick_external_ref)
+        if slug is not None:
+            matched = match_event(
+                slug[0], slug[1], kickoff, candidates, aliases=aliases, max_day_drift=max_day_drift
+            )
     if matched is None:
         return []
     pin_id, pin_ref, pin_home, pin_away, pin_kickoff = by_ref[matched.ref]
@@ -1012,7 +1030,12 @@ async def shadow_match_rate_outcomes(
     counts), so pass ``since`` to scope to recent fixtures when you only care
     about closes that are realizable now.
     """
-    from app.resolution import EventCandidate, default_aliases, match_event
+    from app.resolution import (
+        EventCandidate,
+        default_aliases,
+        match_event,
+        oddsportal_slug_names,
+    )
     from app.resolution.shadow import ShadowOutcome, arcadia_base_sport
 
     home_t, away_t = aliased(Team), aliased(Team)
@@ -1021,7 +1044,15 @@ async def shadow_match_rate_outcomes(
         conds.append(Event.starts_at >= since)
     pick_rows = (
         await session.execute(
-            select(Pick.id, Sport.key, League.key, home_t.name, away_t.name, Event.starts_at)
+            select(
+                Pick.id,
+                Sport.key,
+                League.key,
+                home_t.name,
+                away_t.name,
+                Event.starts_at,
+                Event.external_ref,
+            )
             .select_from(Pick)
             .join(Event, Pick.event_id == Event.id)
             .join(Sport, Event.sport_id == Sport.id)
@@ -1065,18 +1096,29 @@ async def shadow_match_rate_outcomes(
             EventCandidate(ref=str(i), home=h, away=a, kickoff=ko)
             for i, (h, a, ko) in enumerate(arc_rows)
         ]
-        for pick_id, sport_key, league_key, home, away, kickoff in picks:
+        for pick_id, sport_key, league_key, home, away, kickoff, ext_ref in picks:
             # Same day window the matcher uses internally — count first so a
             # no-coverage pick is distinguishable from a strict-rejection.
             in_window = [
                 c for c in archive if abs((c.kickoff.date() - kickoff.date()).days) <= max_day_drift
             ]
-            matched = (
-                match_event(
-                    home, away, kickoff, in_window, aliases=aliases, max_day_drift=max_day_drift
-                )
-                is not None
+            matched_ev = match_event(
+                home, away, kickoff, in_window, aliases=aliases, max_day_drift=max_day_drift
             )
+            if matched_ev is None:
+                # OddsPortal slug fallback (drops the women "W" suffix + sponsor
+                # tails) — same strict unique match, just a cleaner key.
+                slug = oddsportal_slug_names(ext_ref)
+                if slug is not None:
+                    matched_ev = match_event(
+                        slug[0],
+                        slug[1],
+                        kickoff,
+                        in_window,
+                        aliases=aliases,
+                        max_day_drift=max_day_drift,
+                    )
+            matched = matched_ev is not None
             outcomes.append(
                 ShadowOutcome(
                     pick_id=pick_id,

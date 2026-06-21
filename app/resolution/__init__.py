@@ -11,6 +11,7 @@ from app.resolution.matching import (
     default_aliases,
     match_event,
     normalize_name,
+    oddsportal_slug_names,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "default_aliases",
     "match_event",
     "normalize_name",
+    "oddsportal_slug_names",
 ]

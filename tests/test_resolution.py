@@ -13,7 +13,26 @@ from app.resolution.matching import (
     default_aliases,
     match_event,
     normalize_name,
+    oddsportal_slug_names,
 )
+
+
+def test_oddsportal_slug_names_are_a_cleaner_match_key() -> None:
+    # The OddsPortal match-URL slug drops the women-league "W" suffix the scraped
+    # display name carries, and is consistently lowercased -> a cleaner FALLBACK
+    # query than the display name. Strip the 8-char per-team OddsPortal id.
+    ref = "https://www.oddsportal.com/basketball/h2h/los-angeles-sparks-Ia6UdBZF/new-york-liberty-h4iAv3Jl/#UVVsCGdR"
+    assert oddsportal_slug_names(ref) == ("los angeles sparks", "new york liberty")
+    # multi-word slug + accents already URL-stripped
+    ref2 = "https://www.oddsportal.com/basketball/h2h/cangrejeros-de-santurce-Yi6Va0d4/indios-de-mayaguez-Y3WmYnZn/#x"
+    assert oddsportal_slug_names(ref2) == ("cangrejeros de santurce", "indios de mayaguez")
+
+
+def test_oddsportal_slug_names_none_for_non_oddsportal_refs() -> None:
+    assert oddsportal_slug_names("1631993947") is None  # Pinnacle numeric ref
+    assert oddsportal_slug_names("betfair:abc-123") is None
+    assert oddsportal_slug_names("") is None
+
 
 KO = datetime(2026, 6, 20, 18, 0, tzinfo=UTC)
 

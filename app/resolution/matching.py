@@ -22,6 +22,7 @@ Unlike glass_onion we do NOT strip women's/youth markers — conflating an
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -51,6 +52,34 @@ def normalize_name(name: str) -> str:
     cleaned = "".join(ch if ch.isalnum() else " " for ch in ascii_only.casefold())
     tokens = [t for t in cleaned.split() if t not in _NOISE_TOKENS]
     return " ".join(tokens)
+
+
+_ODDSPORTAL_ID = re.compile(r"-[A-Za-z0-9]{8}$")
+
+
+def oddsportal_slug_names(external_ref: str) -> tuple[str, str] | None:
+    """Parse (home, away) from an OddsPortal match-URL external_ref, or None for a
+    non-OddsPortal ref.
+
+    The URL slug (``.../h2h/los-angeles-sparks-<id>/new-york-liberty-<id>/``) is
+    often a CLEANER match key than the scraped display name: it drops the
+    women-league "W" suffix the display carries and is consistently
+    lowercased/hyphenated. The matcher tries it as a FALLBACK query when the
+    display name fails — a wrong close still cannot result, since match_event
+    requires a UNIQUE home+away+day candidate. Strips the trailing 8-char
+    per-team OddsPortal id from each slug.
+    """
+    if "oddsportal.com/" not in external_ref:
+        return None
+    path = external_ref.split("oddsportal.com/", 1)[1].split("#", 1)[0]
+    parts = [p for p in path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    home = _ODDSPORTAL_ID.sub("", parts[-2]).replace("-", " ").strip()
+    away = _ODDSPORTAL_ID.sub("", parts[-1]).replace("-", " ").strip()
+    if not home or not away:
+        return None
+    return home, away
 
 
 class AliasTable:

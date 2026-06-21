@@ -3876,12 +3876,15 @@
         tbody.appendChild(tr);
       }
       let DROPPING_TIMER = null; // auto-refresh handle while the DROPPING tab is open
-      async function loadDropping() {
+      async function loadDropping(force) {
         const tbody = $("dropping-rows");
         const stamp = $("dropping-stamp");
         droppingMessage(tbody, null); // skeleton
         try {
-          const res = await fetchWithTimeout("/dropping-odds");
+          // manual Refresh forces a cache-bypass for instant fresh data + time.
+          const res = await fetchWithTimeout(
+            "/dropping-odds" + (force ? "?fresh=1" : ""),
+          );
           // Same auth handling as the picks tabs: an expired/absent session
           // (when dashboard auth is on) bounces to the login page, not a frozen
           // "unavailable" panel.
@@ -3971,6 +3974,12 @@
         const dropPanel = $("dropping-panel");
         if (picksWrap) picksWrap.hidden = dropping;
         if (dropPanel) dropPanel.hidden = !dropping;
+        // Tier + search are picks-only controls — gray them out on DROPPING so
+        // they don't look broken (they don't filter the external feed).
+        for (const id of ["f-tier", "f-search"]) {
+          const el = $(id);
+          if (el) el.disabled = dropping;
+        }
         if (DROPPING_TIMER) {
           clearInterval(DROPPING_TIMER);
           DROPPING_TIMER = null;
@@ -4035,7 +4044,7 @@
         btn.disabled = true;
         btn.textContent = "Refreshing…";
         try {
-          const work = STATUS_TAB === "dropping" ? loadDropping() : load();
+          const work = STATUS_TAB === "dropping" ? loadDropping(true) : load();
           // keep "Refreshing…" visible for a beat even on a cache hit, so it's
           // obvious the click did something on every tab.
           await Promise.all([work, new Promise((r) => setTimeout(r, 450))]);

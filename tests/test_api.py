@@ -791,3 +791,28 @@ def test_dropping_odds_endpoint_fails_soft_when_unavailable(monkeypatch) -> None
     body = TestClient(make_app()).get("/dropping-odds").json()
     assert body["available"] is False
     assert body["rows"] == []
+
+
+def test_dropping_odds_fresh_param_bypasses_cache(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from app.api import routes
+    from app.ingestion.oddsmath_dropping import DropRow
+
+    routes._DROPPING_CACHE.clear()
+    calls = {"n": 0}
+
+    async def fetch(_client, **_kw):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return [
+            DropRow("soccer", None, "L", f"A{calls['n']} — B", "1X2", "1XBET", "1", 2.0, 1.5, -25.0)
+        ]
+
+    monkeypatch.setattr(routes, "fetch_oddsmath_drops", fetch)
+    client = TestClient(make_app())
+    b1 = client.get("/dropping-odds").json()
+    b2 = client.get("/dropping-odds").json()  # served from the 60s cache
+    assert calls["n"] == 1
+    assert b2["rows"][0]["match"] == b1["rows"][0]["match"]
+    # manual Refresh -> ?fresh=1 bypasses the cache, fetching new data instantly
+    b3 = client.get("/dropping-odds?fresh=1").json()
+    assert calls["n"] == 2
+    assert b3["rows"][0]["match"] != b1["rows"][0]["match"]

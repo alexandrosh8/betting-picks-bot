@@ -52,8 +52,9 @@ _PROVIDERS: dict[int, str] = {
     84: "FEZbet",
     87: "BetInAsia",
 }
-#: Curated major books fetched + merged for the widget.
-_DEFAULT_PROVIDERS: tuple[int, ...] = (32, 38, 20, 16, 8, 56, 87, 13)
+#: ALL known books are fetched + merged for the widget (a book with no current
+#: drops simply returns []). Concurrent, so the wall-clock is ~one request.
+_DEFAULT_PROVIDERS: tuple[int, ...] = tuple(_PROVIDERS)
 
 
 @dataclass(frozen=True, slots=True)

@@ -730,11 +730,11 @@ async def resolution_match_rate(
 
 
 # --- view-only external feed: oddsmath ATTRIBUTED dropping odds --------------
-# Cached 2 min — short enough that the tab's 60s auto-refresh shows odds moving
-# within a couple minutes, polite to oddsmath. ATTRIBUTED per-book data (a named
-# bookmaker's open->current), informational ONLY: never an input to any pick,
-# edge, stake, or CLV.
-_DROPPING_TTL = timedelta(minutes=2)
+# Cached 60s so the tab's 60s auto-refresh shows fresh odds each minute; a manual
+# Refresh passes ?fresh=1 to BYPASS the cache and fetch instantly. ATTRIBUTED
+# per-book data (a named bookmaker's open->current), informational ONLY: never an
+# input to any pick, edge, stake, or CLV.
+_DROPPING_TTL = timedelta(seconds=60)
 _DROPPING_CACHE: dict[str, tuple[datetime, list[DropRow]]] = {}
 
 
@@ -754,17 +754,18 @@ def _dropping_row_json(row: DropRow) -> dict[str, object]:
 
 
 @router.get("/dropping-odds", dependencies=[Depends(require_dashboard_auth)])
-async def dropping_odds(interval: int = 1440) -> dict[str, object]:
+async def dropping_odds(interval: int = 1440, fresh: bool = False) -> dict[str, object]:
     """VIEW-ONLY external feed — oddsmath.com ATTRIBUTED per-book dropping odds.
 
     Each row is one NAMED bookmaker's opening->current move on a fixture (not a
     blended average). Shown for human browsing; NEVER used for any pick, edge,
-    stake, or CLV — the math never sees it. Cached 2 min, fails soft.
+    stake, or CLV — the math never sees it. Cached 60s (auto-refresh); fresh=true
+    (manual Refresh) bypasses the cache for instant data. Fails soft.
     interval: 60=1h, 360=6h, 1440=24h."""
     key = str(interval)
     now = datetime.now(tz=UTC)
     cached = _DROPPING_CACHE.get(key)
-    if cached is not None and now - cached[0] < _DROPPING_TTL:
+    if not fresh and cached is not None and now - cached[0] < _DROPPING_TTL:
         rows, fetched_at = cached[1], cached[0]
     else:
         async with httpx.AsyncClient() as client:

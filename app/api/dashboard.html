@@ -2908,6 +2908,9 @@
           "#status-tabs button[data-status]",
         )) {
           const k = b.dataset.status;
+          // Skip non-picks tabs (e.g. DROPPING) — they own their label and are
+          // not counted here; without this they'd be clobbered to "undefined".
+          if (!(k in TAB_LABELS)) continue;
           b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
         }
         // CLV scorecard — the proof-of-edge headline, shown on the CLOSED tab

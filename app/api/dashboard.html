@@ -2890,11 +2890,13 @@
       }
 
       function render() {
-        // DROPPING is an external, view-only tab with its own panel + render —
-        // the picks pipeline below does not apply to it.
-        if (STATUS_TAB === "dropping") return;
         const tier = $("f-tier").value;
-        const q = $("f-search").value.trim().toLowerCase();
+        // On DROPPING the search box filters the external matches (not picks),
+        // so the pick counts ignore it there; on the picks tabs it applies.
+        const q =
+          STATUS_TAB === "dropping"
+            ? ""
+            : $("f-search").value.trim().toLowerCase();
         // RESULTS reuses the results-oriented (ex-SETTLED) column layout, so the
         // long-standing `settledView` flag now means "the results view".
         const settledView = STATUS_TAB === "results";
@@ -2948,6 +2950,10 @@
           if (!(k in TAB_LABELS)) continue;
           b.textContent = TAB_LABELS[k] + " (" + (tabCounts[k] || 0) + ")";
         }
+        // The tab COUNTS above stay live even while DROPPING is open (load()
+        // still runs every 60s); DROPPING has its own panel, so skip the rest —
+        // the picks-table draw below — only now.
+        if (STATUS_TAB === "dropping") return;
         // CLV scorecard — the proof-of-edge headline, shown on the CLOSED tab
         // only. Computed over every closed pick (in the tier/search scope) that
         // has a CLV row: how many beat the de-vigged close + the mean CLV.

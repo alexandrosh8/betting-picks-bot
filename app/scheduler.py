@@ -524,7 +524,12 @@ def build_scheduler(
 
     scheduler.add_job(
         settle_results,
-        CronTrigger(minute=15),
+        # Short interval (was hourly CronTrigger(minute=15)): settle_results only
+        # reads scraped scores from the DB and settles — cheap, no scrape — so a
+        # freshly-captured FINAL score settles within ~1 cycle instead of up to
+        # an hour. Paired with the 60s finished-score capture, a result lands
+        # within ~1-2 min of FT.
+        IntervalTrigger(seconds=settings.settle_interval_seconds),
         id="settle_results",
         max_instances=1,
         coalesce=True,

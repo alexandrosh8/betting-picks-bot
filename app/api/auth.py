@@ -135,12 +135,10 @@ def _current_credentials() -> DashboardCredentials | None:
     from app.config import get_settings
 
     s = get_settings()
-    if s.dashboard_auth_password_hash and s.dashboard_session_secret:
-        return DashboardCredentials(
-            s.dashboard_auth_username,
-            s.dashboard_auth_password_hash,
-            s.dashboard_session_secret,
-        )
+    hash_ = s.dashboard_auth_password_hash.get_secret_value()
+    secret = s.dashboard_session_secret.get_secret_value()
+    if hash_ and secret:
+        return DashboardCredentials(s.dashboard_auth_username, hash_, secret)
     return None
 
 

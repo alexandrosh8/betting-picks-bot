@@ -133,6 +133,8 @@ class OddsSnapshot(Base):
     liquidity: Mapped[Decimal | None] = mapped_column(MONEY)
     captured_at: Mapped[datetime]  # provider-reported price time
     ingested_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # RESERVED (audit #12): never set by app code today — the live close marker is
+    # Pick.closing_odds / Pick.closing_anchor_type, not this column.
     is_closing: Mapped[bool] = mapped_column(Boolean, server_default="false")
 
 
@@ -164,6 +166,10 @@ class ModelVersion(Base):
 
 
 class ModelPrediction(Base):
+    """RESERVED (audit #12): migrated but UNWRITTEN — no app code constructs
+    ModelPrediction today (the value strategy persists picks directly). Populate it
+    for the model strategy, or treat it as reserved capacity."""
+
     __tablename__ = "model_predictions"
     __table_args__ = (
         UniqueConstraint(
@@ -187,7 +193,11 @@ class ModelPrediction(Base):
 
 
 class DetectedEdge(Base):
-    """Every gate evaluation — accepted AND rejected, for auditability."""
+    """RESERVED (audit #12): intended as a per-gate audit trail (every gate
+    evaluation — accepted AND rejected), but NO app code writes DetectedEdge today
+    and Pick.detected_edge_id is always NULL. The table/columns exist via migration;
+    either wire the value/edge pipeline to populate it or treat it as reserved
+    capacity — it is not a live audit trail yet."""
 
     __tablename__ = "detected_edges"
     __table_args__ = (Index("idx_detected_edges_event", "event_id", "detected_at"),)

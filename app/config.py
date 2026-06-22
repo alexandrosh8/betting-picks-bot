@@ -196,9 +196,12 @@ class Settings(BaseSettings):
     max_daily_exposure_percent: float = Field(default=0.05, gt=0.0, le=1.0)
 
     # --- Alerts ----------------------------------------------------------------
-    telegram_bot_token: str = ""
+    # SecretStr (audit #3): repr-redacted so a whole-Settings log/serialize can
+    # never emit them in cleartext. telegram_bot_token rides the URL path;
+    # webhook_url may embed credentials.
+    telegram_bot_token: SecretStr = SecretStr("")
     telegram_chat_id: str = ""
-    webhook_url: str = ""
+    webhook_url: SecretStr = SecretStr("")
     # How long an UNCHANGED market state stays suppressed by the alert
     # idempotency store. Open picks routinely live for days (taken up to
     # weeks before kickoff); a 24h TTL re-alerted every still-open same-odds
@@ -214,8 +217,8 @@ class Settings(BaseSettings):
     # public for the compose healthcheck and external watchdog.
     dashboard_auth_enabled: bool = False
     dashboard_auth_username: str = "admin"
-    dashboard_auth_password_hash: str = ""  # "pbkdf2_sha256$iters$salt$hash"
-    dashboard_session_secret: str = ""  # HMAC key for the session cookie
+    dashboard_auth_password_hash: SecretStr = SecretStr("")  # pbkdf2_sha256$iters$salt$hash
+    dashboard_session_secret: SecretStr = SecretStr("")  # HMAC key for the session cookie
     dashboard_session_ttl_seconds: int = Field(default=12 * 60 * 60, ge=60)
 
     # --- Pick strategy --------------------------------------------------------
@@ -460,10 +463,10 @@ class Settings(BaseSettings):
     football_totals_line: float = 2.5
     model_confidence: float = 0.65
 
-    odds_api_key: str = ""
-    odds_api_key_1: str = ""
-    odds_api_key_2: str = ""
-    odds_api_key_3: str = ""
+    odds_api_key: SecretStr = SecretStr("")  # SecretStr (audit #3): keys ride query strings
+    odds_api_key_1: SecretStr = SecretStr("")
+    odds_api_key_2: SecretStr = SecretStr("")
+    odds_api_key_3: SecretStr = SecretStr("")
     # The Odds API regions to request (csv). "eu" carries Pinnacle AND Betfair
     # Exchange EU; add "uk" for Betfair Exchange UK too (betfair_ex_uk). More
     # regions = richer sharp coverage but more credits/request — widen only on a
@@ -492,7 +495,7 @@ class Settings(BaseSettings):
     # used here require NONE, so the default is empty and nothing is committed;
     # set in .env only if Pinnacle ever starts requiring it. Kept out of logs/
     # exceptions like every other key.
-    arcadia_guest_key: str = ""
+    arcadia_guest_key: SecretStr = SecretStr("")
     # Best-effort PUBLIC key/base discovery (read-only GET of pinnacle.com's
     # web-client config blob, /config/app.json) — refreshes the guest key + base
     # URL if Pinnacle ever rotates them, hardening reliability. DEFAULT False so
@@ -650,8 +653,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce_dashboard_auth_config(self) -> "Settings":
         if self.dashboard_auth_enabled:
-            has_hash = bool(self.dashboard_auth_password_hash)
-            has_secret = bool(self.dashboard_session_secret)
+            has_hash = bool(self.dashboard_auth_password_hash.get_secret_value())
+            has_secret = bool(self.dashboard_session_secret.get_secret_value())
             # Both blank = the FIRST-RUN SETUP path: the password is set via the
             # /setup screen on first launch and persisted to the database, so no
             # hash/secret needs to live in .env. Supplying BOTH is the
@@ -664,7 +667,7 @@ class Settings(BaseSettings):
                     "it in the database)."
                 )
             if has_hash:
-                hash_parts = self.dashboard_auth_password_hash.split("$")
+                hash_parts = self.dashboard_auth_password_hash.get_secret_value().split("$")
                 if len(hash_parts) != 4 or hash_parts[0] != "pbkdf2_sha256":
                     raise ValueError(
                         "DASHBOARD_AUTH_PASSWORD_HASH must look like "
@@ -752,7 +755,12 @@ class Settings(BaseSettings):
 
     def odds_api_keys(self) -> tuple[str, ...]:
         """Configured Odds API keys for rotation, in order, empties dropped."""
-        keys = (self.odds_api_key, self.odds_api_key_1, self.odds_api_key_2, self.odds_api_key_3)
+        keys = (
+            self.odds_api_key.get_secret_value(),
+            self.odds_api_key_1.get_secret_value(),
+            self.odds_api_key_2.get_secret_value(),
+            self.odds_api_key_3.get_secret_value(),
+        )
         return tuple(k for k in keys if k)
 
     def arcadia_proxies(self) -> tuple[str, ...]:

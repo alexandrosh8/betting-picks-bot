@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.api.auth import (
     SESSION_COOKIE,
@@ -41,8 +42,8 @@ def _auth_settings() -> Settings:
     return Settings.model_construct(
         dashboard_auth_enabled=True,
         dashboard_auth_username="admin",
-        dashboard_auth_password_hash=hash_password(_TEST_PW),
-        dashboard_session_secret="test-secret-key",
+        dashboard_auth_password_hash=SecretStr(hash_password(_TEST_PW)),
+        dashboard_session_secret=SecretStr("test-secret-key"),
         dashboard_session_ttl_seconds=12 * 60 * 60,
         app_env="local",
     )

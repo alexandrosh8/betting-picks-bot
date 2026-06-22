@@ -94,8 +94,12 @@ def _dispatcher(
 ) -> AlertDispatcher:
     return AlertDispatcher(
         sinks=[
-            TelegramSink(settings.telegram_bot_token, settings.telegram_chat_id, http_client),
-            WebhookSink(settings.webhook_url, http_client),
+            TelegramSink(
+                settings.telegram_bot_token.get_secret_value(),
+                settings.telegram_chat_id,
+                http_client,
+            ),
+            WebhookSink(settings.webhook_url.get_secret_value(), http_client),
         ],
         # TTL governs how long an UNCHANGED market state stays quiet (a price
         # move mints a new dedupe key and alerts immediately) — default 7d so
@@ -510,7 +514,7 @@ def build_scheduler(
         arcadia_client = PinnacleArcadiaClient(
             arcadia_http_client or http_client,
             base_url=settings.arcadia_base_url,
-            guest_key=settings.arcadia_guest_key,
+            guest_key=settings.arcadia_guest_key.get_secret_value(),
         )
         arcadia_capture = PinnacleArcadiaCapture(
             client=arcadia_client,

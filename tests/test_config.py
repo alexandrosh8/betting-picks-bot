@@ -149,7 +149,7 @@ def test_dashboard_auth_enabled_with_blank_creds_is_first_run_mode() -> None:
     # first-run /setup screen (persisted to the DB), so nothing lives in .env.
     s = make_settings(dashboard_auth_enabled=True)
     assert s.dashboard_auth_enabled is True
-    assert s.dashboard_auth_password_hash == ""
+    assert s.dashboard_auth_password_hash.get_secret_value() == ""
 
 
 def test_dashboard_auth_requires_both_hash_and_secret_or_neither() -> None:

@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from fastapi import FastAPI
+from pydantic import SecretStr
 from starlette.testclient import TestClient
 
 import app.api.routes as routes_mod
@@ -48,8 +49,8 @@ def _unconfigured_settings() -> Settings:
     return Settings.model_construct(
         dashboard_auth_enabled=True,
         dashboard_auth_username="admin",
-        dashboard_auth_password_hash="",
-        dashboard_session_secret="",
+        dashboard_auth_password_hash=SecretStr(""),
+        dashboard_session_secret=SecretStr(""),
         dashboard_session_ttl_seconds=12 * 60 * 60,
         app_env="local",
     )
@@ -145,8 +146,8 @@ def test_setup_404_when_auth_disabled(monkeypatch) -> None:  # type: ignore[no-u
     settings = Settings.model_construct(
         dashboard_auth_enabled=False,
         dashboard_auth_username="admin",
-        dashboard_auth_password_hash="",
-        dashboard_session_secret="",
+        dashboard_auth_password_hash=SecretStr(""),
+        dashboard_session_secret=SecretStr(""),
         dashboard_session_ttl_seconds=12 * 60 * 60,
         app_env="local",
     )

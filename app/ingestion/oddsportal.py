@@ -403,6 +403,45 @@ async def _patched_close_specific_market(self: Any, page: Any, specific_market: 
     )
 
 
+# How long to wait for the active period/bookies element to (re)attach after a
+# market-tab switch before reading it. OddsPortal re-renders the
+# kickoff-events-nav on each switch, so the unpatched immediate read misses the
+# "already on the default Full Time period" short-circuit, clicks needlessly,
+# and logs a benign "ERROR Failed to set period to: Full Time" when the verify
+# races the re-render (the correct Full-Time odds still extract). Cheap when the
+# element is already attached; falls through to the same None upstream returns if
+# it never settles.
+_ACTIVE_SETTLE_MS = 1500
+
+
+async def _patched_get_current_value(self: Any, page: Any, strategy: Any) -> str | None:
+    """Drop-in for SelectionManager._get_current_value: wait for the active
+    element to (re)attach after a market-tab switch, THEN read it — so
+    ensure_selected's already-selected short-circuit fires instead of a needless
+    click and a benign ERROR. The read below mirrors upstream 0.3.0 exactly;
+    only the wait is new. Graceful: on timeout/missing it returns None just as
+    upstream does (secret-safe logs: exception TYPE only, at debug)."""
+    active_selector = f"{strategy.container_selector} .{strategy.active_class}"
+    try:
+        await page.wait_for_selector(active_selector, state="attached", timeout=_ACTIVE_SETTLE_MS)
+    except Exception as exc:
+        self.logger.debug(
+            "active %s not settled in %dms: %s",
+            strategy.name,
+            _ACTIVE_SETTLE_MS,
+            type(exc).__name__,
+        )
+    try:
+        active_element = await page.query_selector(active_selector)
+        if active_element:
+            return await strategy.extract_active_value(active_element)
+        self.logger.debug("No active %s found", strategy.name)
+        return None
+    except Exception as exc:
+        self.logger.debug("error reading current %s: %s", strategy.name, type(exc).__name__)
+        return None
+
+
 class _ScrapeGapDowngradeFilter(logging.Filter):
     """Downgrade expected scrape-gap messages to INFO (never drop them): a
     match simply not offering a submarket is normal. The durable DOM-break
@@ -446,7 +485,7 @@ _EXCHANGE_NOISE_FILTER = _ExchangeIncompleteOddsFilter()
 _SCRAPE_GAP_FILTER = _ScrapeGapDowngradeFilter()
 _upstream_patched = False
 
-# The ONLY oddsharvester version the six runtime patches below were verified
+# The ONLY oddsharvester version the runtime patches below were verified
 # against (pyproject pins it exactly). A version bump must re-verify every
 # patch target — see .claude/memory/pitfalls.md.
 _PATCHED_UPSTREAM_VERSION = "0.3.0"
@@ -468,6 +507,7 @@ def _patch_upstream_quirks() -> None:
     if _upstream_patched:
         return
     from oddsharvester.core.browser.market_navigation import MarketTabNavigator
+    from oddsharvester.core.browser.selection import SelectionManager
     from oddsharvester.core.market_extraction.navigation_manager import NavigationManager
     from oddsharvester.core.market_extraction.odds_parser import OddsParser
     from oddsharvester.core.odds_portal_selectors import OddsPortalSelectors
@@ -483,6 +523,10 @@ def _patch_upstream_quirks() -> None:
     MarketTabNavigator._wait_and_click = _patched_wait_and_click
     MarketTabNavigator._click_more_if_market_hidden = _patched_click_more_if_market_hidden
     OddsParser._extract_bookmaker_name = _patched_extract_bookmaker_name
+    # Wait for the active period element to re-attach after a market switch so
+    # the already-selected short-circuit fires — kills the benign per-market
+    # "Failed to set period to: Full Time" ERROR at its source (no false click).
+    SelectionManager._get_current_value = _patched_get_current_value
     logging.getLogger("OddsParser").addFilter(_EXCHANGE_NOISE_FILTER)
     for gap_logger in (
         "PageScroller",

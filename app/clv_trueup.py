@@ -431,6 +431,14 @@ _FINISHED_FLOOR = {
     "tennis": timedelta(hours=6),
 }
 _FINISHED_FLOOR_DEFAULT = timedelta(hours=4)
+#: SOFT candidate floor. With OddsPortal's explicit finished-status now the real
+#: safeguard (a Finished score is captured; an in-play False is REJECTED in
+#: _scrape_one_finished_score), the SQL select only needs a short minimum so a
+#: finished game becomes a candidate within minutes of FT. The full sport floor
+#: above is retained as the fallback for status-MISSING (obscure-league) rows.
+#: A normal soccer match is ~105 min, so 100 min never makes an obviously
+#: mid-match game a candidate — and even if it did, finished=False rejects it.
+_RESULTS_SOFT_FLOOR = timedelta(minutes=100)
 
 
 def _finished_floor(sport_key: str) -> timedelta:
@@ -457,6 +465,7 @@ async def _scrape_one_finished_score(
     directory: EventDirectory,
     sport_key: str,
     ref: str,
+    past_full_floor: bool,
     per_link_timeout: float | None,
 ) -> int:
     """Scrape ONE finished match page and commit its score in its own session.
@@ -483,6 +492,14 @@ async def _scrape_one_finished_score(
         await coro
     teams = directory.lookup(ref)
     if teams is None or teams.home_score is None or teams.away_score is None:
+        return 0
+    # Explicit finished-status gate — the REAL safeguard (the SQL soft-floor only
+    # widens candidates). True = page reports Finished -> capture now. False =
+    # in-play/scheduled (a live partial) -> REJECT, never recorded as final.
+    # None = source gave no status -> require the conservative full sport floor.
+    if teams.finished is False:
+        return 0
+    if teams.finished is None and not past_full_floor:
         return 0
     async with session_factory() as session:
         res = await session.execute(
@@ -542,39 +559,40 @@ async def capture_finished_scores(
     limit = limit or RESULTS_SCRAPE_MAX_PER_CYCLE
     async with session_factory() as session:
         links = (
-            (
-                await session.execute(
-                    select(Event.external_ref)
-                    .join(Pick, Pick.event_id == Event.id)
-                    .join(Sport, Sport.id == Event.sport_id)
-                    .where(
-                        # Route by the DB sport (authoritative) — NOT by parsing the
-                        # match URL. The URL is reused exactly as it was scraped
-                        # (external_ref), so an OddsPortal per-game-type URL change can
-                        # never misroute or silently drop a finished score: the stored
-                        # URL is re-fetched as-is (fetch ... prefiltered=True below).
-                        Sport.key == sport_key,
-                        Pick.status == "alerted",
-                        Event.starts_at.is_not(None),
-                        # FINISHED floor: only re-scrape matches plausibly final,
-                        # so an in-play partial score is never captured as final.
-                        Event.starts_at < now - _finished_floor(sport_key),
-                        Event.starts_at > now - window,
-                        Event.scraped_home_score.is_(None),
-                    )
-                    .distinct()
-                    .limit(limit)
+            await session.execute(
+                select(
+                    Event.external_ref,
+                    (Event.starts_at < now - _finished_floor(sport_key)).label("past_full_floor"),
                 )
+                .join(Pick, Pick.event_id == Event.id)
+                .join(Sport, Sport.id == Event.sport_id)
+                .where(
+                    # Route by the DB sport (authoritative) — NOT by parsing the
+                    # match URL. The URL is reused exactly as it was scraped
+                    # (external_ref), so an OddsPortal per-game-type URL change can
+                    # never misroute or silently drop a finished score: the stored
+                    # URL is re-fetched as-is (fetch ... prefiltered=True below).
+                    Sport.key == sport_key,
+                    Pick.status == "alerted",
+                    Event.starts_at.is_not(None),
+                    # SOFT floor: surface finished games within minutes of FT.
+                    # The per-link finished-status gate is the real safeguard
+                    # (in-play partial rejected; status-missing below the full
+                    # sport floor deferred — see _scrape_one_finished_score).
+                    Event.starts_at < now - _RESULTS_SOFT_FLOOR,
+                    Event.starts_at > now - window,
+                    Event.scraped_home_score.is_(None),
+                )
+                .distinct()
+                .limit(limit)
             )
-            .scalars()
-            .all()
-        )
+        ).all()
     if not links:
         return 0
     written = 0
     timed_out = 0
     deadline = time.monotonic() + time_budget if time_budget is not None else None
-    for ref in links:
+    for ref, past_full_floor in links:
         if deadline is not None and time.monotonic() >= deadline:
             # Budget spent: stop CLEANLY. Everything committed so far is durable;
             # the un-scraped remainder simply drains over the next cycles.
@@ -588,7 +606,13 @@ async def capture_finished_scores(
             break
         try:
             written += await _scrape_one_finished_score(
-                fetch, session_factory, directory, sport_key, ref, per_link_timeout
+                fetch,
+                session_factory,
+                directory,
+                sport_key,
+                ref,
+                bool(past_full_floor),
+                per_link_timeout,
             )
         except TimeoutError:
             # asyncio.wait_for raises the builtin TimeoutError (3.11+). A single

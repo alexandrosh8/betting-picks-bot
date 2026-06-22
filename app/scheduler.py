@@ -522,6 +522,16 @@ def build_scheduler(
         except Exception as exc:
             logger.error("upstream watch failed: %s", type(exc).__name__)
 
+    async def run_self_audit_job() -> None:
+        # Runtime self-audit: cheap READ-ONLY DB anomaly checks (awaiting-result
+        # backlog, stale odds) that WARN/ERROR so the health monitor catches
+        # operational problems proactively. Never raises (self_audit_job guards).
+        if session_factory is None:
+            return
+        from app.maintenance.self_audit import self_audit_job
+
+        await self_audit_job(session_factory)
+
     scheduler.add_job(
         settle_results,
         # Short interval (was hourly CronTrigger(minute=15)): settle_results only
@@ -535,6 +545,14 @@ def build_scheduler(
         coalesce=True,
         misfire_grace_time=None,  # run on Mac wake, don't skip
     )
+    if session_factory is not None:
+        scheduler.add_job(
+            run_self_audit_job,
+            IntervalTrigger(seconds=settings.self_audit_interval_seconds),
+            id="self_audit",
+            max_instances=1,
+            coalesce=True,
+        )
     # DEDICATED finished-score scrape on its OWN light interval, decoupled from
     # both the heavy odds poll and the hourly settle cron (cactusbets.cloud prod
     # fix). Only registered when the source can actually scrape match pages

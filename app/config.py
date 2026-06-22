@@ -649,6 +649,10 @@ class Settings(BaseSettings):
     # short interval (was an hourly cron) so a freshly-captured score settles
     # within ~1 cycle instead of up to an hour. >=15s floor. PROD-SAFE.
     settle_interval_seconds: int = Field(default=30, ge=15, le=3600)
+    # Runtime self-audit cadence (seconds). A cheap READ-ONLY DB job that WARNs/
+    # ERRORs on operational anomalies (awaiting-result backlog, stale odds) so
+    # the health monitor catches issues proactively. PROD-SAFE WITH NO CONFIG.
+    self_audit_interval_seconds: int = Field(default=600, ge=60)
     # Per-LINK match-page scrape timeout (seconds) for the finished-score pass.
     # One hung VPS proxy request must not stall the whole pass — each link runs
     # under its own asyncio.wait_for and a timeout drops just that link (retried

@@ -20,8 +20,12 @@ ALERT_FOOTER = "ℹ️ Informational only — you place any bet. No profit guara
 class StakeBreakdownOut(InternalModel):
     raw_kelly: float
     fractional: float
-    capped: bool
-    final: float
+    capped: bool  # per-bet cap hit (fractional > max_stake_fraction)
+    final: float  # the GRANTED fraction (after the daily-exposure ledger clip)
+    # True when the daily-exposure ledger clipped `final` below the per-bet-capped
+    # fraction (granted < breakdown.final). Distinguishes a daily clip from the
+    # per-bet cap (`capped`) so `final` is reproducible from the inputs.
+    daily_clipped: bool = False
 
 
 class PickOut(InternalModel):

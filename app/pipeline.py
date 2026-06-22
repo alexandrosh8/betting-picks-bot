@@ -473,6 +473,10 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
                     fractional=breakdown.fractional,
                     capped=breakdown.capped,
                     final=granted,
+                    # True when the daily-exposure ledger clipped the per-bet-capped
+                    # fraction further (granted < breakdown.final) — distinguishes a
+                    # daily clip from the per-bet cap in the breakdown.
+                    daily_clipped=granted < breakdown.final,
                 ),
                 odds_age_seconds=max(candidate.odds_age_seconds, 0.0),
                 liquidity=snap.liquidity,
@@ -919,6 +923,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     fractional=breakdown.fractional,
                     capped=breakdown.capped,
                     final=granted,
+                    # True when the daily-exposure ledger clipped the per-bet-capped
+                    # fraction further (granted < breakdown.final) — distinguishes a
+                    # daily clip from the per-bet cap in the breakdown.
+                    daily_clipped=granted < breakdown.final,
                 ),
                 odds_age_seconds=age,
                 liquidity=None,

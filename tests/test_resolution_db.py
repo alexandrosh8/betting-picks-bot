@@ -127,6 +127,49 @@ async def test_resolver_duplicate_archive_matches_one(factory) -> None:  # type:
     assert all(s.bookmaker == "Pinnacle" for s in out)
 
 
+async def _seed_pinnacle_tennis_event(factory, ref: str, home: str, away: str) -> None:  # type: ignore[no-untyped-def]
+    # arcadia stores full names ("Firstname Surname"); 2-way market, no Draw.
+    snaps = [_pin_snap(home, 1.80, ref), _pin_snap(away, 2.05, ref)]
+    teams = {ref: EventTeams(home=home, away=away, league="atp", starts_at=KO)}
+    await persist_odds_snapshots(factory, snaps, teams, "pinnacle_tennis", "pinnacle_tennis")
+
+
+async def test_resolver_matches_tennis_via_name_canonicalization(factory) -> None:  # type: ignore[no-untyped-def]
+    # audit #7: arcadia "Firstname Surname" vs the pick's OddsPortal "Surname I." —
+    # the consume path must canonicalize + match UNORDERED, or tennis CLV never
+    # attaches. (Old code passed raw names ordered=True and returned [].)
+    await _seed_pinnacle_tennis_event(factory, "pin-djok-alc", "Novak Djokovic", "Carlos Alcaraz")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_tennis",
+            pick_external_ref="evt-tennis-pick",
+            home="Djokovic N.",
+            away="Alcaraz C.",
+            kickoff=KO,
+        )
+    by_sel = {s.selection: s for s in out}
+    assert set(by_sel) == {"Djokovic N.", "Alcaraz C."}  # re-keyed to the pick vocabulary
+    assert all(s.bookmaker == "Pinnacle" for s in out)
+    assert by_sel["Djokovic N."].decimal_odds == pytest.approx(1.80)
+
+
+async def test_resolver_tennis_does_not_attach_different_same_day_player(factory) -> None:  # type: ignore[no-untyped-def]
+    # a DIFFERENT same-day fixture must never attach the wrong close (the cardinal
+    # sin): the canonical names don't match -> [] (audit #7 collision safety).
+    await _seed_pinnacle_tennis_event(factory, "pin-djok-alc", "Novak Djokovic", "Carlos Alcaraz")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_tennis",
+            pick_external_ref="evt-tennis-pick",
+            home="Nadal R.",
+            away="Federer R.",
+            kickoff=KO,
+        )
+    assert out == []
+
+
 async def test_resolver_kickoff_outside_window_returns_empty(factory) -> None:  # type: ignore[no-untyped-def]
     await _seed_pinnacle_event(factory, "pin-far", "Alpha", "Beta")
     async with factory() as session:

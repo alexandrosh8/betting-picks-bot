@@ -964,6 +964,17 @@ async def resolve_pinnacle_close_snaps(
         normalize_name,
         oddsportal_slug_names,
     )
+    from app.resolution.tennis_names import canonical_tennis_name
+
+    # audit #7: tennis is a two-player, UNORDERED fixture whose OddsPortal name
+    # ("Surname I.") differs from arcadia's ("Firstname Surname"). Match it the
+    # SAME way the readiness probe does (canonicalize + ordered=False + a shared-
+    # token collision guard), or this consume path returns [] for every tennis
+    # fixture and tennis CLV-vs-close never attaches.
+    is_tennis = pinnacle_sport_key.removeprefix("pinnacle_") == "tennis"
+
+    def _toks(name: str) -> set[str]:
+        return set(normalize_name(name).split())
 
     home_t, away_t = aliased(Team), aliased(Team)
     window = timedelta(days=max_day_drift + 1)
@@ -985,11 +996,25 @@ async def resolve_pinnacle_close_snaps(
         return []
     by_ref = {str(eid): (eid, ext, h, a, ko) for eid, ext, h, a, ko in rows}
     candidates = [
-        EventCandidate(ref=str(eid), home=h, away=a, kickoff=ko) for eid, _ext, h, a, ko in rows
+        EventCandidate(
+            ref=str(eid),
+            home=canonical_tennis_name(h) if is_tennis else h,
+            away=canonical_tennis_name(a) if is_tennis else a,
+            kickoff=ko,
+        )
+        for eid, _ext, h, a, ko in rows
     ]
     aliases = default_aliases()
+    qhome = canonical_tennis_name(home) if is_tennis else home
+    qaway = canonical_tennis_name(away) if is_tennis else away
     matched = match_event(
-        home, away, kickoff, candidates, aliases=aliases, max_day_drift=max_day_drift
+        qhome,
+        qaway,
+        kickoff,
+        candidates,
+        aliases=aliases,
+        max_day_drift=max_day_drift,
+        ordered=not is_tennis,
     )
     if matched is None:
         # Fallback: OddsPortal's URL slug is a cleaner match key than the scraped
@@ -999,10 +1024,25 @@ async def resolve_pinnacle_close_snaps(
         # name spelled differently (live basketball match rate 36% -> 41%).
         slug = oddsportal_slug_names(pick_external_ref)
         if slug is not None:
+            sh = canonical_tennis_name(slug[0]) if is_tennis else slug[0]
+            sa = canonical_tennis_name(slug[1]) if is_tennis else slug[1]
             matched = match_event(
-                slug[0], slug[1], kickoff, candidates, aliases=aliases, max_day_drift=max_day_drift
+                sh,
+                sa,
+                kickoff,
+                candidates,
+                aliases=aliases,
+                max_day_drift=max_day_drift,
+                ordered=not is_tennis,
             )
     if matched is None:
+        return []
+    # tennis: require a shared normalized token between the pick and the matched
+    # arcadia event, so a degenerate surname+initial pair can't attach same-day
+    # noise (the readiness-probe collision guard, audit #7).
+    if is_tennis and not (
+        (_toks(home) | _toks(away)) & (_toks(matched.home) | _toks(matched.away))
+    ):
         return []
     pin_id, pin_ref, pin_home, pin_away, pin_kickoff = by_ref[matched.ref]
     # Cap the close cutoff at the matched ARCADIA event's OWN kickoff: the match

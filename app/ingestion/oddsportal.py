@@ -742,10 +742,20 @@ class OddsPortalLoader:
         sport_key: str,
         match_links: Sequence[str],
         markets: Sequence[str] | None = None,
+        *,
+        prefiltered: bool = False,
     ) -> list[OddsSnapshotIn]:
         """Scrape SPECIFIC match pages (open picks outside the dated window
         still need fresh prices). Links from other sports are filtered out
         — oddsportal URLs embed the sport segment.
+
+        `prefiltered=True` means the caller already routed these links to this
+        sport authoritatively (e.g. the finished-score path selects them by the
+        DB sport on the open pick), so the URL sport-segment filter is SKIPPED
+        and the stored match URLs are scraped AS-IS. This keeps that path working
+        even if OddsPortal changes a sport's URL path segment — the segment filter
+        would otherwise silently drop the renamed links. The odds-poll path keeps
+        the default (filter on) since it may receive mixed-sport links.
 
         `markets` optionally NARROWS the scrape to the submarkets the caller
         actually needs (every market key costs one browser tab per match
@@ -756,7 +766,11 @@ class OddsPortalLoader:
         if sport_key not in self._config:
             return []
         sport, _leagues = self._config[sport_key]
-        links = [link for link in match_links if f"/{sport}/" in link]
+        links = (
+            list(match_links)
+            if prefiltered
+            else [link for link in match_links if f"/{sport}/" in link]
+        )
         if not links:
             return []
         requested = self._markets_for(sport_key)

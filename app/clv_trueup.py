@@ -468,7 +468,10 @@ async def _scrape_one_finished_score(
     handle for control flow — failures here are caught and logged by the caller
     so one bad link never blocks the already-committed scores of the others.
     """
-    coro = fetch(sport_key, [ref])  # registers the final score in `directory`
+    # prefiltered=True: the caller already routed `ref` to this sport by the DB
+    # sport on the open pick, so scrape the stored URL AS-IS (no URL sport-segment
+    # filter) — robust to an OddsPortal per-game-type URL change.
+    coro = fetch(sport_key, [ref], prefiltered=True)  # registers the score in `directory`
     if per_link_timeout is not None:
         await asyncio.wait_for(coro, timeout=per_link_timeout)
     else:
@@ -533,12 +536,19 @@ async def capture_finished_scores(
     window = window or RESULTS_SCRAPE_WINDOW  # wider = clear an older backlog
     limit = limit or RESULTS_SCRAPE_MAX_PER_CYCLE
     async with session_factory() as session:
-        refs = (
+        links = (
             (
                 await session.execute(
                     select(Event.external_ref)
                     .join(Pick, Pick.event_id == Event.id)
+                    .join(Sport, Sport.id == Event.sport_id)
                     .where(
+                        # Route by the DB sport (authoritative) — NOT by parsing the
+                        # match URL. The URL is reused exactly as it was scraped
+                        # (external_ref), so an OddsPortal per-game-type URL change can
+                        # never misroute or silently drop a finished score: the stored
+                        # URL is re-fetched as-is (fetch ... prefiltered=True below).
+                        Sport.key == sport_key,
                         Pick.status == "alerted",
                         Event.starts_at.is_not(None),
                         # FINISHED floor: only re-scrape matches plausibly final,
@@ -554,9 +564,6 @@ async def capture_finished_scores(
             .scalars()
             .all()
         )
-    segment_for = getattr(loader, "sport_segment", None)
-    segment = segment_for(sport_key) if callable(segment_for) else None
-    links = [r for r in refs if segment is None or f"/{segment}/" in r]
     if not links:
         return 0
     written = 0

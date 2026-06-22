@@ -38,7 +38,7 @@ from app.schemas.odds import OddsSnapshotIn
 from app.storage.models import Event, OddsSnapshot
 from app.storage.repositories import persist_odds_snapshots
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 NOW = datetime.now(tz=UTC)
 EVENT = "evt-odds-persist-1"
 TEAMS = {EVENT: EventTeams(home="Persist Home FC", away="Persist Away FC")}

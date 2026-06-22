@@ -1,6 +1,10 @@
 """Opt-in Sentry error monitoring + the ``before_send`` SECRET SCRUBBER.
 
-Sentry is DISABLED unless ``settings.sentry_dsn`` is set (in .env only). Because
+Sentry is **local-only by policy**: it is DISABLED unless ``settings.sentry_dsn`` is
+set (in .env only) AND the environment is a local/dev one (``_LOCAL_ENVS``). The
+environment gate is *fail-closed* — any non-local environment (``production`` etc.)
+disables Sentry even when a DSN is present, so a DSN accidentally copied into a
+production .env can never ship error data to the third-party service. Because
 Sentry ships error data to a third party, every event passes through
 ``scrub_event`` first, which:
 
@@ -53,6 +57,9 @@ _SECRET_SHAPE_RE = re.compile(
 )
 _REDACTED = "[redacted]"
 _DROP_EXC: tuple[type[BaseException], ...] = (asyncio.CancelledError, KeyboardInterrupt)
+# Environments where Sentry may run. Fail-closed: anything else (production,
+# staging, "") disables Sentry even with a DSN present — local-only by policy.
+_LOCAL_ENVS = frozenset({"local", "dev", "development", "test"})
 
 
 def _scrub_str(value: str) -> str:
@@ -106,10 +113,17 @@ def init_sentry(settings: Settings) -> bool:
     dsn = (settings.sentry_dsn or "").strip()
     if not dsn:
         return False
+    environment = (settings.sentry_environment or settings.app_env or "").strip()
+    if environment.lower() not in _LOCAL_ENVS:
+        # Fail-closed: local-only by policy. A production .env with a stray DSN
+        # still gets NOTHING shipped to the third-party Sentry.
+        logger.info(
+            "Sentry disabled: environment %r is not local — local-only by policy", environment
+        )
+        return False
     if sentry_sdk is None:
         logger.warning("SENTRY_DSN is set but sentry-sdk is not installed; skipping")
         return False
-    environment = settings.sentry_environment or settings.app_env
     sentry_sdk.init(
         dsn=dsn,
         environment=environment,

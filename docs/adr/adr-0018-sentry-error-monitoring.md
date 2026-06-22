@@ -33,6 +33,12 @@ place:
 - **init hardening:** `send_default_pii=False`, `include_local_variables=False`,
   `include_source_context=False`, `max_request_body_size="never"`, static
   `server_name`.
+- **Local-only by policy (fail-closed):** `init_sentry` also requires the
+  environment (`SENTRY_ENVIRONMENT` or, when blank, `APP_ENV`) to be a local/dev
+  one — `local|dev|development|test`. Any other value (`production`, `staging`,
+  or empty) disables Sentry **even when a DSN is present**, so a DSN accidentally
+  copied into a production `.env` ships nothing to the third party. (Added
+  2026-06-22 at user request: run Sentry locally only, never in production.)
 
 The DSN is a credential: `.env` (0600, gitignored) only; `.env.example` ships it
 blank with a "never commit" note.
@@ -46,6 +52,10 @@ now closed, along with embedded-`cookie=`/`dsn=`, `bytes`, and list-pair gaps.
 
 - Runtime errors become visible/aggregated once a DSN is set; default behaviour
   (no DSN) is unchanged.
+- **Production never reports to Sentry by design** (local-only fail-closed guard).
+  Enabling error aggregation on the Stage-2 VPS later requires deliberately
+  relaxing `_LOCAL_ENVS` in `app/observability.py` — it cannot happen by accident
+  (e.g. a copied `.env`).
 - **Residual risk (documented):** a bare secret _value_ under a non-denylist key
   with no recognizable shape (e.g. a raw token stuffed into `extra`/`tags`) is
   not caught. Rule: never put raw secrets in Sentry `extra`/`tags`/`contexts`.

@@ -21,7 +21,7 @@ from app.schemas.picks import PickOut, StakeBreakdownOut
 from app.storage.models import Pick
 from app.storage.repositories import persist_pick
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 NOW = datetime.now(tz=UTC)
 
 

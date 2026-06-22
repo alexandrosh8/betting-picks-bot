@@ -44,7 +44,7 @@ from app.schemas.odds import OddsSnapshotIn
 from app.storage.models import Event, OddsSnapshot
 from app.storage.repositories import persist_odds_snapshots
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 NOW = datetime(2026, 6, 19, 18, 0, tzinfo=UTC)
 
 # The Betfair Exchange row text the user verified live (2026-06-19, UK proxy):

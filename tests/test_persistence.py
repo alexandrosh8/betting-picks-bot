@@ -23,7 +23,7 @@ from app.storage.repositories import (
     refresh_event_kickoffs,
 )
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 
 
 def make_pick(

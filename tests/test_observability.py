@@ -8,6 +8,8 @@ tests — no network, no real Sentry init.
 
 import asyncio
 
+import pytest
+
 from app.config import Settings
 from app.observability import init_sentry, scrub_event
 
@@ -93,9 +95,56 @@ def test_init_sentry_uses_hardened_options(monkeypatch) -> None:  # type: ignore
             captured.update(kw)
 
     monkeypatch.setattr(obs, "sentry_sdk", _Fake)
-    assert obs.init_sentry(Settings(sentry_dsn="https://x@o.sentry.io/1")) is True
+    # app_env explicit: the local-only guard makes the environment material here.
+    assert obs.init_sentry(Settings(sentry_dsn="https://x@o.sentry.io/1", app_env="local")) is True
     assert captured["send_default_pii"] is False
     assert captured["include_local_variables"] is False
     assert captured["include_source_context"] is False  # the audit blocker
     assert captured["max_request_body_size"] == "never"
     assert captured["before_send"] is obs.scrub_event
+
+
+# --- local-only policy: Sentry must NEVER initialise outside local/dev ----------
+# Fail-closed guard — production error data must never reach the third-party Sentry,
+# even if a DSN is accidentally copied into a production .env.
+
+
+def _recording_sentry(monkeypatch):  # type: ignore[no-untyped-def]
+    """Swap sentry_sdk for a fake whose .init() appends to a returned call list."""
+    import app.observability as obs
+
+    calls: list[dict] = []
+
+    class _Fake:
+        @staticmethod
+        def init(**kw: object) -> None:
+            calls.append(dict(kw))
+
+    monkeypatch.setattr(obs, "sentry_sdk", _Fake)
+    return obs, calls
+
+
+@pytest.mark.parametrize("env", ["production", "prod", "staging", "PRODUCTION", ""])
+def test_init_sentry_disabled_outside_local_envs(monkeypatch, env) -> None:  # type: ignore[no-untyped-def]
+    obs, calls = _recording_sentry(monkeypatch)
+    settings = Settings(sentry_dsn="https://x@o.sentry.io/1", app_env=env)
+    assert obs.init_sentry(settings) is False
+    assert calls == []  # never initialised -> no prod data can ever reach Sentry
+
+
+@pytest.mark.parametrize("env", ["local", "dev", "development", "test", "LOCAL"])
+def test_init_sentry_enabled_in_local_envs(monkeypatch, env) -> None:  # type: ignore[no-untyped-def]
+    obs, calls = _recording_sentry(monkeypatch)
+    settings = Settings(sentry_dsn="https://x@o.sentry.io/1", app_env=env)
+    assert obs.init_sentry(settings) is True
+    assert len(calls) == 1
+
+
+def test_init_sentry_environment_overrides_app_env_for_guard(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # sentry_environment takes precedence; 'production' there disables even with app_env=local.
+    obs, calls = _recording_sentry(monkeypatch)
+    settings = Settings(
+        sentry_dsn="https://x@o.sentry.io/1", app_env="local", sentry_environment="production"
+    )
+    assert obs.init_sentry(settings) is False
+    assert calls == []

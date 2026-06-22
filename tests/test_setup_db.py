@@ -14,7 +14,7 @@ from app.storage.repositories import (
     load_dashboard_credentials,
 )
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 _HASH = "pbkdf2_sha256$600000$abcd1234abcd1234$deadbeefdeadbeefdeadbeefdeadbeef"
 _SECRET = "synthetic-test-session-secret"
 

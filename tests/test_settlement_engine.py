@@ -21,7 +21,7 @@ from app.settlement.results import FinalScore, ScoreBook
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import persist_pick
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 
 NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 KICKOFF = NOW - timedelta(hours=6)

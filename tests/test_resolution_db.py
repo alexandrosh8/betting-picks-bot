@@ -28,7 +28,7 @@ from app.storage.repositories import (
     shadow_match_rate_outcomes,
 )
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 KO = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
 CAPTURED = KO - timedelta(hours=2)
 

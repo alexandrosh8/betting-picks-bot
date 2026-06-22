@@ -39,7 +39,7 @@ from app.ingestion.pinnacle_arcadia import (
 from app.schemas.base import Market
 from app.storage.models import Event, OddsSnapshot
 
-DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai"
+DB_URL = "postgresql+asyncpg://betting_ai:betting_ai@localhost:5433/betting_ai_test"
 NOW = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
 HORIZON_END = NOW + timedelta(hours=72)
 

@@ -253,6 +253,9 @@ def build_scheduler(
             request_delay=settings.oddsportal_request_delay,
             locale=settings.oddsportal_locale,
             proxy_pool=settings.scraper_proxies(),
+            # Raise OddsHarvester's hardcoded 15s match-page goto timeout so
+            # fewer heavy OddsPortal pages time out (read-only; see oddsportal.py).
+            nav_timeout_ms=settings.scrape_nav_timeout_ms,
         )
         league_label = settings.oddsportal_football_leagues
 

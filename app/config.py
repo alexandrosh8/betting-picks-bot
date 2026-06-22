@@ -447,6 +447,14 @@ class Settings(BaseSettings):
     # >5 or sub-0.5s delays exceed responsible pacing for a free source.
     oddsportal_concurrency: int = Field(default=3, ge=1, le=5)
     oddsportal_request_delay: float = Field(default=1.0, ge=0.5)
+    # OddsHarvester hardcodes a 15s match-page navigation (Page.goto) timeout
+    # that is NOT env-configurable upstream; on OddsPortal's heavy pages a slow
+    # load trips "Timeout 15000ms exceeded" and that one match is skipped (it is
+    # re-scraped next cycle). Raise it at the OddsPortalLoader boundary so fewer
+    # pages time out. Floor at 15000 (never LOWER the upstream default), cap at
+    # 120000 so a typo can't make a single page stall a cycle. Increasing a
+    # timeout is configuration, never an anti-bot bypass.
+    scrape_nav_timeout_ms: int = Field(default=30000, ge=15000, le=120000)
     # Browser locale, paired with the loader's forced UTC timezone for a
     # coherent human fingerprint (UTC = London -> en-GB).
     oddsportal_locale: str = "en-GB"

@@ -86,6 +86,24 @@ class PinnacleArcadiaError(Exception):
     """Non-retryable fetch failure. Message never contains the URL or key."""
 
 
+# Transient upstream HTTP statuses worth one or two retries before giving up: a
+# rate-limit (429) or a momentary server-side hiccup (5xx). A permanent 4xx
+# (400/401/403/404/422 …) is a real error — retrying it only burns budget, so it
+# is deliberately excluded and surfaces immediately as PinnacleArcadiaError.
+_TRANSIENT_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+
+
+class _TransientStatusError(Exception):
+    """Internal-only: a retryable transient HTTP status (429/5xx). Carries the
+    status code ONLY — never the URL or key — and is converted to the public
+    PinnacleArcadiaError once retries are exhausted, so callers see the same
+    error type/semantics as before (per-sport isolation/dedupe unchanged)."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"transient upstream status {status_code}")
+        self.status_code = status_code
+
+
 def american_to_decimal(price: int) -> float:
     """Convert American moneyline odds to European decimal odds (> 1.0)."""
     if price == 0:
@@ -556,20 +574,38 @@ class PinnacleArcadiaClient:
         return headers
 
     @retry(
-        retry=retry_if_exception_type(httpx.TransportError),
+        # Retry transport errors (timeouts, resets) AND transient HTTP statuses
+        # (429/5xx, surfaced as _TransientStatusError) with backoff+jitter, so a
+        # momentary upstream hiccup is recovered instead of becoming an immediate
+        # "no data this cycle". Permanent 4xx is NEVER raised as transient here,
+        # so it is never retried (it returns the Response and the caller's non-200
+        # check raises PinnacleArcadiaError at once).
+        retry=retry_if_exception_type((httpx.TransportError, _TransientStatusError)),
         stop=stop_after_attempt(3),
         wait=wait_exponential_jitter(initial=0.5, max=8.0),
         reraise=True,
     )
     async def _get(self, path: str, params: dict[str, str] | None = None) -> httpx.Response:
-        return await self._client.get(
+        response = await self._client.get(
             f"{self._base_url}{path}", params=params, headers=self._headers(), timeout=20.0
         )
+        if response.status_code in _TRANSIENT_STATUSES:
+            # Raise to trigger the retry. Status code ONLY — never the URL/key.
+            raise _TransientStatusError(response.status_code)
+        return response
 
     async def _fetch_list(
         self, path: str, params: dict[str, str] | None, what: str, sport_id: int
     ) -> list[dict[str, Any]]:
-        response = await self._get(path, params)
+        try:
+            response = await self._get(path, params)
+        except _TransientStatusError as exc:
+            # Retries exhausted on a transient 429/5xx: surface it as the normal
+            # non-retryable error so capture_once's per-sport isolation/dedupe is
+            # unchanged. Status + sport id only — never the URL or key.
+            raise PinnacleArcadiaError(
+                f"pinnacle {what} returned status {exc.status_code} for sport={sport_id}"
+            ) from exc
         if response.status_code != 200:
             # Never include response.url (identifies the source / carries the
             # key when set) in the error — status + sport id only.
@@ -604,11 +640,18 @@ class PinnacleArcadiaClient:
         only entries with ``isHidden`` falsey AND ``matchupCount > 0``.
 
         Lets capture_once skip hidden/empty sports so no matchups fetch is wasted
-        on a sport pricing nothing. GET-only; raises PinnacleArcadiaError on a
+        on a sport pricing nothing. GET-only; a transient 429/5xx retries with
+        backoff before giving up, then raises PinnacleArcadiaError on a
         non-200/non-JSON body (status only, never the URL/key) so the caller's
         fallback path is the same as for any other fetch failure.
         """
-        response = await self._get("/sports")
+        try:
+            response = await self._get("/sports")
+        except _TransientStatusError as exc:
+            # Retries exhausted on a transient 429/5xx — status only, never URL/key.
+            raise PinnacleArcadiaError(
+                f"pinnacle sports returned status {exc.status_code}"
+            ) from exc
         if response.status_code != 200:
             raise PinnacleArcadiaError(f"pinnacle sports returned status {response.status_code}")
         try:

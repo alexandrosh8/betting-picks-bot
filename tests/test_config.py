@@ -171,6 +171,9 @@ def test_dashboard_auth_requires_both_hash_and_secret_or_neither() -> None:
         ("oddsportal_request_delay", -1.0),
         ("poll_interval_seconds", 29),
         ("poll_interval_seconds", 0),
+        ("scrape_nav_timeout_ms", 14999),  # below the upstream-default floor
+        ("scrape_nav_timeout_ms", 120001),  # above the stall-guard cap
+        ("scrape_nav_timeout_ms", 0),
     ],
 )
 def test_out_of_range_pacing_knobs_fail_at_startup(field: str, value: float) -> None:
@@ -187,10 +190,20 @@ def test_out_of_range_pacing_knobs_fail_at_startup(field: str, value: float) -> 
         ("oddsportal_request_delay", 3.0),
         ("poll_interval_seconds", 30),
         ("poll_interval_seconds", 300),
+        ("scrape_nav_timeout_ms", 15000),  # floor = upstream default (allowed)
+        ("scrape_nav_timeout_ms", 30000),  # the recommended default
+        ("scrape_nav_timeout_ms", 120000),  # cap
     ],
 )
 def test_in_range_pacing_knobs_pass(field: str, value: float) -> None:
     assert getattr(make_settings(**{field: value}), field) == value
+
+
+def test_scrape_nav_timeout_default_raises_the_upstream_15s_floor() -> None:
+    # The default must be ABOVE OddsHarvester's hardcoded 15000ms (the whole
+    # point of the knob): fewer heavy match pages time out.
+    assert make_settings().scrape_nav_timeout_ms == 30000
+    assert make_settings().scrape_nav_timeout_ms > 15000
 
 
 def test_out_of_range_pacing_knob_via_env_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -500,6 +500,102 @@ async def test_client_non_json_200_raises_arcadia_error() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Transient HTTP-status retry (429 / 5xx) — robustness, no live network.
+# tenacity's backoff sleeps via asyncio.sleep; neutralize it so the retry
+# attempts run instantly without any real wall-clock wait.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def _no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    async def _instant(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _instant)
+
+
+@pytest.mark.usefixtures("_no_backoff_sleep")
+@pytest.mark.parametrize("transient_status", [429, 500, 502, 503, 504])
+async def test_client_retries_transient_status_then_succeeds(transient_status: int) -> None:
+    # A momentary upstream 429/5xx must be retried (not turned into an immediate
+    # "no data this cycle"): two transient responses, then a 200 -> success.
+    payload = [_tennis_matchup()]
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(transient_status)
+        return httpx.Response(200, content=json.dumps(payload))
+
+    client = _make_client(handler)
+    rows = await client.fetch_matchups(SPORT_IDS["tennis"])
+    assert rows == payload
+    assert calls["n"] == 3  # two transient failures retried, third attempt won
+
+
+@pytest.mark.usefixtures("_no_backoff_sleep")
+@pytest.mark.parametrize("transient_status", [429, 503])
+async def test_client_exhausts_transient_retries_then_raises_arcadia_error(
+    transient_status: int,
+) -> None:
+    # A persistently-transient status must, after exhausting attempts, surface as
+    # the normal PinnacleArcadiaError (so per-sport isolation/dedupe is unchanged)
+    # — carrying status only, never the URL or key.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(transient_status)
+
+    client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
+    with pytest.raises(PinnacleArcadiaError) as excinfo:
+        await client.fetch_matchups(33)
+    assert calls["n"] == 3  # stop_after_attempt(3): the status WAS retried
+    msg = str(excinfo.value)
+    assert str(transient_status) in msg  # status is reported (honest)
+    assert "SECRET-LOOKING-KEY" not in msg
+    assert "arcadia.pinnacle" not in msg
+
+
+@pytest.mark.usefixtures("_no_backoff_sleep")
+@pytest.mark.parametrize("permanent_status", [400, 401, 403, 404, 422])
+async def test_client_does_not_retry_permanent_4xx(permanent_status: int) -> None:
+    # A permanent 4xx is a real error, not a hiccup: it must NOT be retried
+    # (retrying burns budget for nothing) and must raise immediately.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(permanent_status)
+
+    client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
+    with pytest.raises(PinnacleArcadiaError) as excinfo:
+        await client.fetch_matchups(33)
+    assert calls["n"] == 1  # exactly one call — no retry on a permanent 4xx
+    msg = str(excinfo.value)
+    assert "SECRET-LOOKING-KEY" not in msg
+    assert "arcadia.pinnacle" not in msg
+
+
+@pytest.mark.usefixtures("_no_backoff_sleep")
+async def test_fetch_sports_retries_transient_status() -> None:
+    # The /sports discovery path shares the retry: a transient 503 then 200.
+    payload = [{"id": 29, "name": "Soccer", "isHidden": False, "matchupCount": 5}]
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            return httpx.Response(503)
+        return httpx.Response(200, content=json.dumps(payload))
+
+    live = await _make_client(handler).fetch_sports()
+    assert live == {"soccer": 29}
+    assert calls["n"] == 2
+
+
+# --------------------------------------------------------------------------- #
 # Dynamic sport discovery (GET /sports — live sports only)
 # --------------------------------------------------------------------------- #
 def test_sport_ids_carry_the_verified_public_ids() -> None:

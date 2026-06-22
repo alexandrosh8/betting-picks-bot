@@ -449,6 +449,50 @@ def _patch_upstream_quirks() -> None:
     _upstream_patched = True
 
 
+# OddsHarvester 0.3.0 hardcodes the match-page Page.goto timeout as the module
+# constant NAVIGATION_TIMEOUT_MS (15000ms) in oddsharvester/utils/constants.py;
+# base_scraper.py imports it BY NAME, so scrape_match()'s goto reads
+# base_scraper.NAVIGATION_TIMEOUT_MS. 15s is too tight for OddsPortal's heavy
+# match pages, so one slow page raises "Timeout 15000ms exceeded" and that match
+# is skipped (recovered next cycle). The constant is NOT env-configurable, so we
+# raise it here at the loader boundary. This is a DOCUMENTED, guarded override —
+# only ever INCREASING a timeout (never an anti-bot bypass), strictly read-only.
+def _apply_nav_timeout_override(timeout_ms: int | None) -> None:
+    """Raise OddsHarvester's hardcoded match-page navigation timeout.
+
+    ``None`` keeps the upstream default untouched (the extras-free path imports
+    nothing). Otherwise rebinds the module global the goto call actually reads
+    (``base_scraper.NAVIGATION_TIMEOUT_MS``) plus the source constant. Guarded:
+    if a future oddsharvester drops/renames the constant, it degrades to a
+    type-only WARNING and the scrape proceeds on whatever the library uses — the
+    override can never break the read-only scrape.
+    """
+    if timeout_ms is None:
+        return
+    try:
+        from oddsharvester.core import base_scraper
+        from oddsharvester.utils import constants
+
+        applied = False
+        for module in (base_scraper, constants):
+            # Only rebind a constant that already exists — never invent one.
+            if hasattr(module, "NAVIGATION_TIMEOUT_MS"):
+                module.NAVIGATION_TIMEOUT_MS = timeout_ms
+                applied = True
+        if applied:
+            logger.info("oddsportal match-page navigation timeout set to %dms", timeout_ms)
+        else:
+            logger.warning(
+                "oddsportal nav-timeout override skipped: NAVIGATION_TIMEOUT_MS not found "
+                "in oddsharvester (version change?) — using the library default"
+            )
+    except Exception as exc:  # import/attr failure must never break the scrape
+        logger.warning(
+            "oddsportal nav-timeout override failed: %s — using the library default",
+            type(exc).__name__,
+        )
+
+
 async def _default_scrape(**kwargs: Any) -> Any:
     """Call OddsHarvester's run_scraper as-is (lazy import)."""
     register_extra_leagues()
@@ -483,6 +527,7 @@ class OddsPortalLoader:
         request_delay: float = 1.0,
         locale: str = "en-GB",
         proxy_pool: Sequence[ScraperProxy] = (),
+        nav_timeout_ms: int | None = None,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -540,6 +585,11 @@ class OddsPortalLoader:
         # surfaces it as a degraded poll on /health.
         self.last_fetch_matches: dict[str, int] = {}
         self.last_fetch_event_ids: dict[str, tuple[str, ...]] = {}
+        # Apply the wider match-page navigation timeout once, at the loader
+        # boundary (None = keep OddsHarvester's too-tight 15s default). Guarded
+        # and read-only; see _apply_nav_timeout_override.
+        self._nav_timeout_ms = nav_timeout_ms
+        _apply_nav_timeout_override(nav_timeout_ms)
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)

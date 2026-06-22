@@ -28,6 +28,7 @@ pytest.importorskip(
 from app.ingestion.base import EventDirectory  # noqa: E402
 from app.ingestion.oddsportal import (  # noqa: E402
     OddsPortalLoader,
+    _apply_nav_timeout_override,
     _ExchangeIncompleteOddsFilter,
     _is_real_more_button,
     _patch_upstream_quirks,
@@ -533,6 +534,89 @@ def test_patch_guard_rejects_unverified_upstream_version(
     monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.4.0")
     with pytest.raises(RuntimeError, match=r"oddsharvester 0\.4\.0 != 0\.3\.0"):
         _patch_upstream_quirks()
+
+
+def test_apply_nav_timeout_override_raises_the_15s_match_page_timeout() -> None:
+    """The headline robustness lever for issue 1: OddsHarvester hardcodes a 15s
+    match-page Page.goto timeout (NAVIGATION_TIMEOUT_MS), not env-configurable.
+    The override rebinds the binding base_scraper.scrape_match actually reads
+    (the module-level name imported there), AND the source constant."""
+    import oddsharvester.core.base_scraper as base_scraper
+    import oddsharvester.utils.constants as constants
+
+    original_base = base_scraper.NAVIGATION_TIMEOUT_MS
+    original_const = constants.NAVIGATION_TIMEOUT_MS
+    assert original_base == 15000  # upstream's too-tight default (pinned 0.3.0)
+    try:
+        _apply_nav_timeout_override(30000)
+        # base_scraper.scrape_match() reads its OWN module global at goto time —
+        # that exact binding must change, or the override is a no-op.
+        assert base_scraper.NAVIGATION_TIMEOUT_MS == 30000
+        assert constants.NAVIGATION_TIMEOUT_MS == 30000
+    finally:
+        base_scraper.NAVIGATION_TIMEOUT_MS = original_base
+        constants.NAVIGATION_TIMEOUT_MS = original_const
+
+
+def test_apply_nav_timeout_override_none_is_a_noop() -> None:
+    """None = keep upstream's default untouched (extras-free path imports
+    nothing extra and the byte-for-byte legacy behaviour is preserved)."""
+    import oddsharvester.core.base_scraper as base_scraper
+
+    original = base_scraper.NAVIGATION_TIMEOUT_MS
+    try:
+        _apply_nav_timeout_override(None)
+        assert original == base_scraper.NAVIGATION_TIMEOUT_MS
+    finally:
+        base_scraper.NAVIGATION_TIMEOUT_MS = original
+
+
+def test_apply_nav_timeout_override_is_guarded_against_lib_change(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If a future oddsharvester drops the constant, the override must degrade
+    gracefully (log, no crash) — it can never break the read-only scrape."""
+    import oddsharvester.core.base_scraper as base_scraper
+    import oddsharvester.utils.constants as constants
+
+    monkeypatch.delattr(base_scraper, "NAVIGATION_TIMEOUT_MS", raising=False)
+    monkeypatch.delattr(constants, "NAVIGATION_TIMEOUT_MS", raising=False)
+    with caplog.at_level(logging.WARNING, logger="app.ingestion.oddsportal"):
+        _apply_nav_timeout_override(30000)  # must NOT raise
+    assert not hasattr(base_scraper, "NAVIGATION_TIMEOUT_MS")  # nothing created
+
+
+def test_loader_applies_nav_timeout_override_on_construction() -> None:
+    """The loader is the boundary: constructing it with nav_timeout_ms applies
+    the override so every match-page goto inherits the wider budget."""
+    import oddsharvester.core.base_scraper as base_scraper
+
+    original = base_scraper.NAVIGATION_TIMEOUT_MS
+    try:
+        OddsPortalLoader(
+            directory=EventDirectory(),
+            leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+            days_ahead=0,
+            nav_timeout_ms=45000,
+        )
+        assert base_scraper.NAVIGATION_TIMEOUT_MS == 45000
+    finally:
+        base_scraper.NAVIGATION_TIMEOUT_MS = original
+
+
+def test_loader_without_nav_timeout_leaves_upstream_default() -> None:
+    import oddsharvester.core.base_scraper as base_scraper
+
+    original = base_scraper.NAVIGATION_TIMEOUT_MS
+    try:
+        OddsPortalLoader(
+            directory=EventDirectory(),
+            leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+            days_ahead=0,
+        )
+        assert original == base_scraper.NAVIGATION_TIMEOUT_MS
+    finally:
+        base_scraper.NAVIGATION_TIMEOUT_MS = original
 
 
 def test_patch_upstream_quirks_applies_and_is_idempotent() -> None:

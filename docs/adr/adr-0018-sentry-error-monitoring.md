@@ -1,6 +1,10 @@
 # ADR-0018 — Sentry error monitoring (opt-in, secret-scrubbed)
 
-- **Status:** Accepted (2026-06-22)
+- **Status:** Superseded — the Sentry integration was **removed entirely on
+  2026-06-22** at the user's request (it was a temporary local diagnostic). No
+  `app/observability.py`, no `sentry-sdk` dependency, no `SENTRY_*` settings
+  remain. This ADR is kept only as decision history. (Originally Accepted
+  2026-06-22.)
 - **Relates to:** the logging-hygiene rules in CLAUDE.md (never log URLs /
   stringified HTTP exceptions whose query strings carry API keys) and the
   no-secrets-in-memory/docs rule. Code: `app/observability.py`.

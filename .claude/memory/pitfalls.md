@@ -109,4 +109,4 @@ dependencies]`: `football` (penaltyblog → `app/models/football_dc.py`),
   `ModuleNotFoundError` (penaltyblog, playwright) and the football/extra test
   suites silently SKIP. To add a dependency without breaking the env, run
   `uv add <pkg>` or follow a bare sync with `uv sync --all-extras`. (Hit
-  2026-06-22 adding sentry-sdk; restored with `uv sync --all-extras`.)
+  2026-06-22 adding a dependency; restored with `uv sync --all-extras`.)

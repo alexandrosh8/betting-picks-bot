@@ -54,7 +54,10 @@ def devig(
     elif method is DevigMethod.SHIN:
         p = _shin(q)
     elif method is DevigMethod.ODDS_RATIO:
-        p = _odds_ratio(q)
+        # ODDS_RATIO is a constant logit shift == LOGARITHMIC; route through the
+        # logarithmic solver (robust bracket + underround branch) so the two can
+        # never diverge on extreme-overround books (audit #2).
+        p = _logarithmic(q)
     elif method is DevigMethod.LOGARITHMIC:
         p = _logarithmic(q)
     elif method is DevigMethod.DIFFERENTIAL_MARGIN:
@@ -101,29 +104,6 @@ def _power(q: _FloatArray) -> _FloatArray:
         return _multiplicative(q)
 
 
-def _odds_ratio(q: _FloatArray) -> _FloatArray:
-    """Keith Cheung's odds-ratio method (Buchdahl, Wisdom of the Crowds):
-    p_i = q_i / (c + q_i - c*q_i), c solved so probabilities sum to 1.
-
-    NOTE: mathematically identical to _logarithmic — constant odds-ratio
-    scaling IS a constant logit shift (logit(p) = logit(q) - ln c). Both are
-    kept for parity with penaltyblog's method names; sweeps will show
-    identical rows for the two (tests/test_devig.py locks this in)."""
-
-    def probs_for(c: float) -> _FloatArray:
-        return q / (c + q - c * q)
-
-    def f(c: float) -> float:
-        return float(1.0 - probs_for(c).sum())
-
-    try:
-        c = float(brentq(f, 1e-9, 100.0, xtol=1e-12))
-        return probs_for(c)
-    except ValueError:
-        logger.warning("odds-ratio devig solve failed (booksum=%.6f); falling back", q.sum())
-        return _multiplicative(q)
-
-
 def _logarithmic(q: _FloatArray) -> _FloatArray:
     """Additive shift in logit space: logit(p_i) = logit(q_i) - c, with c
     solved so probabilities sum to 1 (penaltyblog's 'logarithmic')."""
@@ -147,8 +127,14 @@ def _logarithmic(q: _FloatArray) -> _FloatArray:
 
 
 def _differential_margin(odds: _FloatArray, q: _FloatArray) -> _FloatArray:
-    """Buchdahl's differential margin weighting: the overround is distributed
-    proportionally to the odds — fair_odds_i = n*odds_i / (n - margin*odds_i)."""
+    """Buchdahl's differential margin weighting.
+
+    Despite the name, p_i = (n - margin*odds_i)/(n*odds_i) = 1/odds_i - margin/n:
+    the odds term CANCELS, so the margin is removed EQUALLY in probability space —
+    i.e. this method coincides with the additive method (and matches penaltyblog's
+    DIFFERENTIAL_MARGIN_WEIGHTING, which likewise equals its additive). Output is
+    correct (sums to 1, order-preserving); the historical 'distributed
+    proportionally to the odds' description was wrong (audit #4)."""
     margin = q.sum() - 1.0
     n = float(odds.size)
     denom = n - margin * odds

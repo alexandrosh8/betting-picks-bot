@@ -137,12 +137,16 @@ def test_shin_underround_falls_back_quietly(caplog: pytest.LogCaptureFixture) ->
 
 
 def test_odds_ratio_and_logarithmic_are_equivalent_methods() -> None:
-    # Mathematical identity, not a bug: constant odds-ratio scaling
-    # p = q/(c + q - c*q) IS a constant logit shift
-    # (logit(p) = logit(q) - ln c), so both solvers find the same root.
-    # Locked as a test so a backtest sweep showing identical rows for the
-    # two methods is never mistaken for a dispatch defect.
-    for odds in ([2.6, 2.4, 4.3], [1.5, 2.74], [2.05, 3.6, 3.55, 8.0]):
+    # ODDS_RATIO is a constant logit shift == LOGARITHMIC and is now implemented
+    # by routing through the logarithmic solver (audit #2), so the two can never
+    # diverge — including on the fat-margin many-outcome book where the old
+    # odds-ratio bracket [1e-9, 100] would raise and silently fall back.
+    for odds in (
+        [2.6, 2.4, 4.3],
+        [1.5, 2.74],
+        [2.05, 3.6, 3.55, 8.0],
+        [1.2, 5.0, 8.0, 15.0, 30.0],  # extreme overround (audit #2 divergence trigger)
+    ):
         a = devig(odds, method=DevigMethod.ODDS_RATIO)
         b = devig(odds, method=DevigMethod.LOGARITHMIC)
         assert a == pytest.approx(b, abs=1e-9)

@@ -188,10 +188,12 @@ class Settings(BaseSettings):
     min_liquidity: float = 0.0
 
     # --- Recommended stake sizing (informational only) ------------------------
-    bankroll_base: float = 1000.0
-    fractional_kelly: float = 0.25
-    max_recommended_stake_percent: float = 0.02
-    max_daily_exposure_percent: float = 0.05
+    # Bounds-validated (audit #1): a fat-fingered .env (e.g. 5 read as 500%)
+    # must NOT silently inflate recommended stakes past the safety envelope.
+    bankroll_base: float = Field(default=1000.0, gt=0.0)
+    fractional_kelly: float = Field(default=0.25, gt=0.0, le=1.0)
+    max_recommended_stake_percent: float = Field(default=0.02, gt=0.0, le=1.0)
+    max_daily_exposure_percent: float = Field(default=0.05, gt=0.0, le=1.0)
 
     # --- Alerts ----------------------------------------------------------------
     telegram_bot_token: str = ""
@@ -634,6 +636,15 @@ class Settings(BaseSettings):
                 "manual-betting decision-support platform, not a paper-trading "
                 "system (CLAUDE.md safety table / ADR-0002)."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_stake_caps_coherent(self) -> "Settings":
+        # Field bounds above already reject <=0 / >1 cap values; this guards the
+        # cross-field invariant so the per-bet cap can never exceed (and thus
+        # void) the daily exposure ceiling (audit #1).
+        if self.max_recommended_stake_percent > self.max_daily_exposure_percent:
+            raise ValueError("MAX_RECOMMENDED_STAKE_PERCENT must be <= MAX_DAILY_EXPOSURE_PERCENT")
         return self
 
     @model_validator(mode="after")

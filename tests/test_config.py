@@ -27,6 +27,38 @@ def test_defaults_are_safe_and_load() -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
+        {"max_recommended_stake_percent": 5.0},  # 500% — fat-fingered .env (audit #1)
+        {"max_recommended_stake_percent": 0.0},
+        {"max_recommended_stake_percent": -0.1},
+        {"max_daily_exposure_percent": 1.5},
+        {"max_daily_exposure_percent": 0.0},
+        {"fractional_kelly": 1.5},
+        {"fractional_kelly": 0.0},
+        {"bankroll_base": 0.0},
+        {"bankroll_base": -100.0},
+        # recommended per-bet cap must never exceed the daily cap
+        {"max_recommended_stake_percent": 0.10, "max_daily_exposure_percent": 0.05},
+    ],
+)
+def test_stake_caps_out_of_bounds_rejected(overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**overrides)
+
+
+def test_stake_caps_within_bounds_accepted() -> None:
+    s = make_settings(
+        bankroll_base=1000.0,
+        fractional_kelly=0.25,
+        max_recommended_stake_percent=0.02,
+        max_daily_exposure_percent=0.05,
+    )
+    assert s.max_recommended_stake_percent == 0.02
+    assert s.max_daily_exposure_percent == 0.05
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
         {"auto_betting": True},
         {"bet_execution_enabled": True},
         {"picks_only": False},

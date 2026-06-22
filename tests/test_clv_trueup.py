@@ -370,6 +370,79 @@ async def test_capture_finished_scores_skips_in_play_match(factory) -> None:  # 
         assert ev.scraped_home_score is None  # no in-play score recorded
 
 
+async def test_capture_finished_scores_commits_before_a_later_link_stalls(  # type: ignore[no-untyped-def]
+    factory,
+) -> None:
+    # PRODUCTION BUG (cactusbets.cloud): on a slow VPS the finished-score scrape
+    # of a LATER link hangs/raises, and because scores were only committed AFTER
+    # the whole batch fetched, every already-scraped FINISHED score was lost —
+    # the RESULTS tab showed "awaiting result" for games finished days ago.
+    #
+    # The fix scrapes + commits PER LINK with a per-link timeout, so an
+    # already-scraped final score is durable even when a later link never
+    # returns. This test scrapes a finished pick FIRST, then a poison link that
+    # raises: the good score must still land AND grade to a provisional_outcome.
+    from datetime import timedelta
+
+    from app.clv_trueup import capture_finished_scores
+    from app.ingestion.base import EventDirectory
+    from app.storage.models import Event
+    from app.storage.repositories import _provisional_result_fields
+
+    good_ref = "https://www.oddsportal.com/football/world/a/good-fc-vs-bad-fc/AA1/"
+    poison_ref = "https://www.oddsportal.com/football/world/b/slow-fc-vs-hang-fc/BB2/"
+    async with factory() as session:
+        await session.execute(
+            sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+        )
+        for ref in (good_ref, poison_ref):
+            await persist_pick(
+                session,
+                make_pick(ref),
+                # 5h past kickoff -> past the soccer FINISHED floor (3.5h).
+                EventTeams(home="Home FC", away="Away FC", starts_at=NOW - timedelta(hours=5)),
+                "value-sharp-vs-soft",
+                "v2-test",
+            )
+        await session.commit()
+
+    directory = EventDirectory()
+
+    class FlakyLoader(FakeLoader):
+        # Mirrors the production failure: the first finished link scrapes fine,
+        # a later one hangs. fetch_match_odds is invoked per-link by the fixed
+        # capture path; the poison link raises (a stalled/failed proxy request).
+        async def fetch_match_odds(self, sport_key, match_links, markets=None):  # type: ignore[no-untyped-def]
+            if poison_ref in match_links:
+                raise TimeoutError("simulated hung proxy request on a later link")
+            for ref in match_links:
+                directory.register(
+                    ref,
+                    EventTeams(home="Home FC", away="Away FC", home_score=2, away_score=1),
+                )
+            return []
+
+    written = await capture_finished_scores(FlakyLoader([]), factory, directory, "soccer", now=NOW)
+    # The good finished score committed despite the later link stalling.
+    assert written == 1
+    async with factory() as session:
+        good = await session.scalar(select(Event).where(Event.external_ref == good_ref))
+        assert good is not None
+        assert good.scraped_home_score == 2
+        assert good.scraped_away_score == 1
+        # And it produces a provisional_outcome -> the dashboard RESULTS tab can
+        # grade it instead of showing "awaiting result".
+        pick = await session.scalar(select(Pick).where(Pick.event_id == good.id))
+        assert pick is not None
+        fields = _provisional_result_fields(pick, "Home FC", "Away FC", 2, 1)
+        assert fields["provisional_outcome"] == "won"  # 2-1, picked Home FC
+
+        # The poison link never scored — it is simply retried next cycle.
+        poison = await session.scalar(select(Event).where(Event.external_ref == poison_ref))
+        assert poison is not None
+        assert poison.scraped_home_score is None
+
+
 async def test_offwindow_skips_picks_already_covered_by_cycle(factory) -> None:  # type: ignore[no-untyped-def]
     from datetime import timedelta
 

@@ -57,7 +57,12 @@ logger = logging.getLogger(__name__)
 #: is a ceiling; an overrunning cycle coalesces the next slot). CRON jobs
 #: (settle_results / refit / snapshot / upstream_watch) are NOT here — a skip
 #: there is a real signal and stays a WARNING.
-_CONTINUOUS_POLL_JOBS = ("poll_odds", "capture_pinnacle_arcadia", "capture_betfair_exchange")
+_CONTINUOUS_POLL_JOBS = (
+    "poll_odds",
+    "capture_pinnacle_arcadia",
+    "capture_betfair_exchange",
+    "capture_finished_scores",
+)
 
 
 class _PollSkipNoiseFilter(logging.Filter):
@@ -431,26 +436,55 @@ def build_scheduler(
         # cycle on the cycle's own snapshots (app/pipeline.py) — a separate
         # 30-min fetch job would just double the scraping load.
 
+    async def capture_finished_scores_job() -> None:
+        # DEDICATED finished-score scrape (cactusbets.cloud prod fix, 2026-06-22).
+        # Runs on its OWN light interval (RESULTS_SCRAPE_INTERVAL_SECONDS),
+        # SEPARATE from the heavy odds-polling pass, so finished scores land —
+        # and picks settle — promptly even when a full odds cycle is slow. The
+        # old design welded this scrape onto the hourly settle_results cron; one
+        # slow league there starved every later run (max_instances=1) and scores
+        # never committed. Each finished link is now scraped + committed
+        # individually under a per-link timeout, with a per-cycle time budget, so
+        # a single hung VPS proxy request cannot stall the pass. OddsPortalLoader
+        # only (others no-op via the fetch_match_odds duck-type). Per-sport error
+        # isolation: one sport failing never blocks the rest.
+        if (
+            session_factory is None
+            or not settings.settle_from_scraped_scores
+            or loader is None
+            or directory is None
+        ):
+            return
+        from app.clv_trueup import capture_finished_scores
+
+        for sport_key in sport_keys:
+            try:
+                await capture_finished_scores(
+                    loader,
+                    session_factory,
+                    directory,
+                    sport_key,
+                    per_link_timeout=settings.results_scrape_link_timeout_seconds,
+                    time_budget=settings.results_scrape_cycle_budget_seconds,
+                )
+            except Exception as exc:
+                logger.error("results scrape failed for %s: %s", sport_key, type(exc).__name__)
+
     async def settle_results() -> None:
         # Phase 4: free results sources -> outcome mapping -> result_tracking.
         # Leagues without a free results feed (nba, euroleague) settle
         # manually via POST /events/{id}/result on the dashboard.
+        #
+        # The finished-score SCRAPE now runs in its OWN job
+        # (capture_finished_scores_job) on a lighter, more-frequent interval —
+        # this job only CONSUMES the Event.scraped_* scores it already committed
+        # (run_settlement_cycle reads them from the DB independently). Decoupling
+        # the two means a slow scrape can never starve settlement, and settlement
+        # never blocks the scrape.
         if session_factory is None:
             logger.info("settle_results: no DB session factory; skipping")
             return
         from app.settlement.engine import run_settlement_cycle
-
-        # FIRST capture final scores for finished, still-open picks from their
-        # match pages (leagues with no free results feed) so they auto-settle
-        # THIS cycle — no manual entry. OddsPortalLoader only; others no-op.
-        if settings.settle_from_scraped_scores and loader is not None and directory is not None:
-            from app.clv_trueup import capture_finished_scores
-
-            for sport_key in sport_keys:
-                try:
-                    await capture_finished_scores(loader, session_factory, directory, sport_key)
-                except Exception as exc:
-                    logger.error("results scrape failed for %s: %s", sport_key, type(exc).__name__)
 
         try:
             await run_settlement_cycle(
@@ -491,6 +525,30 @@ def build_scheduler(
         coalesce=True,
         misfire_grace_time=None,  # run on Mac wake, don't skip
     )
+    # DEDICATED finished-score scrape on its OWN light interval, decoupled from
+    # both the heavy odds poll and the hourly settle cron (cactusbets.cloud prod
+    # fix). Only registered when the source can actually scrape match pages
+    # (oddsportal loader + directory + DB) and the feature is on; otherwise the
+    # job would be a no-op every interval. max_instances=1 + coalesce: an
+    # overrunning scrape coalesces the next slot (its per-cycle budget bounds the
+    # run). A DateTrigger run at startup clears any existing backlog promptly.
+    if (
+        session_factory is not None
+        and settings.settle_from_scraped_scores
+        and loader is not None
+        and directory is not None
+    ):
+        scheduler.add_job(
+            capture_finished_scores_job,
+            IntervalTrigger(seconds=settings.results_scrape_interval_seconds),
+            id="capture_finished_scores",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=None,  # run on Mac wake, don't skip
+        )
+        scheduler.add_job(
+            capture_finished_scores_job, DateTrigger(), id="capture_finished_scores_initial"
+        )
     scheduler.add_job(snapshot_bankroll, CronTrigger(hour=0, minute=30), id="snapshot_bankroll")
     scheduler.add_job(
         upstream_watch,

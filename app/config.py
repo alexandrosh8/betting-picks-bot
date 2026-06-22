@@ -619,6 +619,26 @@ class Settings(BaseSettings):
     # lives on the pick's OWN event so settlement matches it exactly (no
     # cross-source name risk). Feed/ESPN scores still take precedence. Default ON.
     settle_from_scraped_scores: bool = True
+    # Dedicated finished-score scrape job cadence (seconds). The finished-score
+    # pass (capture_finished_scores) runs on its OWN light interval job —
+    # SEPARATE from the heavy odds-polling pass — so results settle promptly even
+    # when a full odds cycle is slow (the cactusbets.cloud prod gap: a 30-min+
+    # odds cycle starved the hourly settle job and scores never landed). Each
+    # finished link is scraped + committed individually under the per-link
+    # timeout below. Default 15 min; >=60s floor blocks hammering-by-typo on a
+    # free scraped source. PROD-SAFE WITH NO CONFIG.
+    results_scrape_interval_seconds: int = Field(default=900, ge=60)
+    # Per-LINK match-page scrape timeout (seconds) for the finished-score pass.
+    # One hung VPS proxy request must not stall the whole pass — each link runs
+    # under its own asyncio.wait_for and a timeout drops just that link (retried
+    # next cycle). Generous (heavy OddsPortal pages) but finite; bounds fail fast.
+    results_scrape_link_timeout_seconds: float = Field(default=90.0, ge=10.0, le=300.0)
+    # Per-CYCLE wall-clock budget (seconds) for the finished-score pass. When
+    # spent, the pass STOPS CLEANLY (everything committed so far is durable; the
+    # remainder drains next cycle) so one big backlog of slow pages can't run
+    # unbounded. Default 10 min; cap keeps a typo from letting a cycle run for
+    # hours. Should comfortably exceed one link timeout.
+    results_scrape_cycle_budget_seconds: float = Field(default=600.0, ge=30.0, le=3600.0)
 
     # Opt-in EXPERIMENTAL picks for UNVALIDATED sports (tennis, american_football).
     # OFF by default (committed) — these sports have not cleared the > 2 SE

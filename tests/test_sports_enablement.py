@@ -514,3 +514,54 @@ async def test_scheduler_omits_nfl_when_leagues_unset() -> None:
     async with httpx.AsyncClient() as client:
         scheduler = build_scheduler(settings, client, redis)
     assert any(job.id == "poll_odds" for job in scheduler.get_jobs())
+
+
+async def test_finished_score_job_registered_on_its_own_interval() -> None:
+    # cactusbets.cloud prod fix: the finished-score scrape runs on its OWN light
+    # interval job (separate from the heavy odds poll + the hourly settle cron),
+    # so results settle promptly even when an odds cycle is slow. With a DB
+    # session factory and the default settings, the dedicated interval job + its
+    # startup-backlog DateTrigger run must both be registered.
+    import fakeredis.aioredis as fakeredis
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    from app.scheduler import build_scheduler
+
+    redis = fakeredis.FakeRedis()
+    settings = make_settings()  # SETTLE_FROM_SCRAPED_SCORES on by default
+    session_factory = object()  # build only checks `is not None`; never called here
+    async with httpx.AsyncClient() as client:
+        scheduler = build_scheduler(settings, client, redis, session_factory=session_factory)  # type: ignore[arg-type]
+    jobs = {job.id: job for job in scheduler.get_jobs()}
+    assert "capture_finished_scores" in jobs
+    assert "capture_finished_scores_initial" in jobs  # startup backlog clear
+    trigger = jobs["capture_finished_scores"].trigger
+    assert isinstance(trigger, IntervalTrigger)
+    assert trigger.interval.total_seconds() == settings.results_scrape_interval_seconds
+
+
+async def test_finished_score_job_absent_without_db_session() -> None:
+    # No DB session factory -> the dedicated finished-score scrape can persist
+    # nothing, so the job is not registered (it would no-op every interval).
+    import fakeredis.aioredis as fakeredis
+
+    from app.scheduler import build_scheduler
+
+    redis = fakeredis.FakeRedis()
+    async with httpx.AsyncClient() as client:
+        scheduler = build_scheduler(make_settings(), client, redis)
+    assert all(job.id != "capture_finished_scores" for job in scheduler.get_jobs())
+
+
+async def test_finished_score_job_absent_when_feature_disabled() -> None:
+    # SETTLE_FROM_SCRAPED_SCORES off -> no dedicated finished-score job even with
+    # a DB session: the operator turned the scraped-score settlement path off.
+    import fakeredis.aioredis as fakeredis
+
+    from app.scheduler import build_scheduler
+
+    redis = fakeredis.FakeRedis()
+    settings = make_settings(settle_from_scraped_scores=False)
+    async with httpx.AsyncClient() as client:
+        scheduler = build_scheduler(settings, client, redis, session_factory=object())  # type: ignore[arg-type]
+    assert all(job.id != "capture_finished_scores" for job in scheduler.get_jobs())

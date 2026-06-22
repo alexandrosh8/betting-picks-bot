@@ -15,7 +15,9 @@ scraped — no second scrape. Track stake-weighted CLV: a strategy version is
 only trusted while it stays positive (docs/backtesting/value-findings.md).
 """
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -431,6 +433,63 @@ def _finished_floor(sport_key: str) -> timedelta:
     return _FINISHED_FLOOR.get(sport_key, _FINISHED_FLOOR_DEFAULT)
 
 
+#: Default per-LINK scrape timeout (seconds) for the finished-score pass. One
+#: hung proxy request on a VPS must not stall the whole pass: each match page is
+#: fetched under its own asyncio.wait_for, and a timeout drops just that link
+#: (retried next cycle). Generous — OddsPortal match pages are heavy — but
+#: finite. None at the call boundary = no bound (the default for in-process
+#: callers/tests that pass nothing); the scheduler injects a concrete value.
+RESULTS_SCRAPE_LINK_TIMEOUT_SECONDS = 90.0
+#: Default per-CYCLE wall-clock budget (seconds). Even with per-link timeouts a
+#: long backlog of slow pages could outlast the job's useful window; when the
+#: budget is spent the pass STOPS CLEANLY (already-committed scores are durable,
+#: the remainder drains next cycle). None = no budget.
+RESULTS_SCRAPE_CYCLE_BUDGET_SECONDS = 600.0
+
+
+async def _scrape_one_finished_score(
+    fetch: "Callable[..., Awaitable[object]]",
+    session_factory: "async_sessionmaker",
+    directory: EventDirectory,
+    sport_key: str,
+    ref: str,
+    per_link_timeout: float | None,
+) -> int:
+    """Scrape ONE finished match page and commit its score in its own session.
+
+    Returns 1 when a final score was written, else 0. Isolated by design: the
+    fetch runs under a per-link timeout (a hung/slow proxy request drops just
+    THIS link) and the guarded UPDATE (scraped_home_score IS NULL) keeps the
+    write finished-gated + never-clobbering. Raises nothing the caller must
+    handle for control flow — failures here are caught and logged by the caller
+    so one bad link never blocks the already-committed scores of the others.
+    """
+    coro = fetch(sport_key, [ref])  # registers the final score in `directory`
+    if per_link_timeout is not None:
+        await asyncio.wait_for(coro, timeout=per_link_timeout)
+    else:
+        await coro
+    teams = directory.lookup(ref)
+    if teams is None or teams.home_score is None or teams.away_score is None:
+        return 0
+    async with session_factory() as session:
+        res = await session.execute(
+            update(Event)
+            .where(
+                Event.external_ref == ref,
+                Event.scraped_home_score.is_(None),  # never clobber a recorded score
+            )
+            .values(
+                scraped_home_score=teams.home_score,
+                scraped_away_score=teams.away_score,
+            )
+        )
+        # Commit PER LINK: an already-scraped finished score must survive a
+        # later link hanging/raising or the cycle's time budget running out.
+        await session.commit()
+    return res.rowcount or 0
+
+
 async def capture_finished_scores(
     loader: OddsLoader,
     session_factory: "async_sessionmaker",
@@ -439,6 +498,9 @@ async def capture_finished_scores(
     now: datetime | None = None,
     window: timedelta | None = None,
     limit: int | None = None,
+    *,
+    per_link_timeout: float | None = None,
+    time_budget: float | None = None,
 ) -> int:
     """Re-scrape FINISHED, still-open picks' OddsPortal match pages to capture
     their final SCORE (Event.scraped_*), so leagues with no free results feed
@@ -451,6 +513,14 @@ async def capture_finished_scores(
     writes it via a guarded UPDATE (scraped_home_score IS NULL — never clobbers
     an existing score). Requires fetch_match_odds (OddsPortalLoader); other
     loaders skip. Returns events whose score was written.
+
+    Resilience (cactusbets.cloud prod fix, 2026-06-22): each finished link is
+    scraped + COMMITTED INDIVIDUALLY under a ``per_link_timeout`` (so one hung
+    VPS proxy request can't stall the pass), and a ``time_budget`` ends the
+    cycle cleanly once spent. Both default ``None`` (no bound) for in-process
+    callers/tests; the scheduler injects concrete values from Settings so prod
+    works with no manual config. A per-link failure is logged (type + status
+    only — never the URL) and the link is simply retried next cycle.
     """
     fetch = getattr(loader, "fetch_match_odds", None)
     if fetch is None:
@@ -485,29 +555,48 @@ async def capture_finished_scores(
     links = [r for r in refs if segment is None or f"/{segment}/" in r]
     if not links:
         return 0
-    await fetch(sport_key, links)  # registers final scores in `directory`
     written = 0
-    async with session_factory() as session:
-        for ref in links:
-            teams = directory.lookup(ref)
-            if teams is None or teams.home_score is None or teams.away_score is None:
-                continue
-            res = await session.execute(
-                update(Event)
-                .where(
-                    Event.external_ref == ref,
-                    Event.scraped_home_score.is_(None),  # never clobber a recorded score
-                )
-                .values(
-                    scraped_home_score=teams.home_score,
-                    scraped_away_score=teams.away_score,
-                )
+    timed_out = 0
+    deadline = time.monotonic() + time_budget if time_budget is not None else None
+    for ref in links:
+        if deadline is not None and time.monotonic() >= deadline:
+            # Budget spent: stop CLEANLY. Everything committed so far is durable;
+            # the un-scraped remainder simply drains over the next cycles.
+            logger.info(
+                "results scrape %s: per-cycle time budget (%.0fs) reached after %d "
+                "score(s) — remaining links retried next cycle",
+                sport_key,
+                time_budget,
+                written,
             )
-            written += res.rowcount or 0
-        await session.commit()
-    if written:
+            break
+        try:
+            written += await _scrape_one_finished_score(
+                fetch, session_factory, directory, sport_key, ref, per_link_timeout
+            )
+        except TimeoutError:
+            # asyncio.wait_for raises the builtin TimeoutError (3.11+). A single
+            # hung/slow proxy request — drop just this link; the already-committed
+            # scores of earlier links are untouched.
+            timed_out += 1
+            logger.warning(
+                "results scrape %s: a match-page fetch timed out (>%ss) — "
+                "skipping that link this cycle",
+                sport_key,
+                per_link_timeout,
+            )
+        except Exception as exc:  # one bad link must never block the others
+            logger.error(
+                "results scrape %s: a match-page fetch failed: %s — skipping that link",
+                sport_key,
+                type(exc).__name__,
+            )
+    if written or timed_out:
         logger.info(
-            "results scrape %s: captured %d final score(s) for settlement", sport_key, written
+            "results scrape %s: captured %d final score(s) for settlement%s",
+            sport_key,
+            written,
+            f" ({timed_out} link(s) timed out)" if timed_out else "",
         )
     return written
 

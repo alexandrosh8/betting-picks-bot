@@ -114,6 +114,77 @@ async def void_stale_null_kickoff_picks(
     return voided
 
 
+#: A KNOWN-kickoff pick this old with NO captured score can never settle: the
+#: free results feed (SCORE_WINDOW) AND the finished-score scrape
+#: (RESULTS_SCRAPE_WINDOW, 14d) have both stopped covering it. Without a void
+#: path such a pick sits "awaiting result" forever (the class the prior results
+#: commits fought). 15d = just past the 14d scrape window, so a still-scrapeable
+#: pick is never voided early.
+STALE_UNSETTLEABLE_AGE = timedelta(days=15)
+
+
+async def void_unsettleable_known_kickoff_picks(
+    session: AsyncSession,
+    now: datetime,
+    max_age: timedelta = STALE_UNSETTLEABLE_AGE,
+) -> int:
+    """Void alerted KNOWN-kickoff picks older than `max_age` with NO scraped
+    score — feed + scrape windows are both exhausted, so they can never settle;
+    voiding bounds the awaiting-result tail. Same idempotent terminal shape as
+    void_stale_null_kickoff_picks (result row outcome='void', status 'settled').
+    A pick still inside the scrape window, or one that already carries a scraped
+    score (it settles by score), is left alone. Caller owns the transaction."""
+    cutoff = now - max_age
+    rows = (
+        (
+            await session.execute(
+                select(Pick)
+                .join(Event, Pick.event_id == Event.id)
+                .where(
+                    Pick.status == "alerted",
+                    Event.starts_at.is_not(None),
+                    Event.starts_at < cutoff,
+                    Event.scraped_home_score.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    voided = 0
+    for pick in rows:
+        stake, odds = await _stake_and_odds(session, pick)
+        pnl = pick_pnl(Outcome.VOID, stake, odds)  # stake returned -> 0.00
+        inserted = await session.execute(
+            pg_insert(ResultTracking)
+            .values(
+                pick_id=pick.id,
+                outcome=str(Outcome.VOID),
+                pnl=pnl,
+                roi=pick_roi(pnl, stake),
+                settled_at=now,
+            )
+            .on_conflict_do_nothing(constraint="uq_result_tracking_pick")
+            .returning(ResultTracking.id)
+        )
+        if inserted.scalar_one_or_none() is None:
+            continue  # already settled by a concurrent/manual path
+        pick.status = "settled"
+        logger.info(
+            "voided pick %d (%s %s): no result %d days after kickoff, past the "
+            "scrape window — stake treated as returned",
+            pick.id,
+            pick.market,
+            pick.selection,
+            max_age.days,
+        )
+        voided += 1
+    if voided:
+        await session.flush()
+        logger.info("settlement cycle: %d unsettleable known-kickoff picks voided", voided)
+    return voided
+
+
 async def settle_open_picks(
     session: AsyncSession,
     book: ScoreBook,
@@ -367,6 +438,7 @@ async def run_settlement_cycle(
     # feed outage must not keep dead picks burning revalidation slots.
     async with session_factory() as session:
         await void_stale_null_kickoff_picks(session, now)
+        await void_unsettleable_known_kickoff_picks(session, now)
         await session.commit()
     scores = await load_scores(client, slugs, seasons, on_or_after=(now - SCORE_WINDOW).date())
     # ESPN free scores add basketball / NFL / tennis auto-settlement (soccer

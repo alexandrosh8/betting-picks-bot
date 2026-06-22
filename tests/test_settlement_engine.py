@@ -278,6 +278,71 @@ async def test_void_leaves_known_kickoff_picks_alone(session) -> None:  # type: 
     assert pick.status == "alerted"
 
 
+async def test_voids_unsettleable_known_kickoff_pick(session) -> None:  # type: ignore[no-untyped-def]
+    # A KNOWN-kickoff pick whose game is older than the scrape window with NO
+    # captured score can never settle (feed + scrape both exhausted) -> void it
+    # so it cannot sit "awaiting result" forever. A still-in-window pick, or one
+    # that already carries a scraped score, is left alone.
+    from sqlalchemy import update as sa_update
+
+    from app.settlement.engine import (
+        STALE_UNSETTLEABLE_AGE,
+        void_unsettleable_known_kickoff_picks,
+    )
+    from app.storage.models import Event
+
+    now = datetime.now(tz=UTC)
+    await session.execute(
+        sa_update(Pick).where(Pick.status == "alerted").values(status="paused-for-test")
+    )
+    old = STALE_UNSETTLEABLE_AGE + timedelta(days=1)
+
+    # 1) old + no score -> voidable
+    assert await persist_pick(
+        session,
+        make_pick("evt-unsettle-old"),
+        EventTeams(home=HOME, away=AWAY, starts_at=now - old),
+        "value",
+        "test-v",
+    )
+    old_pick = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    # 2) old but HAS a scraped score -> settles by score, not voided
+    assert await persist_pick(
+        session,
+        make_pick("evt-unsettle-scored", selection="Under 2.5"),
+        EventTeams(home=HOME, away=AWAY, starts_at=now - old),
+        "value",
+        "test-v",
+    )
+    scored = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+    await session.execute(
+        sa_update(Event)
+        .where(Event.external_ref == "evt-unsettle-scored")
+        .values(scraped_home_score=1, scraped_away_score=0)
+    )
+    # 3) recent (still scrapeable) -> not voided
+    assert await persist_pick(
+        session,
+        make_pick("evt-unsettle-recent", selection="Over 3.5"),
+        EventTeams(home=HOME, away=AWAY, starts_at=now - timedelta(days=5)),
+        "value",
+        "test-v",
+    )
+    recent = await session.scalar(select(Pick).order_by(Pick.id.desc()))
+
+    assert await void_unsettleable_known_kickoff_picks(session, now) == 1
+    for p in (old_pick, scored, recent):
+        assert p is not None
+        await session.refresh(p)
+    assert old_pick.status == "settled"
+    assert scored.status == "alerted"  # has a score -> settles normally
+    assert recent.status == "alerted"  # still in window
+    row = await session.scalar(select(ResultTracking).where(ResultTracking.pick_id == old_pick.id))
+    assert row is not None and row.outcome == "void"
+    # idempotent
+    assert await void_unsettleable_known_kickoff_picks(session, now) == 0
+
+
 # --- full cycle (providers -> book -> settle), as the scheduler job runs it ----
 
 

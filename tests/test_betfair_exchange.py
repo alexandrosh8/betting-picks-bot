@@ -670,6 +670,47 @@ async def test_capture_change_gate_emits_once_then_on_move() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capture_accepts_async_targets_fn() -> None:
+    # The production root sources targets from the DB (an ASYNC query); capture
+    # must accept an awaitable-returning targets_fn, not only a sync lambda.
+    # This is the seam the CPU-aware decoupling fix relies on (the DB-sourced
+    # bounded/rotating targets replace last_fetch_event_ids).
+    calls = {"n": 0}
+
+    async def async_targets(sport: str) -> list[MatchTarget]:
+        calls["n"] += 1
+        assert sport == "soccer"
+        return [_target()]
+
+    reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
+    capture = BetfairExchangeCapture(
+        reader,
+        session_factory=None,  # no DB: just prove the async targets_fn is awaited
+        targets_fn=async_targets,
+        sports=("soccer",),
+        now_fn=lambda: NOW,
+    )
+    # session_factory None -> writes nothing, but the async targets_fn must have
+    # been awaited and its one target read (the gate is primed for it).
+    assert await capture.capture_once() == {"soccer": 0}
+    assert calls["n"] == 1
+    # The gate primed under the canonical event_ref from the awaited target.
+    assert (
+        capture._select_fresh(
+            "soccer",
+            _target().event_id,
+            back_quotes_to_snapshots(
+                _target().event_id,
+                await reader.read_back_quotes(_target().url),
+                _teams(),
+                now=NOW,
+            ),
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
 async def test_capture_skips_unsupported_sport() -> None:
     reader = BetfairExchangeReader(min_liquidity=0.0, page_loader=_static_loader(_LIVE_ROW_TOKENS))
     capture = BetfairExchangeCapture(

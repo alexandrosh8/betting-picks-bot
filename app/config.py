@@ -606,6 +606,24 @@ class Settings(BaseSettings):
     # interval just tracks repricings; near kickoff is what matters. The >=30s
     # floor blocks hammering-by-typo on a free scraped source.
     betfair_exchange_poll_interval_seconds: int = Field(default=300, ge=30)
+    # PER-CYCLE TARGET BOUND (CPU-aware, prod fix 2026-06-23). The capture now
+    # sources its match pages from the DB (recent upcoming soccer events with
+    # odds, not yet kicked off) instead of the last COMPLETED full scrape's
+    # event ids — decoupling it from poll_odds completion (one slow CPU-bound
+    # scrape held poll_odds's single slot, so last_fetch_event_ids stayed empty
+    # and the reader saw NO targets, capturing nothing — even £270k-liquidity
+    # majors). Each capture cycle opens at most this many match pages, so the
+    # reader can NEVER try all ~91 pages at once and worsen the CPU overload.
+    # Ordered never-captured-first then stalest-Betfair-capture, so a small bound
+    # ROTATES through the whole slate over successive cycles. Per-cycle page-load
+    # cost == min(this, eligible events). 20 pages / 300s ≈ one page every 15s —
+    # gentle on a CPU-bound box; raise only if the box has spare headroom.
+    betfair_exchange_max_targets_per_cycle: int = Field(default=20, ge=1, le=200)
+    # Only events kicking off within this many hours ahead are eligible targets
+    # (and only those NOT yet started). Bounds the candidate set to the
+    # actionable near slate — far-future fixtures carry thin/!absent exchange
+    # liquidity and would dilute the per-cycle budget. 72h spans a normal slate.
+    betfair_exchange_target_window_hours: int = Field(default=72, ge=1, le=336)
     # When true, the settlement-time snapshot close ALSO injects the captured
     # Betfair Exchange BACK close (EXACT match: the betfair event's external_ref
     # is deterministically "betfair:"+pick_ref, ADR-0015) so incremental CLV can

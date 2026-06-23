@@ -8,6 +8,7 @@ re-poll of the same market state never duplicates rows.
 
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
@@ -43,6 +44,134 @@ if TYPE_CHECKING:
     from app.resolution.shadow import BetfairCoverageOutcome, ShadowOutcome
 
 logger = logging.getLogger(__name__)
+
+
+#: Bookmaker name the Betfair Exchange capture persists under (mirrors
+#: app.ingestion.betfair_exchange.BOOKMAKER). Kept as a local literal so this
+#: read-only query module never imports the ingestion layer.
+_BETFAIR_BOOKMAKER = "Betfair Exchange"
+
+
+@dataclass(frozen=True)
+class BetfairTarget:
+    """One canonical soccer event the Betfair Exchange capture should read this
+    cycle: its OddsPortal match URL (the event identity throughout the platform)
+    plus the team/league/kickoff context the reader needs to persist the row.
+
+    Sourced from the DB (recent upcoming events that already have odds), NOT from
+    the last completed full scrape — so the capture is decoupled from poll_odds
+    completion (the prod wedge: one slow CPU-bound scrape held poll_odds's single
+    slot, so last_fetch_event_ids stayed empty and the reader saw no targets)."""
+
+    external_ref: str  # the OddsPortal match URL (== Event.external_ref)
+    home: str
+    away: str
+    league: str
+    starts_at: datetime | None
+
+
+async def select_betfair_targets(
+    session_factory: "async_sessionmaker",
+    *,
+    sport: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=3),
+    limit: int = 20,
+) -> list[BetfairTarget]:
+    """Bounded, rotating list of canonical ``sport`` events for the Betfair
+    Exchange capture to read THIS cycle — read-only (a single SELECT).
+
+    DECOUPLING (prod fix): targets come from the warehouse, not from the loader's
+    ``last_fetch_event_ids`` (populated only when a poll_odds full scrape
+    COMPLETES). On a CPU-bound box poll_odds skips every slot, so that map stayed
+    empty and the capture got nothing — even £270k-liquidity majors. Sourcing
+    from the DB means a still-open, already-priced event is a target regardless of
+    whether the current scrape finished.
+
+    Eligibility — an event qualifies when it:
+      * is in ``sport`` (the canonical namespace, e.g. "soccer"),
+      * has a navigable OddsPortal URL ref (``http...``; synthetic
+        "home|away|date" ids are skipped — the reader can't open them),
+      * has a KNOWN kickoff strictly in the future and at most ``window`` ahead
+        (NULL kickoff / already-started events are skipped: the pre-match Betfair
+        BACK row is gone and re-reading wastes the scarce per-cycle budget),
+      * already has at least one NON-Betfair odds snapshot (the main scrape
+        priced it — so it is a real, liquid fixture, not a Betfair-only shell).
+
+    BOUND + ROTATION (CPU-aware): ordered never-captured-first, then
+    longest-since-last-Betfair-capture (stalest first), then soonest kickoff,
+    then ref for determinism — and capped at ``limit``. A small ``limit`` over
+    successive cycles sweeps the whole slate (each cycle the freshly-captured
+    events fall to the back), so the capture NEVER opens all ~91 match pages at
+    once. The per-cycle page-load cost is therefore exactly ``min(limit, eligible)``.
+    """
+    now = now or datetime.now(tz=UTC)
+    horizon = now + window
+    home_t = aliased(Team)
+    away_t = aliased(Team)
+    # Latest Betfair Exchange capture time for this event (NULL = never): the
+    # rotation key. Correlated MAX over the SAME canonical event row (Betfair
+    # binds inline onto it, bookmaker="Betfair Exchange").
+    last_betfair = (
+        select(func.max(OddsSnapshot.captured_at))
+        .where(
+            OddsSnapshot.event_id == Event.id,
+            OddsSnapshot.bookmaker == _BETFAIR_BOOKMAKER,
+        )
+        .scalar_subquery()
+    )
+    # The event must have been priced by the MAIN scrape (a non-Betfair snapshot
+    # exists) — otherwise it is not a real liquid fixture to read.
+    has_real_odds = (
+        select(OddsSnapshot.id)
+        .where(
+            OddsSnapshot.event_id == Event.id,
+            OddsSnapshot.bookmaker != _BETFAIR_BOOKMAKER,
+        )
+        .exists()
+    )
+    stmt = (
+        select(
+            Event.external_ref,
+            home_t.name,
+            away_t.name,
+            League.name,
+            Event.starts_at,
+        )
+        .select_from(Event)
+        .join(Sport, Event.sport_id == Sport.id)
+        .join(League, Event.league_id == League.id)
+        .join(home_t, Event.home_team_id == home_t.id)
+        .join(away_t, Event.away_team_id == away_t.id)
+        .where(
+            Sport.key == sport,
+            Event.external_ref.like("http%"),
+            Event.starts_at.is_not(None),
+            Event.starts_at > now,
+            Event.starts_at <= horizon,
+            has_real_odds,
+        )
+        # never-captured first (NULLS FIRST), then stalest capture, then soonest
+        # kickoff, then ref — a total, deterministic rotation order.
+        .order_by(
+            last_betfair.asc().nulls_first(),
+            Event.starts_at.asc(),
+            Event.external_ref.asc(),
+        )
+        .limit(limit)
+    )
+    async with session_factory() as session:
+        rows = (await session.execute(stmt)).all()
+    return [
+        BetfairTarget(
+            external_ref=ref,
+            home=home,
+            away=away,
+            league=league,
+            starts_at=starts_at,
+        )
+        for ref, home, away, league, starts_at in rows
+    ]
 
 
 # Race-safe get-or-create (audit #11): a concurrent inserter may create the same

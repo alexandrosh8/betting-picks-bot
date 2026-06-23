@@ -32,9 +32,10 @@ read-only page loads only.
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -563,14 +564,19 @@ class BetfairExchangeCapture:
         reader: BetfairExchangeReader | None,
         session_factory: async_sessionmaker | None,
         *,
-        targets_fn: Callable[[str], Sequence[MatchTarget]],
+        targets_fn: Callable[[str], Sequence[MatchTarget] | Awaitable[Sequence[MatchTarget]]],
         sports: Sequence[str],
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         """``targets_fn(sport)`` yields the match pages to read this cycle for a
         sport key (e.g. open/upcoming football fixtures with their links). It is
         injected so this module never owns the listing/scheduling policy — the
-        composition root supplies it (and tests supply a static list)."""
+        composition root supplies it (and tests supply a static list).
+
+        It may be SYNC (returns the sequence) or ASYNC (returns an awaitable of
+        it): the production root sources targets from the DB (an async query),
+        while tests inject a plain ``lambda sport: [...]``. ``capture_once``
+        awaits the result only when it is awaitable, so both shapes work."""
         self._reader = reader
         self._session_factory = session_factory
         self._targets_fn = targets_fn
@@ -621,7 +627,10 @@ class BetfairExchangeCapture:
             # "0 of N targets" (read N pages, none Betfair-liquid / all closed).
             targets = 0
             events_with_quotes = 0
-            for target in self._targets_fn(sport):
+            target_list = self._targets_fn(sport)
+            if inspect.isawaitable(target_list):
+                target_list = await target_list
+            for target in target_list:
                 targets += 1
                 try:
                     quotes = await self._reader.read_back_quotes(target.url, outcomes=outcomes)

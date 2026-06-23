@@ -37,6 +37,25 @@ def test_handler_retrieves_and_logs_orphaned_playwright_timeout(caplog) -> None:
     assert all(r.levelno == logging.WARNING for r in caplog.records)  # benign -> WARNING, not ERROR
 
 
+def test_handler_retrieves_target_closed_error(caplog) -> None:  # type: ignore[no-untyped-def]
+    # A SECOND orphaned-future variant seen in prod: the page/browser was closed
+    # mid-op (TargetClosedError, not TimeoutError). Same class — must be handled.
+    from app.ingestion.oddsportal import scrape_loop_exception_handler
+
+    cls = type("TargetClosedError", (Exception,), {"__module__": "playwright._impl._errors"})
+    loop = _FakeLoop()
+    ctx = {
+        "exception": cls("Target page, context or browser has been closed"),
+        "message": "Future exception was never retrieved\nfuture: <Future ...>",
+    }
+    with caplog.at_level(logging.WARNING):
+        scrape_loop_exception_handler(loop, ctx)
+
+    assert loop.delegated == []  # handled, not dumped at ERROR
+    assert any("orphaned" in r.getMessage() for r in caplog.records)
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+
+
 def test_handler_delegates_non_playwright_exceptions() -> None:
     from app.ingestion.oddsportal import scrape_loop_exception_handler
 

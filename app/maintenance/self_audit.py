@@ -25,6 +25,13 @@ from app.storage.models import Event, OddsSnapshot, Pick
 
 logger = logging.getLogger(__name__)
 
+# The sharp-archive captures (Pinnacle arcadia, Betfair Exchange) ingest on their
+# OWN ~60s cadence, independent of the live OddsPortal scrape. They are EXCLUDED
+# from the stale-odds freshness check so it stays a true signal of LIVE (soft-book)
+# ingestion — otherwise the archive heartbeat would keep MAX(ingested_at) fresh and
+# silently mask a dead OddsPortal scrape (code-review finding, pre-merge).
+_SHARP_ARCHIVE_BOOKMAKERS = ("Pinnacle", "Betfair Exchange")
+
 
 @dataclass(frozen=True)
 class Anomaly:
@@ -89,7 +96,11 @@ async def run_self_audit(
                 )
             )
         ) or 0
-        newest = await session.scalar(select(func.max(OddsSnapshot.ingested_at)))
+        newest = await session.scalar(
+            select(func.max(OddsSnapshot.ingested_at)).where(
+                OddsSnapshot.bookmaker.notin_(_SHARP_ARCHIVE_BOOKMAKERS)
+            )
+        )
     return evaluate_anomalies(
         now,
         awaiting_backlog=backlog,

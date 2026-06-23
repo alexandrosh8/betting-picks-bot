@@ -65,12 +65,17 @@ def build_pick_alert(
     v.sharp_fair_prob there) — the model strategy must pass None, its edge
     (p_model - p_fair) does not shrink with the price the same way.
     """
+    # Tier tag: ⭐ PREMIUM (alerted + exposure-reserved) vs 🔵 VOLUME (shadow
+    # tier — tracked for CLV, never reserves exposure). The tier is included in
+    # the dedupe key so a VOLUME alert never suppresses a later PREMIUM *upgrade*
+    # alert for the same market at the same odds (distinct keys, distinct alerts).
+    tier_tag = "⭐ PREMIUM" if pick.tier == "premium" else "🔵 VOLUME"
     raw_key = (
         f"{pick.event_id}|{pick.bookmaker}|{pick.market}|{pick.selection}"
-        f"|{pick.decimal_odds}|{model_name}|{model_version}"
+        f"|{pick.decimal_odds}|{pick.tier}|{model_name}|{model_version}"
     )
     dedupe_key = hashlib.sha256(raw_key.encode()).hexdigest()[:32]
-    title = f"+EV pick: {pick.event} — {pick.selection} @ {pick.decimal_odds:.2f}"
+    title = f"{tier_tag} +EV pick: {pick.event} — {pick.selection} @ {pick.decimal_odds:.2f}"
     fair_odds = 1.0 / pick.fair_probability if pick.fair_probability > 0 else 0.0
     anchor = f" ({pick.anchor_type.title()})" if pick.anchor_type else ""
     value_line: list[str] = []
@@ -82,7 +87,7 @@ def build_pick_alert(
     liq = f" · liquidity {pick.liquidity}" if pick.liquidity is not None else ""
     body = "\n".join(
         [
-            f"🎯 +EV PICK — {pick.event}",
+            f"🎯 {tier_tag} +EV PICK — {pick.event}",
             f"✅ {pick.selection} @ {pick.decimal_odds:.2f} · {pick.bookmaker}",
             "",
             f"📈 Edge {pick.edge:+.1%} · EV {pick.ev:+.1%} · Conf {pick.confidence:.0%}",

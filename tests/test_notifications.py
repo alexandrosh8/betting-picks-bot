@@ -66,6 +66,26 @@ def make_pick() -> PickOut:
     )
 
 
+def test_pick_alert_tags_premium_tier() -> None:
+    alert = build_pick_alert(make_pick())  # default tier="premium"
+    assert "⭐ PREMIUM" in alert.title
+    assert "⭐ PREMIUM" in alert.body
+
+
+def test_pick_alert_tags_volume_tier() -> None:
+    alert = build_pick_alert(make_pick().model_copy(update={"tier": "volume"}))
+    assert "🔵 VOLUME" in alert.title
+    assert "🔵 VOLUME" in alert.body
+
+
+def test_pick_alert_dedupe_key_differs_by_tier() -> None:
+    # A volume alert must NOT suppress a later premium UPGRADE alert at the same
+    # market+odds: the dedupe key includes the tier so the two are distinct.
+    premium = make_pick()  # tier="premium"
+    volume = make_pick().model_copy(update={"tier": "volume"})
+    assert build_pick_alert(premium).dedupe_key != build_pick_alert(volume).dedupe_key
+
+
 async def test_duplicate_alert_suppressed() -> None:
     sink = RecordingSink()
     dispatcher = AlertDispatcher([sink], InMemoryIdempotencyStore())

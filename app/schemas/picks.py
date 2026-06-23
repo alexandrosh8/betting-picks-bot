@@ -50,7 +50,8 @@ class PickOut(InternalModel):
     liquidity: float | None = None
     reason_summary: str
     # "premium" (edge >= VALUE_MIN_EDGE: alerted + exposure-reserved) or
-    # "volume" (shadow tier: persisted + CLV-tracked only, never alerted).
+    # "volume" (shadow tier: persisted + CLV-tracked, alerted ONCE as 🔵 VOLUME
+    # on first detection but NEVER exposure-reserved — see app/pipeline.py).
     tier: str = "premium"
     # Calibrated meta-model score P(candidate beats the vig-free Max close)
     # from app/models/value_filter.py — None when the artifact is absent or

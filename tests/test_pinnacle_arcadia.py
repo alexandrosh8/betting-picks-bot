@@ -551,7 +551,7 @@ async def test_client_exhausts_transient_retries_then_raises_arcadia_error(
     client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
     with pytest.raises(PinnacleArcadiaError) as excinfo:
         await client.fetch_matchups(33)
-    assert calls["n"] == 3  # stop_after_attempt(3): the status WAS retried
+    assert calls["n"] == 6  # stop_after_attempt(6): the status WAS retried
     msg = str(excinfo.value)
     assert str(transient_status) in msg  # status is reported (honest)
     assert "SECRET-LOOKING-KEY" not in msg
@@ -614,7 +614,7 @@ async def test_client_exhausts_403_then_raises_arcadia_error() -> None:
     client = _make_client(handler, guest_key="SECRET-LOOKING-KEY")
     with pytest.raises(PinnacleArcadiaError) as excinfo:
         await client.fetch_matchups(33)
-    assert calls["n"] == 3  # 403 WAS retried (rotated), not an immediate failure
+    assert calls["n"] == 6  # 403 WAS retried (rotated 6x), not an immediate failure
     msg = str(excinfo.value)
     assert "403" in msg
     assert "SECRET-LOOKING-KEY" not in msg

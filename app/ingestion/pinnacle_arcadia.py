@@ -589,8 +589,13 @@ class PinnacleArcadiaClient:
         # "no data this cycle". Permanent 4xx is NEVER raised as transient here,
         # so it is never retried (it returns the Response and the caller's non-200
         # check raises PinnacleArcadiaError at once).
+        # 6 attempts (was 3): a 403 rotates to the NEXT proxy each request (round-
+        # robin), so with ~8 proxies in the pool 3 attempts only tried ~3 before
+        # declaring "no data" — daytime 403 spikes (more arcadia fetches) leaked
+        # transient blocks into the floor. 6 attempts exhausts more of the pool
+        # so a recoverable 403 actually recovers instead of becoming "no data".
         retry=retry_if_exception_type((httpx.TransportError, _TransientStatusError)),
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(6),
         wait=wait_exponential_jitter(initial=0.5, max=8.0),
         reraise=True,
     )

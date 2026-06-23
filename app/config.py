@@ -330,6 +330,16 @@ class Settings(BaseSettings):
     # .claude/memory/pitfalls.md 2026-06-20). Names normalized at compare time
     # (accents/case/spacing); curate from the per-league match-rate report.
     value_major_leagues: str = ""
+    # Require-sharp-anchor PREMIUM gate (default False = DISABLED, current
+    # behavior). When True, a premium candidate whose fair value came from the
+    # soft consensus(median) — i.e. NO genuine sharp book (Pinnacle or Betfair)
+    # priced the full market — is DEMOTED to the volume (shadow) tier: persisted
+    # + CLV-tracked, never alerted, never reserving exposure. The season-proof,
+    # name-proof sibling of VALUE_MAJOR_LEAGUES — it scopes premium by DATA (a
+    # sharp anchor actually backed the price) rather than by curated league name,
+    # so it stops obscure-league bleed (~37% sharp coverage is structural, see
+    # .claude/memory/pitfalls.md 2026-06-20) without any per-season list upkeep.
+    value_require_sharp_anchor: bool = False
 
     # --- Optional drawdown-constrained staking (default OFF) -----------------
     # Both set => Kelly multiplier = min(FRACTIONAL_KELLY, lambda*) where
@@ -859,6 +869,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         odds_bands=parse_odds_bands(settings.value_odds_bands),
         min_books_by_market=parse_market_min_books(settings.value_min_books_per_market),
         major_leagues=parse_major_leagues(settings.value_major_leagues),
+        require_sharp_anchor=settings.value_require_sharp_anchor,
     )
 
 

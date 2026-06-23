@@ -660,6 +660,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         SHARP_BOOKS,
         anchor_type_for,
         find_value_bets_with_fair,
+        is_sharp_anchored,
     )
 
     # thin-coverage gate measures SOFT liquidity — exclude sharp/injected books
@@ -751,6 +752,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_stale = 0
     n_ml_demoted = 0
     n_major_demoted = 0
+    n_no_sharp_demoted = 0
     n_experimental = 0
     n_off_band = 0
     n_thin_books = 0
@@ -824,6 +826,26 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     tier = "volume"
                     n_major_demoted += 1
                     major_note = " | non-major league: demoted to volume (shadow)"
+            # Require-sharp-anchor gate: a PREMIUM candidate whose fair value came
+            # from the soft CONSENSUS median (no genuine sharp book — Pinnacle or
+            # Betfair — backed the price) is DEMOTED to the volume (shadow) tier —
+            # persisted + CLV-tracked, never alerted, never reserving exposure.
+            # deps.value_policy.require_sharp_anchor False disables the gate (no-op,
+            # the default). This is the season-proof, name-proof sibling of the
+            # major-league gate: it stops obscure-league bleed (e.g. "GFA League")
+            # by DATA (no sharp anchor) rather than by league name. The `tier ==
+            # "premium"` guard means a pick already demoted above STAYS volume —
+            # the interventions never stack confusingly (anchor_book == v.sharp_book
+            # exactly; see find_value_bets_with_fair).
+            sharp_note = ""
+            if (
+                tier == "premium"
+                and deps.value_policy.require_sharp_anchor
+                and not is_sharp_anchored(anchor_book)
+            ):
+                tier = "volume"
+                n_no_sharp_demoted += 1
+                sharp_note = " | no sharp anchor (consensus): demoted to volume (shadow)"
             # Experimental (unvalidated) sport: FORCE every pick to the volume
             # (shadow) tier — never alerted, no exposure — regardless of edge.
             # It is still persisted + CLV-tracked + (via ESPN) auto-settled so it
@@ -939,6 +961,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         else ""
                     )
                     + major_note
+                    + sharp_note
                     + experimental_note
                     + ml_note
                 ),
@@ -1033,6 +1056,17 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: major-league gate demoted %d premium candidate(s) to volume",
             sport_key,
             n_major_demoted,
+        )
+    if n_no_sharp_demoted:
+        # The require-sharp-anchor gate is never silent either: these candidates
+        # cleared the premium edge gate but their fair value came from the soft
+        # consensus median (no Pinnacle/Betfair sharp anchor), so they were demoted
+        # to the shadow tier under VALUE_REQUIRE_SHARP_ANCHOR.
+        logger.info(
+            "value pipeline %s: require-sharp-anchor gate demoted %d premium candidate(s) "
+            "to volume",
+            sport_key,
+            n_no_sharp_demoted,
         )
     if n_experimental:
         # Experimental (unvalidated) sport: these would-be premium candidates were

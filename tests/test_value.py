@@ -301,6 +301,20 @@ def test_anchor_type_for_categorizes_every_anchor() -> None:
     assert anchor_type_for("Smarkets") == "sharp"
 
 
+def test_is_sharp_anchored_only_named_sharps_are_sharp() -> None:
+    # The require-sharp-anchor gate's data test: a pick anchored on the soft
+    # CONSENSUS median (no Pinnacle/Betfair priced the full market) is NOT
+    # sharp-anchored; a named sharp anchor (Pinnacle/Betfair/Smarkets) is.
+    from app.edge.value import CONSENSUS_ANCHOR, is_sharp_anchored
+
+    assert is_sharp_anchored(CONSENSUS_ANCHOR) is False
+    assert is_sharp_anchored("") is False  # blank/unknown anchor is not sharp
+    assert is_sharp_anchored("Pinnacle") is True
+    assert is_sharp_anchored("pinnacle sports") is True
+    assert is_sharp_anchored("Betfair Exchange") is True
+    assert is_sharp_anchored("Smarkets") is True
+
+
 def test_consensus_anchor_dedups_casing_variant_books() -> None:
     # audit #5: two raw keys that normalize to the same book ('BookA' + 'booka')
     # must count ONCE in the per-selection median. 'home' deduped median of

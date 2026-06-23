@@ -64,6 +64,19 @@ def anchor_type_for(anchor_book: str) -> str:
     return ANCHOR_TYPE_SHARP
 
 
+def is_sharp_anchored(anchor_book: str) -> bool:
+    """Whether fair value was backed by a GENUINE sharp book, not soft consensus.
+
+    `anchor_book` is ValueBet.sharp_book — a named sharp book from SHARP_BOOKS
+    (Pinnacle/Betfair/Smarkets) or the CONSENSUS_ANCHOR sentinel. The soft
+    consensus(median) fallback (and any blank/unknown anchor) is NOT sharp; only
+    a named sharp anchor is. Equivalent to ``anchor_type_for(...) != consensus``
+    but stated as the gate predicate. Pure function (tested directly); the
+    require-sharp-anchor premium gate (app/pipeline.py) consumes it.
+    """
+    return bool(anchor_book) and anchor_book != CONSENSUS_ANCHOR
+
+
 @dataclass(frozen=True)
 class ValueBet:
     selection: str

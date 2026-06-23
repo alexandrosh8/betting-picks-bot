@@ -258,6 +258,16 @@ def test_equal_tier_floors_disable_volume_cleanly() -> None:
     assert s.value_volume_min_edge == s.value_min_edge  # valid: tier off
 
 
+def test_betfair_exchange_min_liquidity_default_admits_obscure_markets() -> None:
+    # REGRESSION (2026-06-23): the old £500 floor (a single major-match probe)
+    # silently dropped every obscure Betfair market (live liquidity £12-£23) ->
+    # only 22 betfair_soccer events ever captured. The default must stay low
+    # enough to admit real small-exchange markets while still gating £0 dust.
+    s = make_settings()
+    assert s.betfair_exchange_min_liquidity == 10.0
+    assert s.betfair_exchange_min_liquidity < 14.0  # the thinnest live obscure £
+
+
 def test_all_leagues_with_wide_market_list_is_fatal() -> None:
     """leagues=all + a market list OVER the budget = multi-hour cycles
     (live-measured ~73s/match) whose slate the odds-age gate then almost

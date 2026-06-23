@@ -174,6 +174,36 @@ def test_liquidity_gate_can_empty_a_thin_market() -> None:
     assert extract_back_quotes(cells, min_liquidity=1_000_000.0) == []
 
 
+# Real obscure-match Betfair Exchange BACK rows, captured live 2026-06-23 via the
+# read-only DOM probe (Brasiliense/Sobradinho and Hafnarfjordur/Valur). These are
+# exactly the U20/lower-division/friendly markets the operator confirmed DO show
+# Betfair odds. Their backable £ liquidity is genuinely small (£12-£23) — that is
+# normal for a small exchange market, NOT a thin/closed one. The default floor
+# must admit them; only the single-major-match £500 probe ever cleared the old
+# 500.0 default, which is why only 22 betfair_soccer events were ever captured.
+_OBSCURE_ROW_TOKENS = (
+    "33/100",
+    "(16)",
+    "7/2",
+    "(16)",
+    "9/2",
+    "(14)",
+)
+
+
+def test_default_floor_admits_real_obscure_market_liquidity() -> None:
+    # REGRESSION (2026-06-23): the £500 default silently dropped every obscure
+    # match's Betfair row (live £12-£23 liquidities) -> only 22 events ever
+    # captured. The default floor must keep these real small-market BACK prices.
+    from app.config import get_settings
+
+    floor = get_settings().betfair_exchange_min_liquidity
+    cells = _pair_tokens(_OBSCURE_ROW_TOKENS)
+    quotes = extract_back_quotes(cells, min_liquidity=floor)
+    assert [q.designation for q in quotes] == ["home", "draw", "away"]
+    assert [q.liquidity for q in quotes] == [16.0, 16.0, 14.0]
+
+
 def test_extract_back_quotes_skips_missing_liquidity() -> None:
     # An odds cell whose liquidity is absent is dropped even with a 0 floor.
     cells: list[tuple[str, float | None]] = [("28/25", None), ("5/2", 3307.0), ("3/1", 1307.0)]

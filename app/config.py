@@ -585,10 +585,17 @@ class Settings(BaseSettings):
     # there are deliberately no BETFAIR_* credential slots.
     betfair_exchange_enabled: bool = False
     # Backable £ liquidity floor: a BACK outcome whose displayed liquidity is
-    # below this is SKIPPED (thin markets give unreliable exchange prices). The
-    # default mirrors the user's 2026-06-19 live probe, where a major match's
-    # BACK liquidities were in the thousands of £. Floored at 0 (0 = no gate).
-    betfair_exchange_min_liquidity: float = Field(default=500.0, ge=0.0)
+    # below this is SKIPPED (only £0/dust markets give unusable exchange prices).
+    # The OLD 500.0 default was calibrated on a SINGLE major-match probe
+    # (2026-06-19) and silently dropped every obscure market — only 22
+    # betfair_soccer events were EVER captured. Live re-probe (2026-06-23) of the
+    # U20/lower-division/friendly pages the operator confirmed carry Betfair odds
+    # showed genuine small-market liquidity of £12-£23 per BACK outcome; that is
+    # normal for a small exchange market, not a closed one. The floor is lowered
+    # to admit those real prices while still gating £0 dust + the '0' empty-cell
+    # sentinel (which parses to <=1.0 and is dropped upstream regardless).
+    # Floored at 0 (0 = no gate).
+    betfair_exchange_min_liquidity: float = Field(default=10.0, ge=0.0)
     # csv of sport keys to capture. "soccer" (the 3-way 1X2 BACK row) and
     # "basketball" (the 2-way moneyline BACK row) are supported; the default
     # stays "soccer" (committed) but "soccer,basketball" works end-to-end. A

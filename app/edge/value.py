@@ -77,6 +77,27 @@ def is_sharp_anchored(anchor_book: str) -> bool:
     return bool(anchor_book) and anchor_book != CONSENSUS_ANCHOR
 
 
+def close_is_independent_of_fill(close_anchor_book: str, fill_book: str) -> bool:
+    """Whether the CLOSE was priced INDEPENDENTLY of the fill book (P0-1/P0-3).
+
+    A "sharp" close whose anchor book IS the pick's own fill book is CIRCULAR —
+    the pick's own book pricing its own close (closing == fill, |clv_log|~0). That
+    fake CLV is what masked the -EV, so it must never count as genuine CLV.
+
+    `close_anchor_book` is the book that anchored the close (a named sharp book
+    from SHARP_BOOKS, or the CONSENSUS_ANCHOR sentinel); `fill_book` is the pick's
+    own bookmaker. Independent iff the close anchor is NOT (a normalized match to)
+    the fill book. The CONSENSUS_ANCHOR is a >= MIN_CONSENSUS_BOOKS median, not a
+    single book, so it is independent of any single fill by construction (the
+    sentinel never normalizes to a real book name -> True). A blank/unknown close
+    anchor is treated as independent (it is not a self-priced close). Pure
+    function (tested directly); the CLV true-up persists its result on each pick.
+    """
+    if not close_anchor_book or close_anchor_book == CONSENSUS_ANCHOR:
+        return True
+    return _norm(close_anchor_book) != _norm(fill_book)
+
+
 @dataclass(frozen=True)
 class ValueBet:
     selection: str

@@ -33,6 +33,7 @@ from app.api.auth import (
     sign_session,
 )
 from app.api.deps import get_session
+from app.backtesting.calibration import bet_band_reliability
 from app.backtesting.live_evidence import live_evidence_report
 from app.edge.confidence import confidence_rating
 from app.resolution.shadow import summarize_anchor_coverage, summarize_match_rate
@@ -41,6 +42,7 @@ from app.settlement.engine import settle_event_picks
 from app.settlement.outcomes import pick_pnl, pick_roi
 from app.storage.models import Event, ManualBetLog, Pick, ResultTracking
 from app.storage.repositories import (
+    bet_band_observations,
     betfair_archive_capture_by_sport,
     betfair_inline_capture_by_sport,
     create_dashboard_credentials,
@@ -698,6 +700,12 @@ async def performance(
     report = await performance_report(session)
     rows = await live_evidence_rows(session)
     report["live_evidence"] = live_evidence_report(rows, ml_threshold=_ml_operating_point())
+    # P1-1 claimed-fair RELIABILITY MONITOR (report-only — NOT a release gate,
+    # NOT a recalibration haircut): does model_probability match the realized
+    # win-rate in the odds band actually bet? Surfaced beside ROI/CLV so a
+    # calibration drift is visible; its own insufficient-n honesty gate applies.
+    band_obs = await bet_band_observations(session)
+    report["calibration"] = bet_band_reliability(band_obs)
     return report
 
 

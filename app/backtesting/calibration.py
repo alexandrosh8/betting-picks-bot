@@ -31,6 +31,7 @@ Metrics (all on a binary outcome y in {0,1} and predicted P(win) p):
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 #: Below this many binary observations a (sub)report is "insufficient" — point
 #: estimates are nulled so noise can never read as a calibration verdict. Same
@@ -50,6 +51,20 @@ class CalibrationObservation:
 
     fair_prob: float  # devigged anchor P(selection wins), expected in (0, 1)
     won: bool  # True = selection won, False = lost
+
+
+@dataclass(frozen=True)
+class BetBandObservation:
+    """One settled, binary-outcome pick for the CLAIMED-FAIR reliability monitor
+    (P1-1). `claimed_fair` is the probability the strategy claimed when it took
+    the bet (``Pick.model_probability``); `won` is the realized outcome
+    (``ResultTracking.outcome == 'won'``); `fill_odds` is the price actually
+    taken, used to scope the report to the odds band the platform actually bets.
+    Reduced to plain floats at the DB boundary (this stays a pure module)."""
+
+    claimed_fair: float  # P(selection wins) claimed at bet time, expected in (0, 1)
+    won: bool
+    fill_odds: float  # decimal odds the bet was struck at (> 1.0)
 
 
 @dataclass(frozen=True)
@@ -167,3 +182,84 @@ def calibration_report(
         mean_pred=mean_pred,
         bins=tuple(bins),
     )
+
+
+def _quantile_sorted(sorted_vals: Sequence[float], q: float) -> float:
+    """Linear-interpolated quantile of an already-sorted, non-empty sequence."""
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = q * (len(sorted_vals) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = pos - lo
+    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
+
+
+def bet_band_reliability(
+    observations: Sequence[BetBandObservation],
+    *,
+    band_lo_q: float = 0.10,
+    band_hi_q: float = 0.90,
+    n_bins: int = 10,
+    min_n: int = MIN_CALIBRATION_N,
+) -> dict[str, Any]:
+    """CLAIMED-FAIR reliability monitor (P1-1): does the strategy's claimed fair
+    probability match the realized win-rate, IN THE ODDS BAND IT ACTUALLY BETS?
+
+    Closes the loop the headline never did: from the probability claimed at bet
+    time (``Pick.model_probability``) to the realized outcome
+    (``ResultTracking.outcome``). Scoping to the actually-bet band keeps the
+    verdict honest — a model can look "well calibrated" overall while being
+    overconfident exactly in the prices it bets; the band is the inter-quantile
+    range [band_lo_q, band_hi_q] of the population's own fill odds, so a stray
+    longshot or heavy favourite cannot define (or escape) the band.
+
+    MONITOR / REPORT ONLY — this is NOT a release gate and NOT a recalibration
+    haircut (those are a separate modeling follow-up). It surfaces reliability +
+    ECE beside ROI/CLV so a calibration drift is VISIBLE. Returns the band
+    bounds, the in/out-of-band counts, and a CalibrationReport (its own
+    insufficient-n honesty gate applies). Pure: stdlib/math only.
+    """
+    if not 0.0 <= band_lo_q < band_hi_q <= 1.0:
+        raise ValueError(
+            f"need 0 <= band_lo_q < band_hi_q <= 1, got ({band_lo_q}, {band_hi_q})"
+        )
+    odds = sorted(o.fill_odds for o in observations)
+    band_lo = _quantile_sorted(odds, band_lo_q) if odds else None
+    band_hi = _quantile_sorted(odds, band_hi_q) if odds else None
+    in_band = (
+        [o for o in observations if band_lo <= o.fill_odds <= band_hi]
+        if band_lo is not None and band_hi is not None
+        else []
+    )
+    report = calibration_report(
+        [CalibrationObservation(fair_prob=o.claimed_fair, won=o.won) for o in in_band],
+        n_bins=n_bins,
+        min_n=min_n,
+    )
+    return {
+        "n_total": len(observations),
+        "n_in_band": len(in_band),
+        "band_lo_q": band_lo_q,
+        "band_hi_q": band_hi_q,
+        "band_lo_odds": band_lo,
+        "band_hi_odds": band_hi,
+        "insufficient": report.insufficient,
+        "n": report.n,
+        "ece": report.ece,
+        "mce": report.mce,
+        "log_loss": report.log_loss,
+        "brier": report.brier,
+        "base_rate": report.base_rate,  # realized win-rate in band
+        "mean_pred": report.mean_pred,  # mean claimed fair in band
+        "bins": tuple(
+            {
+                "lo": b.lo,
+                "hi": b.hi,
+                "n": b.n,
+                "mean_pred": b.mean_pred,
+                "observed": b.observed,
+            }
+            for b in report.bins
+        ),
+    }

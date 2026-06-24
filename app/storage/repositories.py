@@ -40,6 +40,7 @@ from app.storage.models import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from app.backtesting.calibration import BetBandObservation
     from app.backtesting.live_evidence import SettledPickRow
     from app.resolution.shadow import BetfairCoverageOutcome, ShadowOutcome
 
@@ -683,6 +684,14 @@ async def refresh_event_kickoffs(session: AsyncSession, kickoffs: dict[str, date
 # anchor_type_for (pinnacle / sharp); kept local to avoid a heavy import here.
 _SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
 
+# P2-1 HEADLINE min-n: below this many settled picks the headline roi /
+# beat_close_rate / stake-weighted CLV are NOISE (a 10-pick -8.7% reads as
+# signal), so they are SUPPRESSED at the source and flagged. Mirrors the
+# per-stratum MIN_STRATUM_N honesty gate in app/backtesting/live_evidence.py —
+# the headline had no such guard. The trusted sharp subset is gated on its OWN
+# n (n_sharp_close), which is naturally thinner than n_settled.
+MIN_HEADLINE_N = 50
+
 
 def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     """Aggregate (outcome, pnl, stake, clv_log, beat_close, closing_odds,
@@ -691,10 +700,18 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
 
     A TRUSTED sharp-close subset (``sharp_*``) is reported ALONGSIDE the blended
     headline: a close counts only when it is snapshot-sourced (closing_odds NOT
-    NULL — not a poll-time revalidation fallback) AND anchored by a named sharp
+    NULL — not a poll-time revalidation fallback), anchored by a named sharp
     book (closing_anchor_type in pinnacle/sharp — not a soft-book consensus
-    median). Those are the closes whose CLV the platform can stand behind; the
+    median), AND independent of the fill (close_independent_of_fill is not False —
+    the close was NOT anchored by the pick's own fill book; a self-priced close
+    is CIRCULAR fake CLV, closing == fill, |clv_log|~0, and is what masked the
+    -EV). Those are the closes whose CLV the platform can stand behind; the
     blended ``stake_weighted_clv_log`` still mixes every close in for continuity.
+
+    Each row is (outcome, pnl, stake, clv_log, beat_close, closing_odds,
+    closing_anchor, close_independent). ``close_independent`` is None when the
+    column is feature-detected absent (pre-column rows) — treated as "unknown,
+    NOT circular" so historical sharp closes keep their status.
     """
     counts = {"won": 0, "lost": 0, "void": 0, "push": 0, "half_won": 0, "half_lost": 0}
     total_staked = Decimal("0")
@@ -705,7 +722,17 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     sharp_clv_weighted = Decimal("0")
     sharp_clv_stake = Decimal("0")
     sharp_beat_known = sharp_beat_true = n_sharp = 0
-    for outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor in rows:
+    sharp_all_independent = True  # invariant: no circular close in the sharp subset
+    for (
+        outcome,
+        pnl,
+        stake,
+        clv_log,
+        beat_close,
+        closing_odds,
+        closing_anchor,
+        close_independent,
+    ) in rows:
         if outcome in counts:
             counts[outcome] += 1
         total_staked += stake
@@ -720,26 +747,58 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             closing_odds is not None
             and closing_anchor in _SHARP_CLOSE_ANCHORS
             and clv_log is not None
+            # INDEPENDENCE guard (P0-1/P0-3): a close anchored by the pick's OWN
+            # fill book is CIRCULAR (closing == fill, |clv_log|~0) — fake CLV that
+            # masked the -EV. Only a definite False excludes; None (pre-column /
+            # unknown) is NOT treated as circular, preserving historical rows.
+            and close_independent is not False
         ):
-            # Genuine sharp snapshot close with a measured CLV — the trusted subset.
+            # Genuine, INDEPENDENT sharp snapshot close with a measured CLV — the
+            # trusted subset.
             n_sharp += 1
             sharp_clv_weighted += stake * clv_log
             sharp_clv_stake += stake
+            sharp_all_independent = sharp_all_independent and close_independent is not False
             if beat_close is not None:
                 sharp_beat_known += 1
                 sharp_beat_true += int(beat_close)
+    # Defense-in-depth: the gate above already excludes circular closes, so by
+    # construction every row in the sharp subset is independent of its fill book
+    # (closing_anchor != fill_book). Assert it so a future refactor of the gate
+    # that re-admits a self-priced close trips here instead of silently faking CLV.
+    assert sharp_all_independent, "sharp-close subset contains a circular (self-priced) close"
+    # P2-1 HEADLINE min-n suppression: below MIN_HEADLINE_N settled picks the
+    # blended roi / beat_close_rate / stake-weighted CLV are noise (a 10-pick
+    # -8.7% reads as signal), so they are NULLED at the source and flagged
+    # roi_status="insufficient" — no /performance consumer can read a headline
+    # point estimate off a sub-floor sample. n / counts / totals survive so the
+    # dashboard can render the "n too small" state. The trusted sharp subset is
+    # gated independently on its OWN n (n_sharp_close).
+    n_settled = len(rows)
+    headline_ok = n_settled >= MIN_HEADLINE_N
+    sharp_ok = n_sharp >= MIN_HEADLINE_N
     return {
-        "n_settled": len(rows),
+        "n_settled": n_settled,
         **counts,
         "total_staked": str(total_staked),
         "total_pnl": str(total_pnl),
-        "roi": _ratio(total_pnl, total_staked),
-        "stake_weighted_clv_log": _ratio(clv_weighted, clv_stake),
-        "beat_close_rate": _ratio(Decimal(beat_true), Decimal(beat_known)),
-        # TRUSTED subset — genuine sharp snapshot closes only (see docstring).
+        "roi": _ratio(total_pnl, total_staked) if headline_ok else None,
+        "roi_status": "ok" if headline_ok else "insufficient",
+        "stake_weighted_clv_log": _ratio(clv_weighted, clv_stake) if headline_ok else None,
+        "beat_close_rate": (
+            _ratio(Decimal(beat_true), Decimal(beat_known)) if headline_ok else None
+        ),
+        "min_headline_n": MIN_HEADLINE_N,
+        # TRUSTED subset — genuine sharp snapshot closes only (see docstring) —
+        # gated on its own n (n_sharp_close), naturally thinner than n_settled.
         "n_sharp_close": n_sharp,
-        "sharp_stake_weighted_clv_log": _ratio(sharp_clv_weighted, sharp_clv_stake),
-        "sharp_beat_close_rate": _ratio(Decimal(sharp_beat_true), Decimal(sharp_beat_known)),
+        "sharp_status": "ok" if sharp_ok else "insufficient",
+        "sharp_stake_weighted_clv_log": (
+            _ratio(sharp_clv_weighted, sharp_clv_stake) if sharp_ok else None
+        ),
+        "sharp_beat_close_rate": (
+            _ratio(Decimal(sharp_beat_true), Decimal(sharp_beat_known)) if sharp_ok else None
+        ),
     }
 
 
@@ -760,6 +819,7 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     # live_evidence_rows): until the ORM attr lands, the close anchor is None and
     # the sharp-close subset is simply empty (n_sharp_close == 0).
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
+    indep_attr = getattr(Pick, "close_independent_of_fill", None)
     select_cols: list[Any] = [
         ResultTracking.outcome,  # 0
         ResultTracking.pnl,  # 1
@@ -769,10 +829,13 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
         Pick.tier,  # 5 — split key, not passed to _aggregate_settled
         Pick.closing_odds,  # 6 — snapshot-close marker
     ]
-    close_anchor_idx = None
+    close_anchor_idx = indep_idx = None
     if close_anchor_attr is not None:
         close_anchor_idx = len(select_cols)
         select_cols.append(close_anchor_attr)  # 7
+    if indep_attr is not None:
+        indep_idx = len(select_cols)
+        select_cols.append(indep_attr)  # 8 — INDEPENDENCE provenance (P0-1/P0-3)
     rows = (
         await session.execute(select(*select_cols).join(Pick, ResultTracking.pick_id == Pick.id))
     ).all()
@@ -786,13 +849,17 @@ async def performance_report(session: AsyncSession) -> dict[str, Any]:
     }
 
     def _tier_rows(tier_name: str) -> list[tuple[Any, ...]]:
-        # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor)
+        # (outcome, pnl, stake, clv_log, beat_close, closing_odds, closing_anchor,
+        #  close_independent) — close_independent is None when feature-detected
+        # absent (pre-column), which the sharp gate treats as "unknown, NOT
+        # circular".
         out: list[tuple[Any, ...]] = []
         for r in rows:
             if r[5] != tier_name:
                 continue
             closing_anchor = r[close_anchor_idx] if close_anchor_idx is not None else None
-            out.append((r[0], r[1], r[2], r[3], r[4], r[6], closing_anchor))
+            close_independent = r[indep_idx] if indep_idx is not None else None
+            out.append((r[0], r[1], r[2], r[3], r[4], r[6], closing_anchor, close_independent))
         return out
 
     premium = _aggregate_settled(_tier_rows("premium"))
@@ -827,6 +894,7 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
 
     anchor_attr = getattr(Pick, "anchor_type", None)
     close_anchor_attr = getattr(Pick, "closing_anchor_type", None)
+    indep_attr = getattr(Pick, "close_independent_of_fill", None)
     columns = [
         Pick.tier,  # 0
         Pick.value_filter_score,  # 1
@@ -836,16 +904,20 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         ResultTracking.pnl,  # 5
         Pick.closing_odds,  # 6 — snapshot-close marker (NON-NULL = a true close)
     ]
-    # closing_anchor_type is FEATURE-DETECTED like anchor_type (same migration
-    # contract): until the ORM attr lands, every row's close anchor is None and
-    # the close-anchor grouping / sharp-close subset are simply empty.
-    anchor_idx = close_anchor_idx = None
+    # closing_anchor_type / close_independent_of_fill are FEATURE-DETECTED like
+    # anchor_type (same migration contract): until the ORM attr lands, every
+    # row's value is None and the close-anchor grouping / sharp-close subset are
+    # simply empty (or, for independence, "unknown" — never treated as circular).
+    anchor_idx = close_anchor_idx = indep_idx = None
     if anchor_attr is not None:
         anchor_idx = len(columns)
         columns.append(anchor_attr)
     if close_anchor_attr is not None:
         close_anchor_idx = len(columns)
         columns.append(close_anchor_attr)
+    if indep_attr is not None:
+        indep_idx = len(columns)
+        columns.append(indep_attr)
     rows = (
         await session.execute(select(*columns).join(Pick, ResultTracking.pick_id == Pick.id))
     ).all()
@@ -862,8 +934,49 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             # closing_odds NON-NULL marks a genuine snapshot close (not a
             # poll-time revalidation fallback) — the SOURCE half of "trusted".
             has_snapshot_close=row[6] is not None,
+            # INDEPENDENCE half (P0-1/P0-3): False = circular self-priced close
+            # (excluded from sharp subset); None = unknown (pre-column, NOT
+            # treated as circular).
+            close_independent_of_fill=row[indep_idx] if indep_idx is not None else None,
         )
         for row in rows
+    ]
+
+
+async def bet_band_observations(session: AsyncSession) -> list["BetBandObservation"]:
+    """Settled, BINARY-outcome PREMIUM picks reduced to plain-float observations
+    for the claimed-fair reliability monitor (P1-1, app/backtesting/calibration.
+    bet_band_reliability) — the DB read half of GET /performance "calibration".
+
+    Maps each pick to (claimed_fair=model_probability — the probability the
+    strategy claimed at bet time, won=outcome=='won', fill_odds=decimal_odds —
+    the price actually taken). Only binary settlements (won/lost) carry a
+    calibration label; push/void/half_* are excluded (no win/lose outcome).
+    Scoped to the PREMIUM tier so the monitor judges the ACTUALLY-ALERTED
+    strategy, matching the headline's premium scope. Pure floats out — the
+    odds-band scoping and ECE math stay in the pure calibration module.
+    """
+    from app.backtesting.calibration import BetBandObservation
+
+    rows = (
+        await session.execute(
+            select(
+                Pick.model_probability,
+                ResultTracking.outcome,
+                Pick.decimal_odds,
+            )
+            .join(Pick, ResultTracking.pick_id == Pick.id)
+            .where(ResultTracking.outcome.in_(("won", "lost")))
+            .where(Pick.tier == "premium")
+        )
+    ).all()
+    return [
+        BetBandObservation(
+            claimed_fair=float(model_probability),
+            won=(outcome == "won"),
+            fill_odds=float(decimal_odds),
+        )
+        for model_probability, outcome, decimal_odds in rows
     ]
 
 

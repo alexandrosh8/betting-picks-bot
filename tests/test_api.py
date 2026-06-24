@@ -338,8 +338,14 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
             SettledPickRow("volume", None, None, None, 5.0, None),
         ]
 
+    async def fake_band(session):  # type: ignore[no-untyped-def]
+        # The route also reads the claimed-fair reliability monitor's rows (P1-1);
+        # stub them at the route's own import so this test stays DB-free.
+        return []
+
     monkeypatch.setattr(routes, "performance_report", fake_perf)
     monkeypatch.setattr(routes, "live_evidence_rows", fake_rows)
+    monkeypatch.setattr(routes, "bet_band_observations", fake_band)
     monkeypatch.setattr(routes, "_ml_operating_point", lambda: 0.725)
 
     body = TestClient(make_app()).get("/performance").json()
@@ -359,6 +365,12 @@ def test_performance_payload_includes_live_evidence(monkeypatch) -> None:  # typ
     assert ev["by_tier"]["premium"]["roi"] is None
     # anchor dimension feature-detected: absent until the column lands
     assert ev["by_anchor"] is None
+    # P1-1 claimed-fair reliability monitor rides alongside (report-only); with
+    # no settled binary picks it is honestly empty + insufficient, never a crash.
+    cal = body["calibration"]
+    assert cal["n_total"] == 0
+    assert cal["insufficient"] is True
+    assert cal["ece"] is None
 
 
 def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None:  # type: ignore[no-untyped-def]

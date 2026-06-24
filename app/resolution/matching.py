@@ -105,6 +105,162 @@ def distinguishing_markers(name: str) -> frozenset[str]:
     return frozenset(out)
 
 
+# Known senior clubs whose name carries a marker-LIKE token that is NOT a
+# women/youth/reserve marker (it is part of the SENIOR club's proper name). The
+# marker veto consults this whitelist FIRST so "Boca Juniors"/"Young Boys"/
+# "Argentinos Juniors" are never vetoed as youth sides. Keyed by normalized name.
+_KNOWN_CLUB_WHITELIST: frozenset[str] = frozenset(
+    {
+        normalize_name(n)
+        for n in (
+            "Boca Juniors",
+            "Argentinos Juniors",
+            "Young Boys",
+            "Defensa y Justicia",
+            "Newells Old Boys",
+            "Junior",  # Atletico Junior (Barranquilla)
+        )
+    }
+)
+
+
+def strip_markers(name: str) -> str:
+    """Normalized name with women/youth/reserve marker tokens removed — the BASE
+    club/team name used for fuzzy comparison. A whitelisted senior club is
+    returned unchanged (its marker-like token is part of its real name), so its
+    base name is never accidentally truncated."""
+    norm = normalize_name(name)
+    if norm in _KNOWN_CLUB_WHITELIST:
+        return norm
+    kept: list[str] = []
+    for tok in norm.split():
+        if tok in _WOMEN_MARKERS or tok in _YOUTH_WORD_MARKERS or tok in _RESERVE_MARKERS:
+            continue
+        if _YOUTH_AGE.match(tok):
+            continue
+        kept.append(tok)
+    return " ".join(kept) if kept else norm
+
+
+def _jaro(s1: str, s2: str) -> float:
+    """Jaro similarity in [0, 1] (stdlib-only; matches rapidfuzz.Jaro semantics).
+    Two empty strings are identical (1.0); one empty is 0.0."""
+    if s1 == s2:
+        return 1.0
+    len1, len2 = len(s1), len(s2)
+    if len1 == 0 or len2 == 0:
+        return 0.0
+    match_distance = max(0, max(len1, len2) // 2 - 1)
+    s1_matches = [False] * len1
+    s2_matches = [False] * len2
+    matches = 0
+    for i in range(len1):
+        start = max(0, i - match_distance)
+        end = min(i + match_distance + 1, len2)
+        for j in range(start, end):
+            if s2_matches[j] or s1[i] != s2[j]:
+                continue
+            s1_matches[i] = True
+            s2_matches[j] = True
+            matches += 1
+            break
+    if matches == 0:
+        return 0.0
+    # Count transpositions (half the out-of-order matched chars).
+    k = 0
+    transpositions = 0
+    for i in range(len1):
+        if not s1_matches[i]:
+            continue
+        while not s2_matches[k]:
+            k += 1
+        if s1[i] != s2[k]:
+            transpositions += 1
+        k += 1
+    t = transpositions / 2.0
+    m = float(matches)
+    return (m / len1 + m / len2 + (m - t) / m) / 3.0
+
+
+def jaro_winkler(s1: str, s2: str, *, prefix_weight: float = 0.1) -> float:
+    """Jaro-Winkler similarity in [0, 1] (stdlib-only; rapidfuzz semantics with
+    the standard 0.1 prefix weight, capped at a 4-char common prefix). Cohen/
+    Ravikumar/Fienberg (KDD-2003) found JW best for short proper-noun matching;
+    chosen on the accept path over token_set_ratio/WRatio (subset-trap merges)."""
+    jaro = _jaro(s1, s2)
+    prefix = 0
+    for c1, c2 in zip(s1, s2, strict=False):
+        if c1 != c2 or prefix == 4:
+            break
+        prefix += 1
+    return jaro + prefix * prefix_weight * (1.0 - jaro)
+
+
+def _ratio(s1: str, s2: str) -> float:
+    """Indel (normalized Levenshtein) similarity ratio in [0, 100] — the
+    rapidfuzz.fuzz.ratio basis, via difflib's longest-matching-block ratio
+    scaled to 100."""
+    if not s1 and not s2:
+        return 100.0
+    if not s1 or not s2:
+        return 0.0
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, s1, s2).ratio() * 100.0
+
+
+def token_sort_ratio(s1: str, s2: str) -> float:
+    """rapidfuzz.fuzz.token_sort_ratio: sort whitespace tokens of each string,
+    then take the indel ratio. Order-insensitive ("real madrid" == "madrid
+    real" -> 100). EXCLUDED from the design: token_SET_ratio / WRatio /
+    partial_ratio (the subset-100 trap that merges Man Utd / Man City)."""
+    a = " ".join(sorted(s1.split()))
+    b = " ".join(sorted(s2.split()))
+    return _ratio(a, b)
+
+
+# Disambiguating tokens: when two BASE names differ ONLY by one of these tokens
+# (one has it, the other does not, or they carry DIFFERENT ones), they are
+# DIFFERENT clubs and must never fuzzy-merge — the Man Utd/Man City, Real
+# Madrid/Real Sociedad, Inter/AC class of false merge. The fuzzy accept path is
+# vetoed whenever the symmetric token difference of the two base names is a
+# NON-EMPTY subset of these tokens.
+_DISAMBIGUATING_TOKENS: frozenset[str] = frozenset(
+    {
+        "united",
+        "city",
+        "town",
+        "rovers",
+        "athletic",
+        "atletico",
+        "wanderers",
+        "albion",
+        "county",
+        "sociedad",
+        "real",
+        "inter",
+        "internazionale",
+        "sporting",
+        "racing",
+        "dynamo",
+        "dinamo",
+        "lokomotiv",
+        "spartak",
+        "zenit",
+        "central",
+        "nacional",
+        "junior",
+        "juniors",
+        "north",
+        "south",
+        "east",
+        "west",
+        "b",
+        "ii",
+    }
+)
+
+
 _ODDSPORTAL_ID = re.compile(r"-[A-Za-z0-9]{8}$")
 
 
@@ -250,3 +406,166 @@ def match_event(
     # fixture — and recovers those matches. A genuinely different game has a
     # different canonical name and never enters `matched`.
     return min(matched, key=lambda c: (abs((c.kickoff - kickoff).total_seconds()), c.ref))
+
+
+# --- precision-hardened SHADOW-path matcher ---------------------------------
+# Two-tier accept thresholds (research brief 2026-06-23, DoorDash two-tier;
+# NCES FCSM 2018 JW>=0.85 -> 985TP/1FP). ACCEPT requires BOTH a high Jaro-Winkler
+# AND a high token-sort ratio on the marker-stripped BASE names; the REVIEW band
+# is deliberately NOT auto-accepted (left for a later odds-vector confirm).
+_JW_ACCEPT = 0.92
+_TOKEN_SORT_ACCEPT = 90.0
+_JW_REVIEW_FLOOR = 0.84
+# Two surviving candidates whose summed (JW, token-sort) scores are within this
+# margin are ambiguous -> REJECT (cannot tell which is the real fixture).
+_AMBIGUITY_MARGIN = 0.04
+
+
+def _markers_conflict(home: str, away: str, cand_home: str, cand_away: str) -> bool:
+    """True when the pick and candidate disagree on a women/youth/reserve marker
+    on EITHER side (one present, the other absent, or different) — the
+    categorical negative-rule veto. Present-vs-absent IS a conflict."""
+    return distinguishing_markers(home) != distinguishing_markers(
+        cand_home
+    ) or distinguishing_markers(away) != distinguishing_markers(cand_away)
+
+
+def _base_name_ok(a: str, b: str) -> bool:
+    """Two-tier fuzzy accept on marker-stripped base names: exact canonical-base
+    equality, OR (JW>=0.92 AND token_sort>=90) with NO disambiguating-token-only
+    difference. Returns False in the REVIEW band and on a disambiguating diff."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # Disambiguating-token veto: if the two base names differ ONLY by tokens that
+    # distinguish clubs (United/City/Sociedad/...), they are different clubs.
+    diff = set(a.split()) ^ set(b.split())
+    if diff and diff <= _DISAMBIGUATING_TOKENS:
+        return False
+    jw = jaro_winkler(a, b)
+    if jw < _JW_REVIEW_FLOOR:
+        return False
+    return jw >= _JW_ACCEPT and token_sort_ratio(a, b) >= _TOKEN_SORT_ACCEPT
+
+
+def _leagues_agree(league: str | None, cand_league: str | None) -> bool:
+    """League block: agree when EITHER side's league is unknown (never reject on
+    absent metadata) OR the two canonicalize equal. A KNOWN disagreement blocks."""
+    if not league or not cand_league:
+        return True
+    return normalize_name(league) == normalize_name(cand_league)
+
+
+def _pair_score(a1: str, a2: str, b1: str, b2: str) -> float:
+    """Summed JW over the two oriented base-name pairs — the ambiguity tie-break
+    signal (higher = a closer overall name match)."""
+    return jaro_winkler(a1, b1) + jaro_winkler(a2, b2)
+
+
+def match_event_hardened(
+    home: str,
+    away: str,
+    kickoff: datetime,
+    candidates: Sequence[EventCandidate],
+    *,
+    aliases: AliasTable,
+    ordered: bool = True,
+    league: str | None = None,
+    candidate_leagues: Mapping[str, str] | None = None,
+    max_minute_drift: int = 360,
+    allow_orientation_flip: bool = False,
+) -> EventCandidate | None:
+    """Precision-hardened cross-source match — the SHADOW-path lift over the
+    strict ``match_event``. ``match_event`` is intentionally left UNCHANGED so the
+    live anchor loader keeps its exact-only behaviour; this function adds the
+    research-validated recall levers, each paired with an independent precision
+    guard (Fellegi-Sunter ANDing):
+
+    STAGE 0  BLOCK  — per-candidate (canonical) league agreement + a UTC-minute
+                      kickoff window (tighter than the strict calendar day).
+    STAGE 1  VETO   — categorical marker negative-rule: a one-sided women/youth/
+                      reserve marker REJECTS (known-club whitelist consulted
+                      first, in ``strip_markers``).
+    STAGE 4/5 NAME  — exact canonical OR two-tier Jaro-Winkler + token-sort on
+                      marker-stripped base names, with a disambiguating-token
+                      blocklist; the REVIEW band (0.84<=JW<0.92) is NOT accepted.
+    ORIENTATION     — a home/away swap (ordered events) is accepted ONLY when
+                      league AND the kickoff window independently agree AND
+                      ``allow_orientation_flip`` is set — never on name alone.
+    AMBIGUITY       — if the top-two survivors are within the score margin, or
+                      both orientations of one candidate qualify, REJECT.
+
+    Returns the unique best candidate, or None (never guess — a wrong close is
+    fake CLV, the cardinal sin).
+    """
+    leagues = candidate_leagues or {}
+    target_home = aliases.canonical(home)
+    target_away = aliases.canonical(away)
+    if not target_home or not target_away or target_home == target_away:
+        return None
+    # Base name = alias-canonicalized AND marker-stripped. Canonicalizing first
+    # preserves the strict exact-alias tier ("Man Utd"->"manchester united") so
+    # the fuzzy band only ever fires when the alias table did not already resolve
+    # the pair; marker-stripping isolates the BASE club for the JW comparison.
+    base_home = aliases.canonical(strip_markers(home))
+    base_away = aliases.canonical(strip_markers(away))
+
+    scored: list[tuple[float, EventCandidate]] = []
+    for cand in candidates:
+        # STAGE 0a: UTC-minute kickoff window (not calendar day).
+        if abs((cand.kickoff - kickoff).total_seconds()) > max_minute_drift * 60:
+            continue
+        # STAGE 0b: league block (known disagreement only).
+        cand_league = leagues.get(cand.ref)
+        same_league = _leagues_agree(league, cand_league)
+        if not same_league:
+            continue
+        if aliases.canonical(cand.home) == aliases.canonical(cand.away):
+            continue
+        cand_base_home = aliases.canonical(strip_markers(cand.home))
+        cand_base_away = aliases.canonical(strip_markers(cand.away))
+
+        # Forward orientation.
+        forward = (
+            not _markers_conflict(home, away, cand.home, cand.away)
+            and _base_name_ok(base_home, cand_base_home)
+            and _base_name_ok(base_away, cand_base_away)
+        )
+        if forward:
+            scored.append((_pair_score(base_home, base_away, cand_base_home, cand_base_away), cand))
+            continue
+
+        # Orientation flip: ONLY for unordered (tennis) by default, or for ordered
+        # events when explicitly allowed AND league is KNOWN-agreeing (not merely
+        # absent) — a swapped name coincidence is not a confirmed fixture.
+        flip_ok = (not ordered) or (
+            allow_orientation_flip and bool(league) and bool(cand_league) and same_league
+        )
+        if flip_ok:
+            swapped = (
+                not _markers_conflict(home, away, cand.away, cand.home)
+                and _base_name_ok(base_home, cand_base_away)
+                and _base_name_ok(base_away, cand_base_home)
+            )
+            if swapped:
+                scored.append(
+                    (_pair_score(base_home, base_away, cand_base_away, cand_base_home), cand)
+                )
+
+    if not scored:
+        return None
+    # Best by score, then nearest kickoff, then ref (deterministic).
+    scored.sort(key=lambda s: (-s[0], abs((s[1].kickoff - kickoff).total_seconds()), s[1].ref))
+    best_score, best = scored[0]
+    if len(scored) > 1:
+        runner_score, runner = scored[1]
+        # Two DISTINCT candidates within the ambiguity margin -> cannot tell which
+        # is the real fixture. (Duplicate captures of ONE fixture share canonical
+        # teams and are NOT ambiguous — they collapse to the nearest-kickoff one.)
+        same_fixture = aliases.canonical(runner.home) == aliases.canonical(
+            best.home
+        ) and aliases.canonical(runner.away) == aliases.canonical(best.away)
+        if not same_fixture and best_score - runner_score < _AMBIGUITY_MARGIN:
+            return None
+    return best

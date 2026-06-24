@@ -1285,6 +1285,7 @@ async def shadow_match_rate_outcomes(
         EventCandidate,
         default_aliases,
         match_event,
+        match_event_hardened,
         oddsportal_slug_names,
     )
     from app.resolution.shadow import ShadowOutcome, arcadia_base_sport
@@ -1329,12 +1330,14 @@ async def shadow_match_rate_outcomes(
     for pinnacle_key, picks in by_namespace.items():
         kickoffs = [p[5] for p in picks]
         arc_home, arc_away = aliased(Team), aliased(Team)
+        arc_league = aliased(League)
         arc_rows = (
             await session.execute(
-                select(arc_home.name, arc_away.name, Event.starts_at)
+                select(arc_home.name, arc_away.name, Event.starts_at, arc_league.key)
                 .join(Sport, Event.sport_id == Sport.id)
                 .join(arc_home, Event.home_team_id == arc_home.id)
                 .join(arc_away, Event.away_team_id == arc_away.id)
+                .join(arc_league, Event.league_id == arc_league.id, isouter=True)
                 .where(
                     Sport.key == pinnacle_key,
                     Event.starts_at.is_not(None),
@@ -1345,8 +1348,13 @@ async def shadow_match_rate_outcomes(
         ).all()
         archive = [
             EventCandidate(ref=str(i), home=h, away=a, kickoff=ko)
-            for i, (h, a, ko) in enumerate(arc_rows)
+            for i, (h, a, ko, _lg) in enumerate(arc_rows)
         ]
+        # ref -> league for the hardened matcher's STAGE-0 league block. The
+        # pinnacle archive namespace stores a single per-namespace league key
+        # (pinnacle_<sport>), so cross-league agreement is usually a no-op today,
+        # but the map keeps the block honest if/when leagues are populated.
+        archive_leagues = {str(i): lg for i, (_h, _a, _ko, lg) in enumerate(arc_rows) if lg}
         for pick_id, sport_key, league_key, home, away, kickoff, ext_ref in picks:
             # Same day window the matcher uses internally — count first so a
             # no-coverage pick is distinguishable from a strict-rejection.
@@ -1369,6 +1377,23 @@ async def shadow_match_rate_outcomes(
                         aliases=aliases,
                         max_day_drift=max_day_drift,
                     )
+            if matched_ev is None:
+                # SHADOW-only precision-hardened fallback (B): two-tier Jaro-Winkler
+                # on marker-stripped base names, league + UTC-minute block, marker
+                # veto, disambiguating-token blocklist, ambiguity reject. This path
+                # is NEVER on the live anchor loader (which stays exact-only via
+                # resolve_pinnacle_close_snaps) — it lifts the MEASURED match rate
+                # so the alias/blocking gap can be closed before any live flip.
+                matched_ev = match_event_hardened(
+                    home,
+                    away,
+                    kickoff,
+                    in_window,
+                    aliases=aliases,
+                    ordered=sport_key != "tennis",
+                    league=league_key,
+                    candidate_leagues=archive_leagues,
+                )
             matched = matched_ev is not None
             outcomes.append(
                 ShadowOutcome(

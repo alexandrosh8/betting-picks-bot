@@ -10,9 +10,13 @@ from app.resolution.matching import (
     EventCandidate,
     default_aliases,
     distinguishing_markers,
+    jaro_winkler,
     match_event,
+    match_event_hardened,
     normalize_name,
     oddsportal_slug_names,
+    strip_markers,
+    token_sort_ratio,
 )
 
 __all__ = [
@@ -20,7 +24,11 @@ __all__ = [
     "EventCandidate",
     "default_aliases",
     "distinguishing_markers",
+    "jaro_winkler",
     "match_event",
+    "match_event_hardened",
     "normalize_name",
     "oddsportal_slug_names",
+    "strip_markers",
+    "token_sort_ratio",
 ]

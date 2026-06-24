@@ -620,6 +620,32 @@ def _decode_xhash(raw: Any) -> str:
     return unquote(raw)
 
 
+def _coerce_kickoff(*candidates: Any) -> datetime | None:
+    """Pick the kickoff from the first candidate that is a REAL positive epoch.
+
+    OddsPortal serves the kickoff in ``eventData.startDate`` for some events and
+    in ``eventBody.startDate`` for others (live verify 2026-06-24: US lower-league
+    fixtures such as "Los Angeles FC 2" carried ``eventData.startDate=None`` but
+    ``eventBody.startDate=1782352800``). Both are unix epochs. A falsy/sentinel
+    value (``None``, ``False``, ``0``, ``""``) or a non-positive epoch is NOT a
+    kickoff — those are skipped so a genuinely-TBD fixture stays ``None`` (never
+    an invented time), while ``endDate: False``-style sentinels can't masquerade
+    as a start. The first candidate that parses to a tz-aware UTC datetime wins,
+    so ``eventData`` stays authoritative when present.
+    """
+    for raw in candidates:
+        # bool is an int subclass — reject True/False explicitly before the
+        # numeric guard so `startDate: False` never reads as epoch 0.
+        if isinstance(raw, bool) or not raw:
+            continue
+        if isinstance(raw, (int, float)) and raw <= 0:
+            continue
+        parsed = _parse_ts(raw)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedToken:
     """Parse the match-page SSR react-event-header JSON into a `FeedToken`.
 
@@ -642,6 +668,18 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
     if not event_id:
         raise ValueError("bootstrap JSON has no eventData.id")
     sport_id = int(event.get("sportId") or 0)
+    # Kickoff lives in eventData.startDate for some events and eventBody.startDate
+    # for others (US lower-league fixtures, live verify 2026-06-24); read whichever
+    # carries a real positive epoch, eventData first (authoritative when present).
+    starts_at = _coerce_kickoff(event.get("startDate"), body.get("startDate"))
+    if starts_at is None:
+        # Genuinely TBD on OddsPortal — log the gap, never invent a time.
+        logger.info(
+            "oddsportal bootstrap has no kickoff for event %s (%s vs %s) — TBD",
+            event_id,
+            event.get("home") or "?",
+            event.get("away") or "?",
+        )
     return FeedToken(
         event_id=event_id,
         sport_id=sport_id,
@@ -651,7 +689,7 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
         home=str(event.get("home") or ""),
         away=str(event.get("away") or ""),
         league=str(event.get("tournamentName") or ""),
-        starts_at=_parse_ts(event.get("startDate")),
+        starts_at=starts_at,
         home_score=_parse_score(event.get("homeResult")),
         away_score=_parse_score(event.get("awayResult")),
         finished=_coerce_finished(

@@ -234,6 +234,65 @@ def test_extract_bootstrap_tokens_from_match_page_html() -> None:
     assert tok.finished is not True
 
 
+# --- kickoff capture: eventData.startDate OR eventBody.startDate ------------
+# Live verify 2026-06-24 (US lower-league fixtures, 42 NULL-starts_at events):
+# OddsPortal serves the kickoff epoch in `eventData.startDate` for some events
+# and in `eventBody.startDate` for others (e.g. "Los Angeles FC 2" carried
+# eventData.startDate=None, eventBody.startDate=1782352800). The parser must
+# read whichever location holds a real positive epoch, else starts_at is NULL
+# and the dashboard shows "TBD" despite OddsPortal knowing the time.
+
+
+def _header_html(event_data: dict, event_body: dict | None = None) -> str:
+    """Minimal SSR match page carrying a react-event-header bootstrap blob."""
+    payload = json.dumps({"eventData": event_data, "eventBody": event_body or {}})
+    # single-quote the data attr (matches the live page + shipped fixture form)
+    return f"<div id='react-event-header' data='{payload}'></div>"
+
+
+def test_extract_bootstrap_captures_kickoff_from_event_data_start_date() -> None:
+    """The shipped fixture (English friendly) keeps the kickoff in
+    eventData.startDate — a 200-epoch -> UTC datetime. Regression guard so the
+    eventBody fallback never regresses the primary path."""
+    tok = extract_bootstrap_tokens(_MATCH_PAGE.read_text())
+    assert tok.starts_at == datetime(2025, 6, 16, 12, 0, tzinfo=UTC)  # epoch 1750075200
+
+
+def test_extract_bootstrap_falls_back_to_event_body_start_date() -> None:
+    """US lower-league bug: eventData.startDate is absent/None but
+    eventBody.startDate carries the real kickoff epoch. The parser must capture
+    it (the LA FC 2 case: epoch 1782352800 == 2026-06-25T02:00:00Z)."""
+    html = _header_html(
+        {"id": "M5775Uo9", "sportId": 1, "home": "Los Angeles FC 2", "away": "Minnesota 2"},
+        {"startDate": 1782352800, "endDate": False},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.starts_at == datetime(2026, 6, 25, 2, 0, tzinfo=UTC)
+
+
+def test_extract_bootstrap_event_data_start_date_wins_over_body() -> None:
+    """When both are present, eventData.startDate is authoritative (the body is
+    only a fallback for the events that omit it)."""
+    html = _header_html(
+        {"id": "X1", "sportId": 1, "home": "A", "away": "B", "startDate": 1750075200},
+        {"startDate": 1782352800},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.starts_at == datetime(2025, 6, 16, 12, 0, tzinfo=UTC)
+
+
+def test_extract_bootstrap_genuinely_missing_kickoff_stays_none() -> None:
+    """A truly-TBD fixture (no positive epoch anywhere) yields starts_at=None —
+    NEVER an invented time. `endDate: False` and a 0/negative epoch are not a
+    kickoff and must not be mistaken for one."""
+    html = _header_html(
+        {"id": "X2", "sportId": 1, "home": "A", "away": "B", "startDate": None},
+        {"startDate": False, "endDate": 0},
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.starts_at is None
+
+
 class _FakeResponse:
     def __init__(self, *, text: str = "", status_code: int = 200) -> None:
         self.text = text

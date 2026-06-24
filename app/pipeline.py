@@ -953,7 +953,11 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 odds_age_seconds=age,
                 liquidity=None,
                 reason_summary=(
-                    f"value: {v.sharp_book} fair {v.sharp_fair_prob:.3f} vs "
+                    # Show the sharp fair as ODDS (1/sharp_fair_prob), apples-to-
+                    # apples with the offered odds — NOT the fair probability,
+                    # which mixed units against best_odds (display only; the edge/
+                    # EV math above is unchanged).
+                    f"value: {v.sharp_book} fair {1.0 / v.sharp_fair_prob:.2f} vs "
                     f"{v.best_book} {v.best_odds:.2f}"
                     + (
                         f" (eff {v.best_odds_effective:.2f} after commission)"

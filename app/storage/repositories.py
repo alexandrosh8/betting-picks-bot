@@ -1138,11 +1138,26 @@ async def resolve_pinnacle_close_snaps(
         EventCandidate,
         default_aliases,
         distinguishing_markers,
-        match_event,
+        match_event_hardened,
         normalize_name,
         oddsportal_slug_names,
     )
     from app.resolution.tennis_names import canonical_tennis_name
+
+    # GO-LIVE (shadow-validated, commit 1d697cd: 61.3% match-rate, 0 false merges
+    # across 62 audited): the live Pinnacle anchor matcher is now the precision-
+    # hardened cross-source matcher, NOT the exact-only match_event. It keeps every
+    # cardinal-sin guard (marker veto, disambiguating-token blocklist, ambiguity
+    # reject, degenerate-pair reject) and adds the two-tier Jaro-Winkler + token-
+    # sort recall tier that the shadow harness measured. Cross-source league
+    # taxonomies do NOT share a vocabulary here (OddsPortal league vs the per-
+    # namespace pinnacle_<sport> key), so league is passed incomparable (None on
+    # both sides) — exactly as the shadow harness effectively does; the matcher
+    # never rejects on absent league metadata. The UTC-minute window is sized to
+    # the SAME calendar drift the DB query already bounds candidates to
+    # (+/-(max_day_drift+1) days), so this can never admit a candidate the strict
+    # path would not have considered.
+    minute_drift = (max_day_drift + 1) * 24 * 60
 
     # audit #7: tennis is a two-player, UNORDERED fixture whose OddsPortal name
     # ("Surname I.") differs from arcadia's ("Firstname Surname"). Match it the
@@ -1185,14 +1200,16 @@ async def resolve_pinnacle_close_snaps(
     aliases = default_aliases()
     qhome = canonical_tennis_name(home) if is_tennis else home
     qaway = canonical_tennis_name(away) if is_tennis else away
-    matched = match_event(
+    matched = match_event_hardened(
         qhome,
         qaway,
         kickoff,
         candidates,
         aliases=aliases,
-        max_day_drift=max_day_drift,
         ordered=not is_tennis,
+        league=None,  # cross-source league taxonomies are incomparable here
+        candidate_leagues=None,
+        max_minute_drift=minute_drift,
     )
     if matched is None:
         # Fallback: OddsPortal's URL slug recovers fixtures the scraped display
@@ -1211,14 +1228,16 @@ async def resolve_pinnacle_close_snaps(
             display_markers = distinguishing_markers(home) | distinguishing_markers(away)
             slug_markers = distinguishing_markers(sh) | distinguishing_markers(sa)
             if display_markers <= slug_markers:
-                matched = match_event(
+                matched = match_event_hardened(
                     sh,
                     sa,
                     kickoff,
                     candidates,
                     aliases=aliases,
-                    max_day_drift=max_day_drift,
                     ordered=not is_tennis,
+                    league=None,  # cross-source league taxonomies are incomparable here
+                    candidate_leagues=None,
+                    max_minute_drift=minute_drift,
                 )
     if matched is None:
         return []

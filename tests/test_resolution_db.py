@@ -124,6 +124,72 @@ async def test_resolver_slug_fallback_refuses_mens_close_for_womens_pick(factory
     assert out == []  # slug dropped the marker -> guard refuses the men's close
 
 
+# --- LIVE ANCHOR PATH now runs the precision-hardened matcher (go-live flip) ---
+# resolve_pinnacle_close_snaps is the SINGLE live Pinnacle anchor matcher (the
+# pick-time sharp anchor AND the settlement close both route through it). The flip
+# to match_event_hardened lifts recall (a fuzzy spelling variant the exact-only
+# matcher rejected now resolves) WITHOUT loosening the cardinal-sin guards: a
+# reserve-vs-senior remains a REJECT (a wrong-game close = fake CLV).
+
+
+async def test_resolver_matches_exotic_spelling_variant_via_hardened(factory) -> None:  # type: ignore[no-untyped-def]
+    # "Bayer Leverkussen" (a double-s misspelling) is NOT in the alias seed, so the
+    # exact-only matcher returned [] for it. The hardened two-tier Jaro-Winkler +
+    # token-sort tier (JW 0.988 >= 0.92, token-sort 97 >= 90) now resolves it to the
+    # archive "Bayer Leverkusen" and attaches its Pinnacle close — the measured
+    # shadow lift, live.
+    await _seed_pinnacle_event(factory, "pin-b04-svw", "Bayer Leverkusen", "Werder Bremen")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref="evt-pick",
+            home="Bayer Leverkussen",  # exotic misspelling — no alias, fuzzy-only recovery
+            away="Werder Bremen",
+            kickoff=KO,
+        )
+    by_sel = {s.selection: s for s in out}
+    # re-keyed to the PICK's selection vocabulary (the misspelled home spelling)
+    assert set(by_sel) == {"Bayer Leverkussen", "Draw", "Werder Bremen"}
+    assert all(s.event_id == "evt-pick" for s in out)
+    assert all(s.bookmaker == "Pinnacle" for s in out)
+    assert by_sel["Bayer Leverkussen"].decimal_odds == pytest.approx(2.10)
+
+
+async def test_resolver_rejects_reserve_archive_for_senior_pick(factory) -> None:  # type: ignore[no-untyped-def]
+    # WRONG-GAME GUARD (reserve veto): a SENIOR pick ("Real Madrid") must NEVER
+    # borrow the RESERVE side's ("Real Madrid B" = Castilla) Pinnacle close. The
+    # hardened matcher's categorical marker veto REJECTS the one-sided reserve
+    # marker even though the base club name matches -> [] (no fake CLV).
+    await _seed_pinnacle_event(factory, "pin-rmb-getafe", "Real Madrid B", "Getafe")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref="evt-pick",
+            home="Real Madrid",  # senior side — must not attach the "B" reserve close
+            away="Getafe",
+            kickoff=KO,
+        )
+    assert out == []
+
+
+async def test_resolver_rejects_senior_archive_for_reserve_pick(factory) -> None:  # type: ignore[no-untyped-def]
+    # The mirror direction: a RESERVE pick ("Real Madrid B") must not borrow the
+    # SENIOR "Real Madrid" close either — the marker veto is symmetric.
+    await _seed_pinnacle_event(factory, "pin-rm-getafe", "Real Madrid", "Getafe")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref="evt-pick",
+            home="Real Madrid B",
+            away="Getafe",
+            kickoff=KO,
+        )
+    assert out == []
+
+
 async def test_resolver_duplicate_archive_matches_one(factory) -> None:  # type: ignore[no-untyped-def]
     # Two archive events for the SAME fixture (same teams + kickoff) are
     # DUPLICATE captures of ONE game, not two distinct fixtures (a team plays
@@ -347,6 +413,134 @@ async def test_shadow_match_rate_since_filters_old_kickoffs(factory) -> None:  #
         outcomes = await shadow_match_rate_outcomes(session, since=KO + timedelta(days=1))
 
     assert all(o.league != _SHADOW_LEAGUE for o in outcomes)
+
+
+# --- WRONG-GAME SAFETY-NET AUDIT over the live anchor path (read-only) ----------
+_AUDIT_LEAGUE = "wrong-game-audit-epl"
+
+
+def _audit_pick(event_id: str, home: str, created_at: datetime) -> PickOut:
+    """A recent soccer pick for the wrong-game audit sampler (created_at within the
+    audit lookback so the sampler selects it)."""
+    p = _shadow_pick(event_id)
+    return p.model_copy(
+        update={"league": _AUDIT_LEAGUE, "selection": home, "created_at": created_at}
+    )
+
+
+async def test_wrong_game_audit_passes_a_correct_live_anchor(factory) -> None:  # type: ignore[no-untyped-def]
+    # End-to-end over the LIVE anchor path: a pick that resolves a SAME-GAME
+    # Pinnacle archive event (alias match, same kickoff) raises NO wrong_game
+    # anomaly. Read-only — the audit attaches no close and writes no pick.
+    from app.maintenance.wrong_game_audit import audit_live_pinnacle_anchors
+
+    now = datetime(2027, 3, 1, 12, 0, tzinfo=UTC)
+    ko = now + timedelta(hours=6)
+    await _seed_event(
+        factory, "audit-pin-ok", "Manchester United", "Chelsea", ko, "pinnacle_soccer"
+    )
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _audit_pick("audit-evt-ok", "Man Utd", now - timedelta(hours=1)),
+            EventTeams(home="Man Utd", away="Chelsea", league=_AUDIT_LEAGUE, starts_at=ko),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        await session.commit()
+    anomalies = await audit_live_pinnacle_anchors(factory, now)
+    assert [a for a in anomalies if a.code == "wrong_game_anchor"] == []
+
+
+async def test_wrong_game_audit_no_anomaly_when_no_archive_coverage(factory) -> None:  # type: ignore[no-untyped-def]
+    # A pick with NO pinnacle archive event in its window resolves no anchor, so
+    # the audit has nothing to verify -> clean (a coverage gap is not a wrong game).
+    from app.maintenance.wrong_game_audit import audit_live_pinnacle_anchors
+
+    now = datetime(2027, 4, 1, 12, 0, tzinfo=UTC)
+    ko = now + timedelta(hours=6)
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _audit_pick("audit-evt-nocov", "Solo", now - timedelta(hours=1)),
+            EventTeams(home="Solo", away="Lonely", league=_AUDIT_LEAGUE, starts_at=ko),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        await session.commit()
+    anomalies = await audit_live_pinnacle_anchors(factory, now)
+    assert [a for a in anomalies if a.code == "wrong_game_anchor"] == []
+
+
+async def test_wrong_game_audit_passes_a_correct_slug_fallback_anchor(factory) -> None:  # type: ignore[no-untyped-def]
+    # COVERAGE: the live loader has a SLUG-fallback second match. A CORRECT
+    # slug-accepted anchor (display name too noisy for the primary, but the clean
+    # OddsPortal slug matches the SAME game) must raise NO anomaly — the audit
+    # exercises the slug path without false-alarming.
+    from app.maintenance.wrong_game_audit import audit_live_pinnacle_anchors
+
+    now = datetime(2027, 5, 1, 12, 0, tzinfo=UTC)
+    ko = now + timedelta(hours=6)
+    slug_url = (
+        "https://www.oddsportal.com/football/germany/b/bayern-munich-Ab12Cd34/dortmund-Ef56Gh78/"
+    )
+    await _seed_event(factory, "audit-pin-slug", "Bayern Munich", "Dortmund", ko, "pinnacle_soccer")
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _audit_pick(slug_url, "Bayern Munich Allianz Sponsor", now - timedelta(hours=1)),
+            EventTeams(
+                home="Bayern Munich Allianz Sponsor",
+                away="Dortmund",
+                league=_AUDIT_LEAGUE,
+                starts_at=ko,
+            ),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        await session.commit()
+    anomalies = await audit_live_pinnacle_anchors(factory, now)
+    assert [a for a in anomalies if a.code == "wrong_game_anchor"] == []
+
+
+async def test_wrong_game_audit_flags_wrong_game_slug_fallback_anchor(factory) -> None:  # type: ignore[no-untyped-def]
+    # THE BLIND-SPOT GUARD: a DEFECTIVE OddsPortal slug names a DIFFERENT team than
+    # the pick's display ("Lazio" pick, but the URL slug parses "inter"/"milan").
+    # The live loader's slug fallback then attaches the INTER v Milan Pinnacle
+    # close to the LAZIO pick — a real wrong-game close (fake CLV) reaching prod via
+    # a bad slug. The audit MUST re-run the slug path and FLAG it (display "Lazio"
+    # != anchor "Inter"); without slug coverage in the audit this anchor is a silent
+    # blind spot. Read-only.
+    from app.maintenance.wrong_game_audit import audit_live_pinnacle_anchors
+
+    now = datetime(2027, 7, 1, 12, 0, tzinfo=UTC)
+    ko = now + timedelta(hours=6)
+    bad_slug_url = "https://www.oddsportal.com/football/italy/i/inter-Ab12Cd34/milan-Ef56Gh78/"
+    await _seed_event(factory, "audit-pin-inter", "Inter", "Milan", ko, "pinnacle_soccer")
+    async with factory() as session:
+        await persist_pick(
+            session,
+            _audit_pick(bad_slug_url, "Lazio", now - timedelta(hours=1)),
+            EventTeams(home="Lazio", away="Milan", league=_AUDIT_LEAGUE, starts_at=ko),
+            "value-sharp-vs-soft",
+            "v3",
+        )
+        await session.commit()
+    # Sanity: the live loader DOES attach the wrong (Inter) close to the Lazio pick
+    # via the bad slug — so this is a genuine wrong-game path, not a contrivance.
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref=bad_slug_url,
+            home="Lazio",
+            away="Milan",
+            kickoff=ko,
+        )
+    assert out  # wrong-game close attaches via the defective slug
+    # The safety net MUST catch it.
+    anomalies = await audit_live_pinnacle_anchors(factory, now)
+    assert any(a.code == "wrong_game_anchor" for a in anomalies)
 
 
 async def _seed_event(  # type: ignore[no-untyped-def]

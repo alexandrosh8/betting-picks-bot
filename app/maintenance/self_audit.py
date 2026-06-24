@@ -101,12 +101,21 @@ async def run_self_audit(
                 OddsSnapshot.bookmaker.notin_(_SHARP_ARCHIVE_BOOKMAKERS)
             )
         )
-    return evaluate_anomalies(
+    found = evaluate_anomalies(
         now,
         awaiting_backlog=backlog,
         newest_odds=newest,
         awaiting_grace_hours=int(awaiting_grace.total_seconds() // 3600),
     )
+    # WRONG-GAME SAFETY NET (go-live, hardened Pinnacle matcher): independently
+    # re-verify recently-accepted live Pinnacle anchors are the SAME fixture. A
+    # wrong-game close is fake CLV — the cardinal sin — so any mismatch surfaces
+    # here as an ERROR through the same monitor channel. Read-only; imported lazily
+    # to keep the resolution import out of the hot self-audit path.
+    from app.maintenance.wrong_game_audit import audit_live_pinnacle_anchors
+
+    found.extend(await audit_live_pinnacle_anchors(session_factory, now))
+    return found
 
 
 async def self_audit_job(

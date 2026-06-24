@@ -52,6 +52,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any, Protocol
 from urllib.parse import unquote, urljoin
 
@@ -89,7 +90,10 @@ class FeedDecryptError(ValueError):
 # Browser-TLS fingerprint for curl_cffi. Same INTENT as the Playwright path's
 # UA/locale spoofing — present a coherent human fingerprint, never defeat
 # anti-bot beyond TLS impersonation. GET-only; no cookies, no login.
-_IMPERSONATE = "chrome"
+# PINNED to a fixed chrome version (F1): bare "chrome" floats to curl_cffi's
+# rolling default, so an upgrade could silently change our TLS fingerprint
+# mid-deploy. Kept in lockstep with oddsportal_json_session.PINNED_IMPERSONATE.
+_IMPERSONATE = "chrome146"
 _FEED_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
     "Accept": "application/json,text/plain,*/*",
@@ -111,12 +115,29 @@ _KDF_DKLEN = 32
 _DECRYPT_BUNDLE_VERSION = "app-BIq1dU23.js"
 
 
+@lru_cache(maxsize=4)
+def _pbkdf2(passphrase: str, salt: bytes, iterations: int, dklen: int) -> bytes:
+    """Memoized PBKDF2 keyed ON ITS INPUTS (F5).
+
+    Caching on the constants — not unconditionally — means a CHANGE to any KDF
+    constant (a real bundle rotation, or a test/monkeypatch tampering with
+    `_KDF_PASSPHRASE`) produces a DIFFERENT cache key and re-derives, so the
+    fingerprint tamper-guard still fires. Unchanged constants (the steady state)
+    hit the cache, so the ~1000-iter derive runs ONCE per process instead of once
+    per feed body (~700/cycle)."""
+    return hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, iterations, dklen)
+
+
 def _derive_key() -> bytes:
     """The static AES-256 key (PBKDF2 of the public-bundle constants above).
-    Verified to decrypt the live feed to valid JSON (verify 2026-06-22)."""
-    return hashlib.pbkdf2_hmac(
-        "sha256", _KDF_PASSPHRASE.encode(), _KDF_SALT, _KDF_ITERATIONS, _KDF_DKLEN
-    )
+    Verified to decrypt the live feed to valid JSON (verify 2026-06-22).
+
+    Reads the current module constants and delegates to the input-keyed
+    `_pbkdf2` cache, so it stays sensitive to a constant edit (the tamper guard
+    keeps working) while paying the PBKDF2 cost only once per distinct constant
+    set. The async `oddsportal_json_session.cached_decrypt_key` is the documented
+    entry that pairs this with the fingerprint check."""
+    return _pbkdf2(_KDF_PASSPHRASE, _KDF_SALT, _KDF_ITERATIONS, _KDF_DKLEN)
 
 
 # Tamper fingerprint: a one-way SHA-256 of the derived key, truncated to a short

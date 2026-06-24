@@ -13,14 +13,22 @@ profile keep working; install with `uv sync --extra backfill`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.metadata
 import logging
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from app.ingestion.base import EventDirectory, EventTeams, ScraperProxy
+
+# Pinned browser-TLS impersonation for the curl_cffi JSON path (F1): a fixed
+# chrome version, not bare "chrome" (which would drift with a curl_cffi upgrade).
+# Sourced from the cycle orchestrator so both modules agree on one value. The
+# session module imports only from app.schemas, so this is not circular.
+from app.ingestion.oddsportal_json_session import PINNED_IMPERSONATE as _JSON_IMPERSONATE
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
 
@@ -650,6 +658,136 @@ async def _default_scrape(**kwargs: Any) -> Any:
     return await run_scraper(command=CommandEnum.UPCOMING_MATCHES, **kwargs)
 
 
+@dataclass(frozen=True)
+class _ListingResult:
+    """A `run_scraper`-shaped result whose `.success` carries ONLY match URLs.
+
+    The JSON path needs the dated listing to enumerate match URLs and NOTHING
+    else — team context comes from each match's own curl_cffi HTML fetch, not a
+    per-match Playwright render. So `.success` is a list of ``{"match_link": url}``
+    dicts (the only key `fetch_odds`'s JSON cycle reads), mirroring
+    `ScrapeResult.success` shape minus every odds/team field."""
+
+    success: list[dict[str, Any]]
+    failed: tuple[Any, ...] = ()
+    partial: tuple[Any, ...] = ()
+
+
+async def _default_listing_scrape(
+    *,
+    sport: str,
+    date: str | None,
+    leagues: Sequence[str] | None,
+    headless: bool = True,
+    browser_timezone_id: str | None = None,
+    browser_locale_timezone: str | None = None,
+    proxy_url: str | None = None,
+    proxy_user: str | None = None,
+    proxy_pass: str | None = None,
+    **_ignored: Any,
+) -> _ListingResult:
+    """LISTING-ONLY OddsHarvester drive — enumerate match URLs, NO per-match render.
+
+    This is the SAVINGS pivot for the JSON feed (root-cause fix 2026-06-24): the
+    proven `run_scraper(UPCOMING_MATCHES)` path runs the full pipeline
+    (listing -> `extract_match_odds` -> per-match `page.goto`), and OddsHarvester
+    opens EVERY match page in Playwright even with ``markets=[]`` (it reads the
+    header for team context). That per-match render is the whole CPU cost the
+    migration must remove. So when the JSON feed is on, the listing must yield
+    ONLY URLs and the per-match odds + TEAMS both come from curl_cffi.
+
+    This function reuses OddsHarvester's OWN, proven listing logic (navigate the
+    dated upcoming page, dismiss banners, lazy-load scroll, date-filter the rows,
+    `extract_match_links`) but STOPS before `extract_match_odds` — so exactly ONE
+    Playwright page is opened per (sport, date, league) listing, and ZERO match
+    pages are rendered. The returned URLs feed `oddsportal_json.scrape_match_odds`,
+    which GET-fetches each match page over curl_cffi and reads the team context
+    out of THAT HTML (`extract_bootstrap_tokens`).
+
+    READ-ONLY: it only navigates + reads the DOM (GET semantics); no odds POST,
+    no betting surface. Proxy creds reach Playwright as separate fields (never in
+    a logged URL), exactly like the full path.
+    """
+    register_extra_leagues()
+    _patch_upstream_quirks()
+
+    from datetime import datetime as _dt
+
+    from oddsharvester.core.browser.cookies import CookieDismisser
+    from oddsharvester.core.browser.market_navigation import MarketTabNavigator
+    from oddsharvester.core.browser.scrolling import PageScroller
+    from oddsharvester.core.browser.selection import SelectionManager
+    from oddsharvester.core.odds_portal_market_extractor import OddsPortalMarketExtractor
+    from oddsharvester.core.odds_portal_scraper import OddsPortalScraper
+    from oddsharvester.core.playwright_manager import PlaywrightManager
+    from oddsharvester.core.sport_market_registry import SportMarketRegistrar
+    from oddsharvester.core.url_builder import URLBuilder
+    from oddsharvester.utils.constants import GOTO_TIMEOUT_MS
+    from oddsharvester.utils.proxy_manager import ProxyManager
+
+    SportMarketRegistrar.register_all_markets()
+    proxy_manager = ProxyManager(proxy_url=proxy_url, proxy_user=proxy_user, proxy_pass=proxy_pass)
+    playwright_manager = PlaywrightManager()
+    selection_manager = SelectionManager()
+    scroller = PageScroller()
+    market_extractor = OddsPortalMarketExtractor(
+        scroller=scroller,
+        tab_navigator=MarketTabNavigator(),
+        selection_manager=selection_manager,
+    )
+    scraper = OddsPortalScraper(
+        playwright_manager=playwright_manager,
+        market_extractor=market_extractor,
+        scroller=scroller,
+        cookie_dismisser=CookieDismisser(),
+        selection_manager=selection_manager,
+        preview_submarkets_only=False,
+    )
+
+    # league=None => the league-less dated daily page (every league that day).
+    league_list: list[str | None] = list(leagues) if leagues else [None]
+    links: list[str] = []
+    seen: set[str] = set()
+    try:
+        await scraper.start_playwright(
+            headless=headless,
+            browser_locale_timezone=browser_locale_timezone,
+            browser_timezone_id=browser_timezone_id,
+            proxy=proxy_manager.get_current_proxy(),
+        )
+        page = playwright_manager.page
+        if page is None:  # pragma: no cover - start_playwright raises on failure
+            return _ListingResult(success=[])
+        for league in league_list:
+            url = URLBuilder.get_upcoming_matches_url(sport=sport, date=date or "", league=league)
+            await page.goto(url, timeout=GOTO_TIMEOUT_MS, wait_until="domcontentloaded")
+            await scraper._prepare_page_for_scraping(page=page)
+            await scroller.scroll_until_loaded(
+                page=page,
+                timeout=30,
+                scroll_pause_time=2,
+                max_scroll_attempts=3,
+                content_check_selector="div[class*='eventRow']",
+            )
+            date_filter = None
+            if league and date:
+                try:
+                    date_filter = _dt.strptime(date, "%Y%m%d").date()
+                except ValueError:  # pragma: no cover - dates are computed YYYYMMDD
+                    date_filter = None
+            # extract_match_links returns ONLY URLs — no match page is rendered.
+            for link in await scraper.extract_match_links(
+                page=page, date_filter=date_filter, skip_started=True
+            ):
+                if link not in seen:
+                    seen.add(link)
+                    links.append(link)
+    finally:
+        await scraper.stop_playwright()
+
+    return _ListingResult(success=[{"match_link": link} for link in links])
+
+
 async def _default_json_scrape(
     match_url: str,
     *,
@@ -658,14 +796,13 @@ async def _default_json_scrape(
     now: datetime,
     proxy: ScraperProxy | None = None,
     registry: BookmakerRegistry | None = None,
+    session: Any | None = None,
     geo: str = "GB",
     lang: str = "en",
 ) -> list[OddsSnapshotIn]:
     """Drive the curl_cffi JSON-feed path for ONE match (lazy curl_cffi import).
 
-    GET-only: opens a short-lived browser-TLS-impersonating ``AsyncSession``
-    (optionally through one rotating scrape proxy, creds via the session's proxy
-    field — never embedded in a logged URL) and hands it to
+    GET-only: hands a browser-TLS-impersonating ``AsyncSession`` to
     `oddsportal_json.scrape_match_odds`, which fetches + decrypts + parses the
     feed into `OddsSnapshotIn` rows matching the Playwright contract, translating
     numeric provider ids to canonical book NAMES via the shared `registry`
@@ -673,12 +810,31 @@ async def _default_json_scrape(
     only exposes ``.get`` to that function — structurally incapable of
     POST/PUT/DELETE (READ-ONLY market-data safety rule). Any failure propagates
     to the caller, which SKIPS this match (a scrape gap — no Playwright
-    fallback, operator instruction 2026-06-23)."""
-    from curl_cffi.requests import AsyncSession
+    fallback, operator instruction 2026-06-23).
 
+    F1: when the cycle supplies a SHARED ``session`` it is reused (one session
+    for the whole ~700-GET cycle, pinned chrome impersonation, ``max_clients``
+    sized to the fan-out). Only when no shared session is given (e.g. the
+    off-window single-link path) does this open a short-lived one — optionally
+    through one rotating proxy (creds inlined only here, never logged)."""
     from app.ingestion.oddsportal_json import scrape_match_odds
 
-    session_kwargs: dict[str, Any] = {}
+    if session is not None:
+        # Reuse the cycle's shared session (F1) — proxy is already bound on it.
+        return await scrape_match_odds(
+            match_url,
+            markets=markets,
+            directory=directory,
+            now=now,
+            session=session,
+            registry=registry,
+            geo=geo,
+            lang=lang,
+        )
+
+    from curl_cffi.requests import AsyncSession
+
+    session_kwargs: dict[str, Any] = {"impersonate": _JSON_IMPERSONATE}
     if proxy is not None and proxy.url:
         # curl_cffi takes credentials inline in the proxy URL; build it here at
         # the call boundary (never logged) from the separated ScraperProxy
@@ -686,13 +842,13 @@ async def _default_json_scrape(
         inline = _proxy_with_creds(proxy)
         session_kwargs["proxies"] = {"https": inline, "http": inline}
 
-    async with AsyncSession(**session_kwargs) as session:
+    async with AsyncSession(**session_kwargs) as own_session:
         return await scrape_match_odds(
             match_url,
             markets=markets,
             directory=directory,
             now=now,
-            session=session,
+            session=own_session,
             registry=registry,
             geo=geo,
             lang=lang,
@@ -743,6 +899,8 @@ class OddsPortalLoader:
         cycle_timeout_seconds: float | None = None,
         use_json_feed: bool = False,
         json_scrape_fn: JsonScrapeFn | None = None,
+        listing_scrape_fn: ScrapeFn | None = None,
+        json_concurrency: int = 8,
     ) -> None:
         """`leagues_by_sport_key` maps our sport key (e.g. "soccer") to
         (oddsharvester sport, [oddsportal league slugs]). `markets_by_sport_key`
@@ -827,6 +985,22 @@ class OddsPortalLoader:
         # rotation fails CLOSED with a loud WARNING (never a wrong price).
         self._use_json_feed = use_json_feed
         self._json_scrape = json_scrape_fn or _default_json_scrape
+        # LISTING-ONLY scrape used by the JSON path: enumerates match URLs via a
+        # SINGLE Playwright listing page (no per-match render). The per-match odds
+        # + TEAMS both come from curl_cffi (`_json_scrape`). Resolution order:
+        #   1. an explicit `listing_scrape_fn` (purpose-built listing injection);
+        #   2. else an injected `scrape_fn` (tests wire the listing via scrape_fn
+        #      — its fake yields the match-URL dicts directly, no oddsharvester);
+        #   3. else the real `_default_listing_scrape` (OddsHarvester link-only
+        #      drive — one listing page, zero per-match renders).
+        # Only ever used when `use_json_feed` — the default path keeps `_scrape`.
+        self._listing_scrape = listing_scrape_fn or scrape_fn or _default_listing_scrape
+        # JSON per-match fan-out width (F3 bounded semaphore). The shared session's
+        # max_clients must be >= this or curl_cffi serialises the surplus handles.
+        self._json_concurrency = json_concurrency
+        # Per-sport previous-cycle row count, the R3 completeness-gate baseline.
+        # Updated only after a COMPLETE cycle so a degraded one can't lower the bar.
+        self._prev_cycle_rows: dict[str, int] = {}
 
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
@@ -899,38 +1073,156 @@ class OddsPortalLoader:
             return None
         return snaps
 
-    async def _json_odds_for_match(
+    @contextlib.asynccontextmanager
+    async def _json_session(self) -> AsyncIterator[Any | None]:
+        """The cycle's SHARED curl_cffi session (F1), or None for the test fake.
+
+        In production (`self._json_scrape is _default_json_scrape`) this opens ONE
+        ``AsyncSession`` for the whole cycle with ``max_clients`` sized to the
+        fan-out (curl_cffi serialises handles past ``max_clients``, so it MUST be
+        >= the concurrency N) and the pinned chrome impersonation. One proxy is
+        bound for the cycle (rotating per CYCLE, not per match — a single session
+        binds one proxy set; creds inlined here only, never logged). When a test
+        injects a fake `json_scrape_fn`, no real session exists — it yields None
+        and the fake runs with no network.
+
+        GET-only: the session is handed to `scrape_match_odds`, which only ever
+        calls ``.get`` — structurally incapable of POST/PUT/DELETE (READ-ONLY)."""
+        if self._json_scrape is not _default_json_scrape:
+            yield None  # injected fake scrape — no shared session needed
+            return
+        from curl_cffi.requests import AsyncSession
+
+        session_kwargs: dict[str, Any] = {
+            "impersonate": _JSON_IMPERSONATE,
+            # max_clients MUST be >= the semaphore N or curl_cffi serialises the
+            # surplus in-flight handles, silently defeating the concurrency.
+            "max_clients": max(self._json_concurrency, 10),
+        }
+        proxy = self._next_proxy()
+        if proxy is not None and proxy.url:
+            inline = _proxy_with_creds(proxy)
+            session_kwargs["proxies"] = {"https": inline, "http": inline}
+        async with AsyncSession(**session_kwargs) as session:
+            yield session
+
+    async def _json_scrape_raw(
         self,
-        match: dict[str, Any],
+        match_url: str,
         now: datetime,
         markets: Sequence[str],
-        registry: BookmakerRegistry | None = None,
-    ) -> list[OddsSnapshotIn] | None:
-        """`_json_odds_for_url` for a LISTED match dict (fetch_odds path).
+        registry: BookmakerRegistry | None,
+        session: Any | None = None,
+    ) -> list[OddsSnapshotIn]:
+        """ONE match's JSON scrape for the cycle orchestrator — curl errors PROPAGATE.
 
-        Resolves the scrapeable match URL from the listing dict and delegates; a
-        synthetic-id / teamless match returns ``None`` (the match is skipped — no
-        Playwright fallback)."""
-        home = str(match.get("home_team") or "").strip()
-        away = str(match.get("away_team") or "").strip()
-        if not home or not away:
-            return None
-        match_url = str(match.get("match_link") or f"{home}|{away}|{match.get('match_date', '')}")
-        return await self._json_odds_for_url(match_url, now, markets, registry)
+        Unlike `_json_odds_for_url` (which swallows every failure into a None gap),
+        this RAISES on a transport failure so the orchestrator's tenacity retry can
+        classify it (R1) and retry a transient blip (R2). A non-scrapeable URL
+        (synthetic id) and an off-window / empty feed both return ``[]`` (a benign
+        gap, never an error). Team context is registered inside the JSON scrape
+        from the match-page HTML — so this needs ONLY the URL (no Playwright).
 
-    async def _scrape_bounded(self, **kwargs: Any) -> Any:
+        ``session`` is the cycle's SHARED curl_cffi session (F1) when present —
+        passed straight through so every match reuses ONE session. A None proxy is
+        passed because the shared session already carries the cycle's proxy; the
+        per-match proxy rotation only applies on the session-less single-link
+        path. The fake `json_scrape_fn` in tests ignores the session kwarg."""
+        if not match_url.startswith("http"):
+            return []  # synthetic id — no real match page, benign gap (not an error)
+        kwargs: dict[str, Any] = {
+            "markets": markets,
+            "directory": self._directory,
+            "now": now,
+            "registry": registry,
+        }
+        if session is not None:
+            kwargs["session"] = session
+        else:
+            kwargs["proxy"] = self._next_proxy()
+        snaps = await self._json_scrape(match_url, **kwargs)
+        return list(snaps)
+
+    async def _json_cycle_snapshots(
+        self,
+        matches: list[dict[str, Any]],
+        now: datetime,
+        markets: Sequence[str],
+        sport_key: str,
+    ) -> list[OddsSnapshotIn]:
+        """Fan the listed match URLs out over the curl_cffi JSON feed (F3/R1/R2)
+        and gate the cycle's completeness (R3).
+
+        Each match's odds + TEAMS come from `_json_scrape_raw` (curl_cffi reads the
+        match-page HTML — no Playwright render). The shared per-cycle bookmaker
+        registry is resolved once (F5-per-cycle). `run_cycle` bounds concurrency
+        with a semaphore, retries transient failures with backoff OUTSIDE the slot,
+        and marks the cycle incomplete (fail-closed) on a row collapse or a wholly-
+        missing market. An INCOMPLETE verdict is surfaced LOUDLY but still returns
+        the rows it got (append-only persistence + dedupe never overwrite a healthy
+        prior snapshot; the WARNING flags the degradation for /health)."""
+        from app.ingestion.oddsportal_json_session import run_cycle
+
+        registry = self._new_registry()
+        match_urls = [
+            normalize_match_link(str(m.get("match_link") or ""))
+            for m in matches
+            if str(m.get("match_link") or "").startswith("http")
+        ]
+
+        # F1: ONE shared curl_cffi session for the whole cycle (~700 GETs), with
+        # max_clients sized to the fan-out (else curl_cffi serialises the surplus)
+        # and the pinned chrome impersonation. Only the PRODUCTION default scrape
+        # uses a real session; an injected test fake takes no session. The session
+        # is created once here and reused by every match via `_json_scrape_raw`.
+        async with self._json_session() as session:
+
+            async def scrape_one(url: str) -> list[OddsSnapshotIn]:
+                return await self._json_scrape_raw(url, now, markets, registry, session)
+
+            outcome = await run_cycle(
+                match_urls,
+                scrape_one,
+                markets=markets,
+                concurrency=self._json_concurrency,
+                prev_cycle_rows=self._prev_cycle_rows.get(sport_key),
+            )
+        if not outcome.complete:
+            logger.warning(
+                "oddsportal %s JSON cycle flagged INCOMPLETE: %s "
+                "(transient=%d permanent=%d unknown=%d) — slate degraded, see /health",
+                sport_key,
+                outcome.reason,
+                outcome.transient_failures,
+                outcome.permanent_failures,
+                outcome.unknown_failures,
+            )
+        # Track this cycle's row count as the next cycle's completeness baseline,
+        # but ONLY when the cycle was COMPLETE — else a degraded cycle would lower
+        # the floor and mask a continued degradation next time.
+        if outcome.complete and outcome.snapshots:
+            self._prev_cycle_rows[sport_key] = len(outcome.snapshots)
+        return outcome.snapshots
+
+    async def _scrape_bounded(self, *, scrape_fn: ScrapeFn | None = None, **kwargs: Any) -> Any:
         """`_scrape_with_failover` under the per-cycle watchdog.
 
         On timeout the underlying scrape coroutine is cancelled (asyncio.wait_for
         cancels the awaitable) and a sentinel "no matches" result is returned, so
         ONE hung match-page/Over-Under extraction can never wedge the whole cycle.
         Logs type-only (never the URL / proxy creds). ``None`` timeout = the
-        unbounded legacy path (byte-identical to before)."""
+        unbounded legacy path (byte-identical to before).
+
+        ``scrape_fn`` selects the underlying scrape (defaults to the full
+        Playwright `self._scrape`); the JSON path passes `self._listing_scrape`
+        so the dated pass enumerates URLs WITHOUT per-match renders."""
         timeout = self._cycle_timeout_seconds
         if timeout is None:
-            return await self._scrape_with_failover(**kwargs)
+            return await self._scrape_with_failover(scrape_fn=scrape_fn, **kwargs)
         try:
-            return await asyncio.wait_for(self._scrape_with_failover(**kwargs), timeout=timeout)
+            return await asyncio.wait_for(
+                self._scrape_with_failover(scrape_fn=scrape_fn, **kwargs), timeout=timeout
+            )
         except TimeoutError:
             # asyncio.wait_for raises the builtin TimeoutError (3.11+).
             # Bound exceeded: the scrape was cancelled. Treat this pass as empty —
@@ -942,17 +1234,23 @@ class OddsPortalLoader:
             )
             return None
 
-    async def _scrape_with_failover(self, **kwargs: Any) -> Any:
+    async def _scrape_with_failover(
+        self, *, scrape_fn: ScrapeFn | None = None, **kwargs: Any
+    ) -> Any:
         """Scrape via the proxy pool, rotating with failover: on an exception OR
         a zero-match result (the throttle signature), retry with the NEXT proxy.
         Empty pool -> a single direct call (host IP, default). Credentials go via
         separate proxy_user/proxy_pass kwargs (never in the URL); logging is
         index-only so nothing leaks. The sweep is CAPPED at ``_MAX_PROXY_FAILOVER``
         proxies so a genuinely-empty slate (no games that day) can't burn the whole
-        pool and starve later sports in the cycle."""
+        pool and starve later sports in the cycle.
+
+        ``scrape_fn`` selects the scrape coroutine (default `self._scrape`); the
+        JSON path injects `self._listing_scrape` (listing-only, URLs only)."""
+        scrape = scrape_fn or self._scrape
         pool = self._proxy_pool
         if not pool:
-            return await self._scrape(**kwargs)
+            return await scrape(**kwargs)
         n = len(pool)
         tries = min(n, _MAX_PROXY_FAILOVER)
         result: Any = None
@@ -960,7 +1258,7 @@ class OddsPortalLoader:
             idx = (self._proxy_cursor + attempt) % n
             proxy = pool[idx]
             try:
-                result = await self._scrape(
+                result = await scrape(
                     **kwargs,
                     proxy_url=proxy.url,
                     proxy_user=proxy.username,
@@ -1000,16 +1298,16 @@ class OddsPortalLoader:
         else:
             dates = [self._date]
 
-        # SAVINGS INVARIANT (FIX 2, 2026-06-23): when the JSON feed is on, the
-        # per-match ODDS come ONLY from curl_cffi, so the dated LISTING must run
-        # with NO markets — OddsHarvester then collects match URLs + header team
-        # context per match but SKIPS the expensive per-market tab navigation /
-        # Over-Under scroll / odds extraction (the bulk of the Playwright cost;
-        # see oddsharvester base_scraper `_scrape_match_data`, which only scrapes
-        # markets `if markets:`). Requesting the full market list here would pay
-        # the entire Playwright odds cost AND the JSON cost — zero net savings,
-        # which defeats the migration. With the flag OFF the Playwright path IS
-        # the odds source, so it keeps the full configured market list.
+        # SAVINGS PIVOT (ROOT-CAUSE FIX 2026-06-24): when the JSON feed is on, the
+        # dated listing runs LISTING-ONLY (`_default_listing_scrape`): it opens a
+        # SINGLE Playwright page per (sport, date, league) to enumerate match
+        # URLs, then STOPS — it never calls `extract_match_odds`, so ZERO match
+        # pages are rendered. (The prior wire ran the FULL `run_scraper` path with
+        # markets=[]; OddsHarvester still `page.goto`s every match page to read
+        # the header for team context — no CPU win. The team context now comes
+        # from each match's OWN curl_cffi HTML in `scrape_match_odds`.) With the
+        # flag OFF the proven full Playwright path stays the odds source.
+        listing_scrape = self._listing_scrape if self._use_json_feed else self._scrape
         listing_markets: list[str] = (
             [] if self._use_json_feed else list(self._markets_for(sport_key))
         )
@@ -1019,6 +1317,7 @@ class OddsPortalLoader:
             # Per-DATE bound: a late date hanging never discards earlier dates'
             # already-collected matches (incremental progress, prod fix).
             result = await self._scrape_bounded(
+                scrape_fn=listing_scrape,
                 sport=sport,
                 date=scrape_date,
                 leagues=scrape_leagues,
@@ -1046,42 +1345,31 @@ class OddsPortalLoader:
                 seen_links.add(link)
                 matches.append(match)
 
-        snapshots: list[OddsSnapshotIn] = []
-        event_ids: list[str] = []
         markets_for_sport = self._markets_for(sport_key)
-        # One shared bookmaker id->NAME registry per cycle: the static bundle is
-        # GET-fetched once and cached across every per-match JSON scrape (only
-        # constructed when the JSON feed is on).
-        registry = self._new_registry()
+        # event_ids (the Betfair-target / /games contract) come from the LISTING
+        # URLs. On the JSON path the listing dicts carry ONLY `match_link` (no
+        # team fields — teams come from curl_cffi later), so the id derives from
+        # the normalized URL; on the Playwright path the same URL is present.
+        event_ids: list[str] = []
         for match in matches:
             home = str(match.get("home_team") or "").strip()
             away = str(match.get("away_team") or "").strip()
-            if home and away:
+            link = str(match.get("match_link") or "")
+            if link or (home and away):
                 event_ids.append(
-                    normalize_match_link(
-                        str(
-                            match.get("match_link")
-                            or f"{home}|{away}|{match.get('match_date', '')}"
-                        )
-                    )
+                    normalize_match_link(link or f"{home}|{away}|{match.get('match_date', '')}")
                 )
-            # SELECTABLE source: when the JSON feed is on, the per-match ODDS
-            # come ONLY from the curl_cffi feed — there is NO Playwright odds
-            # fallback (operator instruction 2026-06-23). A per-match JSON
-            # failure/empty is logged (type only, in _json_odds_for_url) and the
-            # match is SKIPPED — a scrape gap, exactly like a benign Playwright
-            # DOM miss. The listing pass ran markets=[] (no per-match Playwright
-            # odds), so there is no fallback data to use and none is paid for.
-            # With the flag OFF the Playwright market dict from the listing is the
-            # odds source (_convert_match). Event registration is identical (the
-            # JSON scrape reads team context from the match-page HTML).
-            if self._use_json_feed:
-                match_snaps = await self._json_odds_for_match(
-                    match, now, markets_for_sport, registry
-                )
-                if match_snaps is not None:
-                    snapshots.extend(match_snaps)
-            else:
+
+        if self._use_json_feed:
+            # Per-match ODDS + TEAMS both come from curl_cffi (no Playwright odds
+            # fallback — operator 2026-06-23). Fan the slate out under the bounded
+            # semaphore + tenacity retry orchestrator (F3/R1/R2) and gate the
+            # cycle's completeness (R3). Team context is registered by the JSON
+            # scrape itself (it reads each match-page HTML).
+            snapshots = await self._json_cycle_snapshots(matches, now, markets_for_sport, sport_key)
+        else:
+            snapshots = []
+            for match in matches:
                 snapshots.extend(self._convert_match(match, now, markets_for_sport))
         self.last_fetch_matches[sport_key] = len(matches)
         self.last_fetch_event_ids[sport_key] = tuple(dict.fromkeys(event_ids))

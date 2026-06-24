@@ -332,3 +332,173 @@ async def test_fetch_match_odds_score_only_stays_playwright() -> None:
     assert teams.home_score == 2
     assert teams.away_score == 1
     assert teams.finished is True
+
+
+# --- THE PROOF: zero per-match Playwright; teams from curl_cffi HTML ----------
+#
+# The handoff's root cause was that JSON-on still Playwright-rendered EVERY match
+# page (to read the header for team context), so there was no speed win. These
+# tests prove the fix end to end: with the flag on, the loader (1) enumerates
+# match URLs from a SINGLE listing call that carries NO team fields, and (2) gets
+# odds + TEAMS for each match from the REAL `oddsportal_json.scrape_match_odds`
+# running over a fake curl_cffi session — which makes ONLY ``.get`` calls and no
+# Playwright Page render whatsoever. Team context is derived from the curl-fetched
+# match-page HTML (the England/Ghana fixture), NOT from any listing/Playwright dict.
+
+from pathlib import Path  # noqa: E402
+
+_FIX = Path(__file__).parent / "fixtures"
+_MATCH_PAGE = (_FIX / "oddsportal_match_page_KhgvzGjJ.html").read_text()
+_FEED = (_FIX / "oddsportal_feed_KhgvzGjJ.dat").read_text()
+_BOOKIES_BUNDLE = (_FIX / "oddsportal_bookies_bundle.js").read_text()
+# The navigable match URL IS the platform-wide event identity.
+_EVENT_URL = (
+    "https://www.oddsportal.com/football/england/international-friendly/england-ghana-KhgvzGjJ/"
+)
+
+
+class _RecordingCurlSession:
+    """A curl_cffi AsyncSession stand-in that serves the England-Ghana fixtures
+    and RECORDS every call. It exposes ONLY ``.get`` (and ``.close``) — so the
+    per-match path is structurally GET-only, and any Playwright render would have
+    to go through a DIFFERENT object the JSON path never touches."""
+
+    def __init__(self) -> None:
+        self.gets: list[str] = []
+
+    async def get(self, url: str, **kwargs: Any) -> Any:
+        self.gets.append(url)
+        if "match-event/" in url:
+            text = _FEED
+        elif "bookies-" in url:
+            text = _BOOKIES_BUNDLE
+        else:
+            text = _MATCH_PAGE  # the match page HTML — carries the team context
+        return SimpleNamespace(text=text, status_code=200, headers={})
+
+    async def close(self) -> None:  # pragma: no cover - not used by the JSON path
+        pass
+
+
+def _real_json_scrape_over_curl(session: _RecordingCurlSession) -> Any:
+    """A `json_scrape_fn` that runs the REAL `scrape_match_odds` over the fake
+    curl session — proving the production per-match mechanics (HTML -> bootstrap
+    teams -> feed decrypt) without a browser and without network."""
+
+    async def scrape_match(match_url: str, **kwargs: Any) -> list[Any]:
+        from app.ingestion.oddsportal_json import scrape_match_odds
+
+        return await scrape_match_odds(
+            match_url,
+            markets=kwargs["markets"],
+            directory=kwargs["directory"],
+            now=kwargs["now"],
+            session=session,
+            registry=kwargs.get("registry"),
+        )
+
+    return scrape_match
+
+
+# The listing yields ONLY the match URL — NO home_team/away_team/league. So if
+# team context appears in the directory, it can ONLY have come from the curl_cffi
+# match-page HTML (the whole point of the fix).
+_URL_ONLY_LISTED_MATCH = {"match_link": _EVENT_URL}
+
+
+async def test_json_per_match_uses_only_curl_get_no_playwright_render() -> None:
+    """PROOF (savings): with JSON on, the per-match path makes ONLY curl_cffi
+    ``.get`` calls — NO Playwright page render / page.content(). The fake curl
+    session is the ONLY transport the per-match scrape touches; it records 6 GETs
+    (1 HTML + 1 bookmaker bundle + 4 feed) and ZERO renders. The listing fake is
+    the single Playwright-shaped call and it runs ONCE (URL enumeration), not per
+    match. If the old bug regressed (a per-match Playwright render), this path
+    would need a Page object the JSON scrape never imports — there isn't one."""
+    directory = EventDirectory()
+    curl = _RecordingCurlSession()
+
+    listing_calls = {"n": 0}
+
+    async def listing_scrape(**kwargs: Any) -> Any:
+        listing_calls["n"] += 1
+        # markets=[] AND, critically, the dicts carry ONLY the URL — no team
+        # fields, so no per-match Playwright header read produced them.
+        assert kwargs["markets"] == []
+        return SimpleNamespace(success=[dict(_URL_ONLY_LISTED_MATCH)], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["international-friendly"])},
+        markets=("1x2", "over_under_2_5", "btts", "double_chance"),
+        scrape_fn=listing_scrape,
+        use_json_feed=True,
+        json_scrape_fn=_real_json_scrape_over_curl(curl),
+    )
+
+    snaps = await loader.fetch_odds("soccer")
+
+    # 1. The per-match transport was curl_cffi GET-only: 6 GETs, no render method.
+    assert curl.gets, "the JSON per-match path must have fetched via curl .get"
+    assert len(curl.gets) == 6, f"expected 1 HTML + 1 bundle + 4 feed GETs, got {curl.gets}"
+    assert sum("match-event/" in u for u in curl.gets) == 4  # the 4 market feeds
+    assert sum("bookies-" in u for u in curl.gets) == 1
+    # The match PAGE HTML was GET-fetched by curl (this is where teams come from).
+    assert any(u == _EVENT_URL for u in curl.gets)
+
+    # 2. The listing (the only Playwright-shaped call) ran ONCE — not per match.
+    assert listing_calls["n"] == 1, "listing must be a single URL-enumeration call"
+
+    # 3. Team context was derived from the curl-fetched HTML, NOT a Playwright/
+    #    listing dict (the listing carried only the URL).
+    teams = directory.lookup(_EVENT_URL)
+    assert teams is not None
+    assert teams.home == "England"
+    assert teams.away == "Ghana"
+
+    # 4. Real soft-book odds flowed with canonical NAMES (not numeric ids).
+    assert snaps, "the JSON feed must yield soft-book odds"
+    assert any(s.bookmaker == "Pinnacle" for s in snaps)
+    assert any(s.bookmaker == "bet365" for s in snaps)
+    assert all(not s.bookmaker.isdigit() for s in snaps)
+
+
+async def test_json_on_never_imports_or_calls_playwright_per_match(
+    monkeypatch: Any,
+) -> None:
+    """PROOF (hard guard): POISON ``playwright`` so importing it raises, then run a
+    full JSON-on cycle. The per-match path resolves teams + odds from curl_cffi
+    HTML, so it never imports/launches Playwright — the cycle completes cleanly.
+    If a per-match render sneaked back in (the old bug), it would import
+    ``playwright`` and crash here on the poisoned import, failing the test."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_playwright(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "playwright" or name.startswith("playwright."):
+            raise AssertionError(
+                "the JSON per-match path imported playwright — the per-match "
+                "render the migration must eliminate has regressed"
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_playwright)
+
+    directory = EventDirectory()
+    curl = _RecordingCurlSession()
+
+    async def listing_scrape(**kwargs: Any) -> Any:
+        return SimpleNamespace(success=[dict(_URL_ONLY_LISTED_MATCH)], failed=[], partial=[])
+
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["international-friendly"])},
+        markets=("1x2",),
+        scrape_fn=listing_scrape,
+        use_json_feed=True,
+        json_scrape_fn=_real_json_scrape_over_curl(curl),
+    )
+
+    snaps = await loader.fetch_odds("soccer")  # must not trip the poisoned import
+    assert snaps  # odds flowed entirely via curl_cffi
+    assert directory.lookup(_EVENT_URL) is not None  # teams from curl HTML

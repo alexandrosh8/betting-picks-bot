@@ -41,9 +41,15 @@ logger = logging.getLogger(__name__)
 _JW_ACCEPT = 0.92
 _TOKEN_SORT_ACCEPT = 90.0
 
-# Default live-anchor kickoff window (minutes). 36h covers the live loader's
-# (max_day_drift+1)-day candidate bound for the default max_day_drift=1.
-_DEFAULT_MAX_MINUTE_DRIFT = 36 * 60
+# Default live-anchor kickoff ACCEPT window (minutes) — kept in sync with the
+# matcher's tight accept bound (``app.resolution.matching._ACCEPT_MINUTE_DRIFT``,
+# 6h). The wrong-game fix (2026-06-24) made the matcher REJECT any anchor whose
+# kickoff is beyond this bound; the independent audit verifies the SAME predicate,
+# so a same-teams rematch / two-leg / doubleheader leg outside the accept window
+# (Gigantes/Cangrejeros BSN, 48h earlier) is FLAGGED here too rather than passed
+# by a stale 36h tolerance. A few hours of cross-source timezone/rounding noise on
+# the SAME game still verifies clean.
+_DEFAULT_MAX_MINUTE_DRIFT = 6 * 60
 
 
 def _names_same_game(a: str, b: str) -> bool:
@@ -218,7 +224,13 @@ async def audit_live_pinnacle_anchors(
 
         aliases = default_aliases()
         window = timedelta(days=2)
-        minute_drift = 2 * 24 * 60  # the live loader's (max_day_drift+1)-day bound
+        # FETCH window: the live loader's wide (max_day_drift+1)-day candidate bound
+        # — passed as max_minute_drift so the matcher gathers every same-teams leg
+        # for ambiguity detection. ACCEPTANCE is gated SEPARATELY by the matcher's
+        # tight default (_ACCEPT_MINUTE_DRIFT, 6h), so a same-teams rematch 48h away
+        # is rejected, exactly as the live path now does. The independent re-verify
+        # below uses the tight ACCEPT bound, not this fetch window.
+        minute_drift = 2 * 24 * 60
         arc_home, arc_away = aliased(Team), aliased(Team)
         for sport_key, _league_key, home, away, kickoff, ext_ref in pick_rows:
             base = arcadia_base_sport(sport_key)
@@ -307,7 +319,10 @@ async def audit_live_pinnacle_anchors(
                 kickoff,
                 matched.kickoff,
                 ordered=not is_tennis,
-                max_minute_drift=minute_drift,
+                # Verify against the TIGHT accept bound (verify_same_game's default,
+                # in sync with the matcher's _ACCEPT_MINUTE_DRIFT) — NOT the wide fetch
+                # window. An anchor whose kickoff is beyond the accept bound is the
+                # wrong-game leg the matcher now rejects; the audit flags it the same.
             )
             if anomaly is not None:
                 anomalies.append(anomaly)

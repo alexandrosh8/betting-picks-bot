@@ -1153,10 +1153,19 @@ async def resolve_pinnacle_close_snaps(
     # taxonomies do NOT share a vocabulary here (OddsPortal league vs the per-
     # namespace pinnacle_<sport> key), so league is passed incomparable (None on
     # both sides) — exactly as the shadow harness effectively does; the matcher
-    # never rejects on absent league metadata. The UTC-minute window is sized to
-    # the SAME calendar drift the DB query already bounds candidates to
-    # (+/-(max_day_drift+1) days), so this can never admit a candidate the strict
-    # path would not have considered.
+    # never rejects on absent league metadata.
+    #
+    # WRONG-GAME FIX (2026-06-24, live audit Gigantes/Cangrejeros): the
+    # candidate-FETCH window stays the wide (+/-(max_day_drift+1)-day) span the DB
+    # query bounds to — so ambiguity detection sees EVERY same-teams leg of a
+    # series — but the matcher's ACCEPT gate is the tight default
+    # (``_ACCEPT_MINUTE_DRIFT`` = 6h) it carries internally. The go-live flip wrongly
+    # passed this +/-2-DAY span as ``max_minute_drift`` AND let it gate acceptance,
+    # so a same-teams BSN rematch 48h earlier (home/away swapped, matched via the
+    # slug) was accepted as the close — fake CLV. We now keep the wide fetch window
+    # for context but let acceptance default to the tight bound: a same-teams fixture
+    # two days apart is a DIFFERENT game and is REJECTED, while a few hours of
+    # cross-source timezone/rounding noise on the SAME game still matches.
     minute_drift = (max_day_drift + 1) * 24 * 60
 
     # audit #7: tennis is a two-player, UNORDERED fixture whose OddsPortal name

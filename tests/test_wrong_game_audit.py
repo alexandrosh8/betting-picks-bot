@@ -99,6 +99,44 @@ def test_kickoff_inside_window_passes() -> None:
     )
 
 
+def test_same_teams_rematch_two_days_apart_is_flagged() -> None:
+    # The LIVE defect (Gigantes/Cangrejeros BSN): the anchor is the SAME teams but
+    # the leg 48h earlier with home/away SWAPPED. Even though the names are the same
+    # club pair, the kickoff is far outside the tight accept bound -> WRONG GAME.
+    pick_ko = datetime(2026, 6, 23, 0, 0, tzinfo=UTC)
+    anchor_ko = datetime(2026, 6, 21, 0, 0, tzinfo=UTC)
+    a = verify_same_game(
+        "Gigantes de Carolina",
+        "Cangrejeros",
+        "Cangrejeros de Santurce",
+        "Gigantes de Carolina",
+        pick_ko,
+        anchor_ko,
+    )
+    assert a is not None
+    assert a.severity == "ERROR"
+    assert a.code == "wrong_game_anchor"
+
+
+def test_same_teams_same_day_timezone_noise_passes() -> None:
+    # RECALL guard for the audit: the SAME game with a few hours of cross-source
+    # kickoff noise (date-only 00:00 archive vs a real wall-clock pick) verifies
+    # clean — the tight accept default (6h) still admits it.
+    pick_ko = datetime(2026, 6, 23, 0, 0, tzinfo=UTC)
+    anchor_ko = pick_ko + timedelta(hours=3)
+    assert (
+        verify_same_game(
+            "Gigantes de Carolina",
+            "Cangrejeros de Santurce",
+            "Gigantes de Carolina",
+            "Cangrejeros de Santurce",
+            pick_ko,
+            anchor_ko,
+        )
+        is None
+    )
+
+
 def test_noisy_display_name_with_sponsor_tail_passes() -> None:
     # A display name carrying extra NON-disambiguating noise (sponsor/stadium tail)
     # over the anchor is the SAME club (token containment, shorter base >=2 tokens).

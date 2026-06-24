@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.resolution.matching import (
+    _ACCEPT_MINUTE_DRIFT,
     AliasTable,
     EventCandidate,
     default_aliases,
@@ -211,6 +212,109 @@ def test_two_candidates_within_margin_reject() -> None:
         match_event_hardened("Manchester United", "Liverpool", KO, cands, aliases=AliasTable())
         is None
     )
+
+
+# --- same-teams REMATCH / two-leg series: tight accept threshold -------------
+# A wide candidate-fetch window (so ambiguity detection sees BOTH legs) must NOT
+# translate into a wide ACCEPT window: a fixture between the SAME teams two days
+# apart is a DIFFERENT game (home/away swapped second leg, BSN Puerto Rico /
+# tennis / cup two-leg). It must NEVER be accepted as the pick's close — that is
+# fake CLV, the cardinal sin (live wrong-game audit, Gigantes/Cangrejeros).
+
+# The drift band where a same-teams fixture is a different game, not noise.
+_TWO_DAYS = 2 * 24 * 60
+
+
+def test_same_teams_two_days_apart_is_rejected_not_matched() -> None:
+    # The live defect: pick @ today, only same-teams candidate is the leg two days
+    # earlier (forward orientation matched it via the slug). The wide fetch window
+    # would admit it, but it is beyond the tight accept bound -> REJECT, never the
+    # wrong leg.
+    far_leg = _cand("21", "Alpha", "Beta", KO - timedelta(days=2))
+    m = match_event_hardened(
+        "Alpha",
+        "Beta",
+        KO,
+        [far_leg],
+        aliases=AliasTable(),
+        max_minute_drift=_TWO_DAYS,  # wide fetch window (the caller's bound)
+    )
+    assert m is None
+
+
+def test_same_teams_picks_closest_leg_within_tight_bound() -> None:
+    # Both legs of the series fall in the WIDE fetch window; the correct same-day
+    # leg is within the tight accept bound, the rematch two days away is not. The
+    # matcher must pick the close leg, never collapse to the far one.
+    close_leg = _cand("23", "Alpha", "Beta", KO)
+    far_leg = _cand("21", "Alpha", "Beta", KO - timedelta(days=2))
+    m = match_event_hardened(
+        "Alpha",
+        "Beta",
+        KO,
+        [far_leg, close_leg],
+        aliases=AliasTable(),
+        max_minute_drift=_TWO_DAYS,
+    )
+    assert m is not None and m.ref == "23"
+
+
+def test_two_distinct_same_teams_games_in_accept_band_reject() -> None:
+    # Two DISTINCT same-teams games BOTH inside the tight accept band (a true
+    # doubleheader / two legs <6h apart) cannot be told apart by name -> REJECT.
+    # They must NOT silently collapse to the nearer kickoff.
+    leg_a = _cand("a", "Alpha", "Beta", KO - timedelta(hours=5))
+    leg_b = _cand("b", "Alpha", "Beta", KO + timedelta(hours=5))
+    m = match_event_hardened(
+        "Alpha",
+        "Beta",
+        KO,
+        [leg_a, leg_b],
+        aliases=AliasTable(),
+        max_minute_drift=_TWO_DAYS,
+    )
+    assert m is None
+
+
+def test_same_day_timezone_noise_still_matches() -> None:
+    # RECALL guard: a few hours of cross-source timezone/rounding noise on the SAME
+    # game (the date-only 00:00 archive row vs a real wall-clock pick) must STILL
+    # match. A 3-hour drift is within the tight accept bound.
+    near = _cand("1", "Alpha", "Beta", KO + timedelta(hours=3))
+    m = match_event_hardened(
+        "Alpha", "Beta", KO, [near], aliases=AliasTable(), max_minute_drift=_TWO_DAYS
+    )
+    assert m is not None and m.ref == "1"
+
+
+def test_duplicate_same_game_captures_still_collapse_to_nearest() -> None:
+    # Two captures of the ONE same game, both inside the tight accept bound (a
+    # duplicate archive row a few minutes apart) are NOT distinct games -> they
+    # still collapse to the nearest-kickoff capture (recall preserved).
+    dup_a = _cand("a", "Alpha", "Beta", KO + timedelta(minutes=5))
+    dup_b = _cand("b", "Alpha", "Beta", KO + timedelta(minutes=40))
+    m = match_event_hardened(
+        "Alpha",
+        "Beta",
+        KO,
+        [dup_a, dup_b],
+        aliases=AliasTable(),
+        max_minute_drift=_TWO_DAYS,
+    )
+    assert m is not None and m.ref == "a"
+
+
+@pytest.mark.parametrize("hours_apart", [6.1, 12, 24, 48, 72])
+def test_property_same_teams_beyond_accept_bound_never_matches(hours_apart: float) -> None:
+    # PROPERTY: same teams + kickoff strictly beyond the accept bound => a
+    # DIFFERENT game => the matcher must REJECT or pick a closer leg, NEVER attach
+    # the far leg. With only the far leg present, the result is always None.
+    assert _ACCEPT_MINUTE_DRIFT < 6.1 * 60  # the bound is tighter than the band tested
+    far = _cand("far", "Alpha", "Beta", KO + timedelta(hours=hours_apart))
+    m = match_event_hardened(
+        "Alpha", "Beta", KO, [far], aliases=AliasTable(), max_minute_drift=_TWO_DAYS
+    )
+    assert m is None
 
 
 # --- orientation flip --------------------------------------------------------

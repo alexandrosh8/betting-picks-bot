@@ -444,6 +444,29 @@ _JW_REVIEW_FLOOR = 0.84
 # margin are ambiguous -> REJECT (cannot tell which is the real fixture).
 _AMBIGUITY_MARGIN = 0.04
 
+# Tight kickoff ACCEPT bound (minutes), INDEPENDENT of the candidate-fetch window.
+# A candidate-fetch window (``max_minute_drift``) is deliberately WIDE so ambiguity
+# detection can see every same-teams leg of a series; acceptance is gated SEPARATELY
+# at this tighter bound. Sized from the live cross-source kickoff-drift distribution
+# (2026-06-24): for exact-name matches 94% drift <=90min, ~99% <=3h, and ZERO
+# legitimate matches in the 24h-48h band — that band is two-leg / rematch series.
+# 6h gives generous headroom for the date-only (00:00) archive row vs a real
+# wall-clock pick and any timezone/rounding noise, while a same-teams fixture two
+# days apart (the Gigantes/Cangrejeros BSN rematch, home/away swapped, 48h earlier)
+# is decisively EXCLUDED. The research mandate (match-rate-lift-2026-06-23) is
+# kickoff as a TIGHT predicate (+/-90min auto-accept, +/-3h review); 6h is the
+# safe outer accept bound, never the +/-2-DAY the go-live flip wrongly passed in.
+_ACCEPT_MINUTE_DRIFT = 360
+
+# Max kickoff spread between two captures of the SAME game to treat them as
+# DUPLICATE captures (collapse to nearest) rather than two DISTINCT same-teams
+# games (reject as ambiguous). Sized from the live archive (2026-06-24): the
+# largest observed same-date duplicate-capture spread is 255min (4.25h, AU semi-pro
+# soccer kickoff revisions); 6h covers it with headroom. Two same-teams candidates
+# BOTH inside the +/-6h accept window yet MORE than 6h apart from each other cannot
+# both be the pick's game (a true doubleheader / back-to-back leg) -> REJECT.
+_DUPLICATE_CAPTURE_SECONDS = _ACCEPT_MINUTE_DRIFT * 60
+
 
 def _markers_conflict(home: str, away: str, cand_home: str, cand_away: str) -> bool:
     """True when the pick and candidate disagree on a women/youth/reserve marker
@@ -498,6 +521,7 @@ def match_event_hardened(
     league: str | None = None,
     candidate_leagues: Mapping[str, str] | None = None,
     max_minute_drift: int = 360,
+    max_accept_minute_drift: int = _ACCEPT_MINUTE_DRIFT,
     allow_orientation_flip: bool = False,
 ) -> EventCandidate | None:
     """Precision-hardened cross-source match — the SHADOW-path lift over the
@@ -519,6 +543,14 @@ def match_event_hardened(
                       ``allow_orientation_flip`` is set — never on name alone.
     AMBIGUITY       — if the top-two survivors are within the score margin, or
                       both orientations of one candidate qualify, REJECT.
+    ACCEPT WINDOW   — ``max_minute_drift`` is only the candidate-FETCH window (wide
+                      on purpose, so ambiguity detection sees every same-teams leg
+                      of a series). Acceptance is gated SEPARATELY at the tighter
+                      ``max_accept_minute_drift`` (``_ACCEPT_MINUTE_DRIFT``, 6h):
+                      the chosen best must be within it OR the match is REJECTED.
+                      Same-teams legs split ACROSS that bound (a rematch / two-leg
+                      / doubleheader) are DISTINCT games and are NEVER silently
+                      collapsed to the nearer kickoff — they REJECT as ambiguous.
 
     Returns the unique best candidate, or None (never guess — a wrong close is
     fake CLV, the cardinal sin).
@@ -579,17 +611,47 @@ def match_event_hardened(
 
     if not scored:
         return None
-    # Best by score, then nearest kickoff, then ref (deterministic).
-    scored.sort(key=lambda s: (-s[0], abs((s[1].kickoff - kickoff).total_seconds()), s[1].ref))
-    best_score, best = scored[0]
-    if len(scored) > 1:
-        runner_score, runner = scored[1]
+    # ACCEPT-window gate (independent of the wide candidate-FETCH window): a
+    # candidate is only ELIGIBLE to be accepted when its kickoff is within the tight
+    # accept bound of the pick. Candidates gathered only for ambiguity context (a
+    # same-teams series leg two days away) are filtered out HERE — they can never be
+    # the close, but a same-teams leg INSIDE the bound competing with them is still
+    # judged on its own. A same-teams fixture beyond the bound is a DIFFERENT game
+    # (rematch / two-leg / doubleheader — Gigantes/Cangrejeros BSN, home/away
+    # swapped, 48h earlier); attaching its close would be fake CLV, the cardinal sin.
+    accept_seconds = max_accept_minute_drift * 60
+    eligible = [
+        (s, c) for (s, c) in scored if abs((c.kickoff - kickoff).total_seconds()) <= accept_seconds
+    ]
+    if not eligible:
+        return None
+
+    def _same_fixture(x: EventCandidate, y: EventCandidate) -> bool:
+        return aliases.canonical(x.home) == aliases.canonical(y.home) and aliases.canonical(
+            x.away
+        ) == aliases.canonical(y.away)
+
+    # Best (already score/kickoff/ref sorted) among the eligible in-bound candidates.
+    eligible.sort(key=lambda s: (-s[0], abs((s[1].kickoff - kickoff).total_seconds()), s[1].ref))
+    best_score, best = eligible[0]
+    if len(eligible) > 1:
+        runner_score, runner = eligible[1]
         # Two DISTINCT candidates within the ambiguity margin -> cannot tell which
         # is the real fixture. (Duplicate captures of ONE fixture share canonical
         # teams and are NOT ambiguous — they collapse to the nearest-kickoff one.)
-        same_fixture = aliases.canonical(runner.home) == aliases.canonical(
-            best.home
-        ) and aliases.canonical(runner.away) == aliases.canonical(best.away)
-        if not same_fixture and best_score - runner_score < _AMBIGUITY_MARGIN:
+        if not _same_fixture(runner, best) and best_score - runner_score < _AMBIGUITY_MARGIN:
             return None
+        # Two DISTINCT same-teams games BOTH inside the tight accept bound (a true
+        # doubleheader / two legs <6h apart) cannot be told apart by name OR by a
+        # day-window — REJECT. Only candidates that are within the same-game kickoff
+        # tolerance of the best are treated as duplicate captures and collapsed;
+        # a same-teams runner inside the accept window but a distinct-game distance
+        # from the best (a few hours, not minutes) is ambiguous, not a duplicate.
+        for _runner_score, other in eligible[1:]:
+            if other is best:
+                continue
+            if _same_fixture(other, best) and (
+                abs((other.kickoff - best.kickoff).total_seconds()) > _DUPLICATE_CAPTURE_SECONDS
+            ):
+                return None
     return best

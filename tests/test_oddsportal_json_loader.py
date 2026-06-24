@@ -350,7 +350,6 @@ from pathlib import Path  # noqa: E402
 _FIX = Path(__file__).parent / "fixtures"
 _MATCH_PAGE = (_FIX / "oddsportal_match_page_KhgvzGjJ.html").read_text()
 _FEED = (_FIX / "oddsportal_feed_KhgvzGjJ.dat").read_text()
-_BOOKIES_BUNDLE = (_FIX / "oddsportal_bookies_bundle.js").read_text()
 # The navigable match URL IS the platform-wide event identity.
 _EVENT_URL = (
     "https://www.oddsportal.com/football/england/international-friendly/england-ghana-KhgvzGjJ/"
@@ -368,12 +367,8 @@ class _RecordingCurlSession:
 
     async def get(self, url: str, **kwargs: Any) -> Any:
         self.gets.append(url)
-        if "match-event/" in url:
-            text = _FEED
-        elif "bookies-" in url:
-            text = _BOOKIES_BUNDLE
-        else:
-            text = _MATCH_PAGE  # the match page HTML — carries the team context
+        # match-event feed vs the match page HTML (the page carries team context).
+        text = _FEED if "match-event/" in url else _MATCH_PAGE
         return SimpleNamespace(text=text, status_code=200, headers={})
 
     async def close(self) -> None:  # pragma: no cover - not used by the JSON path
@@ -409,11 +404,12 @@ _URL_ONLY_LISTED_MATCH = {"match_link": _EVENT_URL}
 async def test_json_per_match_uses_only_curl_get_no_playwright_render() -> None:
     """PROOF (savings): with JSON on, the per-match path makes ONLY curl_cffi
     ``.get`` calls — NO Playwright page render / page.content(). The fake curl
-    session is the ONLY transport the per-match scrape touches; it records 6 GETs
-    (1 HTML + 1 bookmaker bundle + 4 feed) and ZERO renders. The listing fake is
-    the single Playwright-shaped call and it runs ONCE (URL enumeration), not per
-    match. If the old bug regressed (a per-match Playwright render), this path
-    would need a Page object the JSON scrape never imports — there isn't one."""
+    session is the ONLY transport the per-match scrape touches; it records 5 GETs
+    (1 HTML + 4 feed) and ZERO renders. The bookmaker id->name map is STATIC
+    (no bundle GET since 2026-06-24). The listing fake is the single
+    Playwright-shaped call and it runs ONCE (URL enumeration), not per match. If
+    the old bug regressed (a per-match Playwright render), this path would need a
+    Page object the JSON scrape never imports — there isn't one."""
     directory = EventDirectory()
     curl = _RecordingCurlSession()
 
@@ -437,11 +433,12 @@ async def test_json_per_match_uses_only_curl_get_no_playwright_render() -> None:
 
     snaps = await loader.fetch_odds("soccer")
 
-    # 1. The per-match transport was curl_cffi GET-only: 6 GETs, no render method.
+    # 1. The per-match transport was curl_cffi GET-only: 5 GETs, no render method.
+    #    The id->name map is STATIC (no bundle GET), so it's 1 HTML + 4 feeds.
     assert curl.gets, "the JSON per-match path must have fetched via curl .get"
-    assert len(curl.gets) == 6, f"expected 1 HTML + 1 bundle + 4 feed GETs, got {curl.gets}"
+    assert len(curl.gets) == 5, f"expected 1 HTML + 4 feed GETs, got {curl.gets}"
     assert sum("match-event/" in u for u in curl.gets) == 4  # the 4 market feeds
-    assert sum("bookies-" in u for u in curl.gets) == 1
+    assert not any("bookies-" in u for u in curl.gets)  # static map: no bundle GET
     # The match PAGE HTML was GET-fetched by curl (this is where teams come from).
     assert any(u == _EVENT_URL for u in curl.gets)
 
@@ -457,8 +454,8 @@ async def test_json_per_match_uses_only_curl_get_no_playwright_render() -> None:
 
     # 4. Real soft-book odds flowed with canonical NAMES (not numeric ids).
     assert snaps, "the JSON feed must yield soft-book odds"
-    assert any(s.bookmaker == "Pinnacle" for s in snaps)
-    assert any(s.bookmaker == "bet365" for s in snaps)
+    assert any(s.bookmaker == "BetMGM" for s in snaps)  # id 707 -> static map
+    assert any(s.bookmaker == "bet365" for s in snaps)  # id 16 -> static map
     assert all(not s.bookmaker.isdigit() for s in snaps)
 
 

@@ -48,13 +48,12 @@ import gzip
 import hashlib
 import json
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Any, Protocol
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote
 
 from app.ingestion.base import EventDirectory, EventTeams
 from app.ingestion.oddsportal import (
@@ -236,153 +235,80 @@ def decrypt_feed_body(body: str) -> dict[str, Any]:
 # ...). Every downstream consumer (sharp-anchor classification in
 # app/edge/value.py, the consensus median, CLV close-line capture, devig
 # grouping, the persistence dedup key) keys on bookmaker NAMES exactly as the
-# Playwright path emits them ("Pinnacle", "Betfair Exchange", "bet365"). So the
+# Playwright path emits them ("Betfair Exchange", "bet365", "BetUK"). So the
 # numeric IDs MUST be translated to those canonical names before a snapshot is
 # emitted; an UNKNOWN id is SKIPPED (a scrape gap), NEVER persisted as a numeric
 # bookmaker (that silently disables the whole value engine — review 2026-06-23).
 #
-# OddsPortal exposes the registry as a static-ish JS bundle that assigns
-#   var bookmakersData = { "<id>": { ..., "WebName": "<display name>" }, ... };
-# served from a TIMESTAMP-versioned asset /res/x/bookies-<ts1>-<ts2>.js. The
-# filename rotates (so it can't be hardcoded — it is read from a page's HTML),
-# but the id->name MAPPING is append-only and safe to cache (research
-# 2026-06-23, cross-checked vs borewicz/oddsportal + the live bundle). The
-# `WebName` field carries the exact display spelling our pipeline matches on
-# (e.g. lowercase "bet365"); we read it verbatim, never normalise or guess.
-
-# bookmakersData={...} up to the closing brace before the next `;var`/`;` —
-# tolerant of the minified bundle layout (the blob is a single JSON object).
-_BOOKMAKERS_DATA_RE = re.compile(r"bookmakersData\s*=\s*(\{.*?\})\s*;", re.DOTALL)
-# The versioned bundle URL as referenced in page HTML (absolute or root-relative).
-_BOOKIES_BUNDLE_RE = re.compile(r"""['"]([^'"]*?/res/[^'"]*?bookies-[^'"]+?\.js)['"]""")
-
-
-def parse_bookmaker_registry(bundle_js: str) -> dict[str, str]:
-    """Parse OddsPortal's `bookmakersData` JS blob into ``{id: WebName}``.
-
-    PURE function: extracts the ``bookmakersData={...}`` object literal and reads
-    each entry's ``WebName`` (the exact display name the Playwright path renders).
-    Entries without a usable ``WebName`` are dropped. Returns ``{}`` when the blob
-    is absent/unparseable — the caller then has NO map, so the feed parse emits
-    NO rows (a loud scrape gap), never a numeric bookmaker.
-    """
-    match = _BOOKMAKERS_DATA_RE.search(bundle_js)
-    if match is None:
-        return {}
-    try:
-        data = json.loads(match.group(1))
-    except (ValueError, TypeError):
-        return {}
-    if not isinstance(data, Mapping):
-        return {}
-    out: dict[str, str] = {}
-    for raw_id, entry in data.items():
-        if not isinstance(entry, Mapping):
-            continue
-        name = entry.get("WebName")
-        if isinstance(name, str) and name.strip():
-            out[str(raw_id)] = name.strip()
-    return out
+# WHY STATIC (root-cause investigation 2026-06-24, live curl_cffi through the
+# prod proxy pool): OddsPortal historically served the registry as a versioned
+# `/res/x/bookies-<ts>.js` bundle assigning `var bookmakersData = {...}`. That
+# mechanism IS GONE — the site moved to a Vite/React SSR build (`/build/assets/
+# app-*.js`). LIVE FACTS:
+#   * the raw match-page / listing HTML carries NO `bookies-*.js` reference
+#     (0 hits) — so the old bundle-URL extraction ALWAYS missed and the registry
+#     resolved EMPTY, skipping every soft book (the reported live failure);
+#   * the app bundle has NO `bookmakersData` literal (the id->name object is not
+#     statically present in any GET-reachable resource); names load at runtime
+#     into lazy React chunks; the only id-bearing endpoints are
+#     `/serve/bookmaker/<id>/` (a name-less PNG logo) and the geo-gated
+#     `/bookmaker/` directory page.
+# So there is NO stable curl_cffi-fetchable JSON map. We therefore translate via
+# a STATIC, live-verified, DB-cross-checked map shipped in the repo
+# (`app/ingestion/oddsportal_bookmakers.py`). It removes a per-cycle GET too.
 
 
 class BookmakerRegistry:
-    """GET-only, cached resolver of the bookmaker ID->NAME map.
+    """Cached resolver of the bookmaker ID->NAME map (STATIC since 2026-06-24).
 
-    A single instance is shared across the loader's per-match scrapes: the first
-    `resolve` reads the versioned bundle URL out of a page's HTML, GETs that
-    bundle, and builds ``{id: WebName}``; subsequent calls return the cached map
-    (the registry is static-ish — appended to, never reassigned). Both calls are
-    GETs of public assets (READ-ONLY market-data safety rule). On any failure the
-    map is ``{}`` — the feed parse then yields no rows (a visible scrape gap),
-    never a guessed or numeric bookmaker.
+    A single instance is shared across the loader's per-match scrapes. `resolve`
+    / `resolve_from_html` return the shipped STATIC id->name map
+    (`oddsportal_bookmakers.static_bookmaker_map`) — NO network GET, because the
+    map is no longer in any curl_cffi-fetchable resource (the `bookies-*.js`
+    bundle mechanism was removed in OddsPortal's React migration; see the note
+    above). The session/html arguments are retained for call-site compatibility
+    and to keep this a drop-in for the old fetch-based resolver, but they are not
+    used. An id absent from the static map is unknown -> skipped by
+    `parse_feed_payload` (a logged scrape gap), never a guessed/numeric bookmaker.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[str, str] | None = None
+        self._cache: Mapping[str, str] | None = None
 
     @property
     def cached(self) -> Mapping[str, str] | None:
-        """The cached map (None until the first successful resolve)."""
+        """The cached map (None until the first resolve)."""
         return self._cache
 
-    async def resolve(self, session: _AsyncHTTPSession, *, page_url: str) -> dict[str, str]:
-        """Return ``{id: WebName}``, fetching+caching it once (GET-only).
+    async def resolve(self, session: _AsyncHTTPSession, *, page_url: str) -> Mapping[str, str]:
+        """Return the static id->NAME map (no network).
 
-        Reads the ``/res/x/bookies-*.js`` URL from `page_url`'s HTML, GETs that
-        bundle, and parses it. Caches the FIRST result (even ``{}`` is cached so a
-        transient miss isn't re-fetched every match within a cycle; a fresh
-        instance per cycle re-resolves). Never raises — a failed GET / missing
-        bundle / unparseable blob yields ``{}``."""
-        if self._cache is not None:
-            return self._cache
-        self._cache = await self._fetch(session, page_url)
-        return self._cache
+        `session`/`page_url` are accepted for call-site compatibility with the
+        former fetch-based resolver but are unused — the map is static."""
+        return self._resolve_static()
 
     async def resolve_from_html(
         self, session: _AsyncHTTPSession, html: str, *, base_url: str
-    ) -> dict[str, str]:
-        """`resolve` variant that reuses an ALREADY-FETCHED page's HTML.
+    ) -> Mapping[str, str]:
+        """The variant `scrape_match_odds` uses. Returns the static id->NAME map
+        with no GET — the match-page HTML no longer carries a usable bundle URL.
+        `session`/`html`/`base_url` are unused (kept for signature compatibility)."""
+        return self._resolve_static()
 
-        The per-match scrape already GETs the match page, and that HTML carries
-        the ``bookies-*.js`` reference — so we skip the page GET and fetch only
-        the (cached) bundle. Same caching + fail-soft (``{}``) contract as
-        `resolve`. `base_url` resolves a root-relative bundle path to absolute."""
+    def _resolve_static(self) -> Mapping[str, str]:
+        """Cache + return the shipped static map. Logged once per instance (per
+        cycle) at INFO so the resolved book count stays visible in ops logs."""
         if self._cache is not None:
             return self._cache
-        self._cache = await self._fetch_bundle_from_html(session, html, base_url)
+        from app.ingestion.oddsportal_bookmakers import static_bookmaker_map
+
+        registry = static_bookmaker_map()
+        logger.info(
+            "oddsportal bookmaker registry resolved from static map: %d books",
+            len(registry),
+        )
+        self._cache = registry
         return self._cache
-
-    async def _fetch(self, session: _AsyncHTTPSession, page_url: str) -> dict[str, str]:
-        try:
-            page = await session.get(page_url, impersonate=_IMPERSONATE)
-        except Exception as exc:  # network / TLS / timeout -> no map (scrape gap)
-            logger.warning(
-                "oddsportal bookmaker registry page GET failed (%s) — no id->name map",
-                type(exc).__name__,
-            )
-            return {}
-        if getattr(page, "status_code", 0) != 200:
-            logger.warning(
-                "oddsportal bookmaker registry page returned status %s — no id->name map",
-                getattr(page, "status_code", "?"),
-            )
-            return {}
-        return await self._fetch_bundle_from_html(session, page.text, page_url)
-
-    async def _fetch_bundle_from_html(
-        self, session: _AsyncHTTPSession, html: str, base_url: str
-    ) -> dict[str, str]:
-        bundle_match = _BOOKIES_BUNDLE_RE.search(html)
-        if bundle_match is None:
-            logger.warning(
-                "oddsportal bookmaker registry: no bookies-*.js bundle URL in page — "
-                "no id->name map (the page layout may have changed)"
-            )
-            return {}
-        bundle_url = urljoin(base_url, bundle_match.group(1))
-        try:
-            bundle = await session.get(bundle_url, impersonate=_IMPERSONATE)
-        except Exception as exc:  # network / TLS / timeout -> no map (scrape gap)
-            logger.warning(
-                "oddsportal bookmaker bundle GET failed (%s) — no id->name map",
-                type(exc).__name__,
-            )
-            return {}
-        if getattr(bundle, "status_code", 0) != 200:
-            logger.warning(
-                "oddsportal bookmaker bundle returned status %s — no id->name map",
-                getattr(bundle, "status_code", "?"),
-            )
-            return {}
-        registry = parse_bookmaker_registry(bundle.text)
-        if not registry:
-            logger.warning(
-                "oddsportal bookmaker registry parsed EMPTY from the bundle — "
-                "no id->name map; feed rows will be a scrape gap until it resolves"
-            )
-        else:
-            logger.info("oddsportal bookmaker registry resolved: %d books", len(registry))
-        return registry
 
 
 # --- Feed-market -> OddsHarvester-market-key mapping -------------------------

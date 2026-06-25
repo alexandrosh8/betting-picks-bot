@@ -227,6 +227,10 @@ open http://localhost:8000/                       # the picks dashboard
 | [`docs/security/`](docs/security/)         | Security notes &amp; reviews                             |
 | [`docs/HOW_TO_RUN.md`](docs/HOW_TO_RUN.md) | End-to-end verify-the-backtest &amp; live-picks commands |
 
+## License
+
+[MIT](LICENSE) © 2026 alexandrosh8 — free to use, modify, and distribute; provided "as is", without warranty.
+
 ---
 
 <div align="center"><sub>Picks-only decision support · read-only market data · never places bets.</sub></div>

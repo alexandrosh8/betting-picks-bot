@@ -869,11 +869,23 @@ async def fetch_match_feed(
     headers = dict(_FEED_HEADERS)
     headers["Referer"] = token.referer or match_url
 
-    snapshots: list[OddsSnapshotIn] = []
+    # Group the requested markets by their feed URL: several markets can ride ONE
+    # encrypted feed (e.g. every over_under_games_<line> line lives in the same
+    # betType-2/scope `.dat`, the line riding the decrypted body, not the URL). GET
+    # each unique URL ONCE and parse every market on it, so adding basketball
+    # totals never multiplies the per-match GET count — otherwise the longer cycle
+    # pushes soccer candidates past the odds-age freshness window. Insertion order
+    # is preserved, so the requested-market order is honoured.
+    url_to_markets: dict[str, list[str]] = {}
     for market_key in markets:
         feed_url = token.feed_urls.get(market_key)
         if not feed_url:
             continue  # no URL minted for this market this cycle — scrape gap
+        url_to_markets.setdefault(feed_url, []).append(market_key)
+
+    snapshots: list[OddsSnapshotIn] = []
+    for feed_url, market_keys in url_to_markets.items():
+        label = ",".join(market_keys)
         try:
             resp = await session.get(
                 feed_url,
@@ -883,15 +895,15 @@ async def fetch_match_feed(
             )
         except Exception as exc:  # network / TLS / timeout -> scrape gap
             logger.warning(
-                "oddsportal feed GET failed for market %s (%s) — treating as gap",
-                market_key,
+                "oddsportal feed GET failed for market(s) %s (%s) — treating as gap",
+                label,
                 type(exc).__name__,
             )
             continue
         if getattr(resp, "status_code", 0) != 200:
             logger.info(
-                "oddsportal feed for market %s returned status %s — gap",
-                market_key,
+                "oddsportal feed for market(s) %s returned status %s — gap",
+                label,
                 getattr(resp, "status_code", "?"),
             )
             continue
@@ -901,8 +913,8 @@ async def fetch_match_feed(
             # A 200 odds body that WON'T decrypt = the bundle likely rotated its
             # static AES constants. Loud so ops re-scrapes them (version guard).
             logger.warning(
-                "oddsportal feed ROTATION suspected for market %s: %s",
-                market_key,
+                "oddsportal feed ROTATION suspected for market(s) %s: %s",
+                label,
                 exc,
             )
             continue
@@ -914,16 +926,16 @@ async def fetch_match_feed(
             # naming the bundle (it is NOT a ValueError, so it would otherwise
             # escape to the loader's quiet INFO catch). Fail-closed: no rows.
             logger.warning(
-                "oddsportal feed KEY/BUNDLE ROTATION (version guard) for market %s — "
+                "oddsportal feed KEY/BUNDLE ROTATION (version guard) for market(s) %s — "
                 "JSON feed fail-closed, scrape gap until constants re-verified: %s",
-                market_key,
+                label,
                 exc,
             )
             continue
         except ValueError as exc:  # off-window / empty match -> benign gap
             logger.info(
-                "oddsportal feed decrypt skipped for market %s (%s)",
-                market_key,
+                "oddsportal feed decrypt skipped for market(s) %s (%s)",
+                label,
                 type(exc).__name__,
             )
             continue
@@ -935,7 +947,7 @@ async def fetch_match_feed(
                 away=token.away,
                 league=token.league,
                 starts_at=token.starts_at,
-                markets=(market_key,),
+                markets=tuple(market_keys),
                 directory=directory,
                 now=now,
                 bookmakers=bookmakers,

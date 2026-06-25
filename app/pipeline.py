@@ -1170,7 +1170,14 @@ def event_fair_probs(grouped: GroupedMarkets, devig_method: DevigMethod) -> Even
     for (event_id, market, detail), _group in grouped.items():
         if market is Market.DOUBLE_CHANCE and event_id in h2h_3way:
             anchored, selections = h2h_3way[event_id]
-            home, away = selections[0], selections[-1]  # loader order: 1, X, 2
+            # DC fair = pairwise sums of the 1X2 anchor, valid ONLY for the
+            # canonical 1/X/2 order (home, Draw, away). Verify the MIDDLE outcome
+            # IS the draw before treating [0]/[-1] as home/away — a feed/label
+            # reorder (cf. the 1X2 Draw<->away swap) would otherwise silently
+            # mis-derive every DC fair. Fail safe (skip DC) when not canonical.
+            if len(selections) != 3 or selections[1] != "Draw":
+                continue
+            home, away = selections[0], selections[-1]
             dc_fair = double_chance_fair(anchored[1], home, away)
             if dc_fair:
                 out[(event_id, market, detail)] = (anchored[0], dc_fair)

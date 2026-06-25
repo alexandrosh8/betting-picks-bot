@@ -912,6 +912,29 @@ def test_event_fair_probs_expanded_markets_devig_per_line_and_derive_dc() -> Non
     assert sum(dc_fair.values()) == pytest.approx(2.0)
 
 
+def test_event_fair_probs_skips_dc_when_h2h_middle_outcome_is_not_the_draw() -> None:
+    """DC fair = pairwise sums of the 1X2 anchor, valid ONLY for the canonical
+    home/Draw/away order. If a feed/label reorder (cf. the 1X2 Draw<->away swap)
+    puts the draw off the middle, the DC fair must be SKIPPED (fail safe), never
+    mis-derived from a wrong home/away."""
+    from app.pipeline import event_fair_probs, group_market_prices
+    from app.probabilities.devig import DevigMethod
+
+    snaps = [
+        # H2H emitted in a NON-canonical order: Home, Away, Draw (draw not middle)
+        _detail_snap("Pinnacle", Market.H2H, "Home FC", 2.50, None),
+        _detail_snap("Pinnacle", Market.H2H, "Away FC", 3.10, None),
+        _detail_snap("Pinnacle", Market.H2H, "Draw", 3.30, None),
+        _detail_snap("SoftBook", Market.DOUBLE_CHANCE, "Home FC or Draw", 1.42, "double_chance"),
+        _detail_snap("SoftBook", Market.DOUBLE_CHANCE, "Home FC or Away FC", 1.36, "double_chance"),
+        _detail_snap("SoftBook", Market.DOUBLE_CHANCE, "Draw or Away FC", 1.60, "double_chance"),
+    ]
+    fair = event_fair_probs(group_market_prices(snaps), DevigMethod.POWER)
+    # H2H itself still anchored, but DC is skipped — the middle outcome != "Draw".
+    assert ("evt-1", Market.H2H, None) in fair
+    assert ("evt-1", Market.DOUBLE_CHANCE, "double_chance") not in fair
+
+
 # --- optional ValuePolicy knobs (premium-tier adjustments, default OFF) ------
 # Evidence requirements before enabling any of these live in
 # docs/backtesting/value-findings.md (spent-holdout discipline).

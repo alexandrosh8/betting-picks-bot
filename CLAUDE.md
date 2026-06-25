@@ -152,9 +152,14 @@ walkforward-backtest, betting-feature-engineering, calibration-eval.
 - **API-Football is SUSPENDED — never call it, never add its key.**
 - The Odds API keys are optional (`ODDS_API_KEY_1..3` rotation); design for
   free-tier credit budgets.
-- Live OddsPortal scraping needs Playwright Chromium
-  (`uv run playwright install chromium`); it is ToS-sensitive and DOM-fragile
-  — treat scrape gaps as expected, never bypass anti-bot protections.
+- Live OddsPortal scraping uses the curl_cffi JSON feed (browser-TLS
+  impersonation; Playwright Chromium is the fallback). It is ToS-sensitive and
+  DOM/feed-fragile — treat scrape gaps as expected. To fit the full slate inside
+  the odds-freshness window, SCALE by spreading load across a rotating proxy/IP
+  pool + higher concurrency (the proven, lower-ban-risk lever), not by hammering
+  one IP. The feed is not Cloudflare-challenged today, so a challenge-solver
+  (cloudscraper) adds nothing and a stealth browser (camoufox) is slower than the
+  HTTP feed. Scraping carries a real ToS/ban risk — rotate IPs and stay polite.
 
 ## Deployment
 

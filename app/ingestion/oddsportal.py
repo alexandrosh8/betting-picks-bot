@@ -1180,12 +1180,21 @@ class OddsPortalLoader:
             if str(m.get("match_link") or "").startswith("http")
         ]
 
-        # F1: ONE shared curl_cffi session for the whole cycle (~700 GETs), with
-        # max_clients sized to the fan-out (else curl_cffi serialises the surplus)
-        # and the pinned chrome impersonation. Only the PRODUCTION default scrape
-        # uses a real session; an injected test fake takes no session. The session
-        # is created once here and reused by every match via `_json_scrape_raw`.
-        async with self._json_session() as session:
+        # Session strategy depends on whether a rotating proxy POOL is configured:
+        #
+        #  * POOL set (SCRAPER_PROXY_POOL): rotate a proxy PER MATCH. `nullcontext`
+        #    makes scrape_one pass session=None, so `_json_scrape_raw` pulls
+        #    `self._next_proxy()` for each match's OWN session — the slate's ~700
+        #    GETs spread across ALL IPs (each rests ~N matches before reuse) instead
+        #    of hammering ONE IP for the whole cycle. Because tenacity re-invokes
+        #    scrape_one per attempt, a transient failure FAILS OVER to the next
+        #    proxy (R2) rather than retrying the same dead IP.
+        #  * NO pool: ONE shared curl_cffi session for the whole cycle (~700 GETs)
+        #    for connection reuse — max_clients sized to the fan-out, pinned chrome
+        #    impersonation. A PRODUCTION default scrape gets the shared session; an
+        #    injected test fake takes None either way.
+        session_cm: Any = contextlib.nullcontext(None) if self._proxy_pool else self._json_session()
+        async with session_cm as session:
 
             async def scrape_one(url: str) -> list[OddsSnapshotIn]:
                 return await self._json_scrape_raw(url, now, markets, registry, session)

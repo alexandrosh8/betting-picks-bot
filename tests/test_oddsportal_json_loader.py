@@ -24,6 +24,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from app.ingestion.base import EventDirectory
 from app.ingestion.oddsportal import OddsPortalLoader
 from app.schemas.base import Market
@@ -162,6 +164,64 @@ async def test_json_empty_skips_match_no_playwright_fallback() -> None:
     snaps = await loader.fetch_odds("soccer")
     assert snaps == []
     assert not any(s.bookmaker == "PWBook" for s in snaps)
+
+
+async def test_json_cycle_rotates_proxy_per_match_when_pool_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a SCRAPER_PROXY_POOL set, the cycle rotates a proxy PER MATCH (and per
+    retry → failover), spreading the slate across ALL IPs — instead of binding the
+    whole cycle to ONE shared session/proxy (one hammered IP). Guard: the single
+    shared-session context is NOT entered when a pool exists, and each match's
+    scrape gets the next proxy round-robin."""
+    import contextlib
+
+    from app.ingestion.base import ScraperProxy
+
+    pool = [ScraperProxy(url=f"http://p{i}:8080", username="", password="") for i in range(3)]
+    seen: list[str | None] = []
+
+    async def scrape_match(match_url: str, **kwargs: Any) -> list[Any]:
+        proxy = kwargs.get("proxy")
+        seen.append(proxy.url if proxy is not None else None)
+        return []
+
+    matches = [{"match_link": f"https://www.oddsportal.com/f/m{i}/"} for i in range(4)]
+    loader = OddsPortalLoader(
+        directory=EventDirectory(),
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        markets=("1x2",),
+        scrape_fn=_listing_scrape(matches),
+        use_json_feed=True,
+        json_scrape_fn=scrape_match,
+        proxy_pool=pool,
+        json_concurrency=1,  # serialize so the round-robin order is deterministic
+    )
+
+    shared_session_used = False
+    orig = loader._json_session
+
+    @contextlib.asynccontextmanager
+    async def spy_json_session() -> Any:
+        nonlocal shared_session_used
+        shared_session_used = True
+        async with orig() as s:
+            yield s
+
+    monkeypatch.setattr(loader, "_json_session", spy_json_session)
+
+    await loader.fetch_odds("soccer")
+
+    # pool set => per-match rotation, NOT one shared session for the whole cycle
+    assert shared_session_used is False
+    # every match got a REAL proxy (never None, never one shared IP)
+    assert None not in seen
+    # round-robin per match: 4 matches over a 3-proxy pool => 3 distinct then wrap.
+    # (the dated listing scrape consumes the first proxy, so the cycle's absolute
+    # start offset is implementation detail — assert the rotation INVARIANT.)
+    assert set(seen) == {p.url for p in pool}
+    assert len(set(seen[:3])) == 3
+    assert seen[3] == seen[0]
 
 
 async def test_json_listing_requests_no_markets_so_no_per_match_playwright() -> None:

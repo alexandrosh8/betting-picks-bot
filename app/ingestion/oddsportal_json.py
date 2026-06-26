@@ -515,6 +515,7 @@ def parse_feed_payload(
     home: str,
     away: str,
     league: str,
+    country: str = "",
     starts_at: datetime | None,
     markets: Sequence[str],
     directory: EventDirectory,
@@ -556,6 +557,7 @@ def parse_feed_payload(
             home=home,
             away=away,
             league=league,
+            country=country,
             starts_at=starts_at,
             home_score=home_score,
             away_score=away_score,
@@ -792,6 +794,7 @@ class FeedToken:
     home: str = ""
     away: str = ""
     league: str = ""
+    country: str = ""  # eventData.countryName (e.g. "Ethiopia") — disambiguates leagues
     starts_at: datetime | None = None
     home_score: int | None = None
     away_score: int | None = None
@@ -883,6 +886,7 @@ def extract_bootstrap_tokens(html: str, *, markets: Sequence[str] = ()) -> FeedT
         home=str(event.get("home") or ""),
         away=str(event.get("away") or ""),
         league=str(event.get("tournamentName") or ""),
+        country=str(event.get("countryName") or ""),
         starts_at=starts_at,
         home_score=_parse_score(event.get("homeResult")),
         away_score=_parse_score(event.get("awayResult")),
@@ -941,6 +945,7 @@ async def fetch_match_feed(
                 home=home,
                 away=away,
                 league=token.league,
+                country=token.country,
                 starts_at=token.starts_at,
                 home_score=token.home_score,
                 away_score=token.away_score,
@@ -1028,6 +1033,7 @@ async def fetch_match_feed(
                 home=token.home,
                 away=token.away,
                 league=token.league,
+                country=token.country,
                 starts_at=token.starts_at,
                 markets=tuple(market_keys),
                 directory=directory,

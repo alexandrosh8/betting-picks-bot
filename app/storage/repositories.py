@@ -194,14 +194,23 @@ async def _get_or_create_sport(session: AsyncSession, key: str, name: str) -> in
     return found
 
 
-async def _get_or_create_league(session: AsyncSession, sport_id: int, key: str) -> int:
+async def _get_or_create_league(
+    session: AsyncSession, sport_id: int, key: str, country: str = ""
+) -> int:
     where = (League.sport_id == sport_id, League.key == key)
-    found = await session.scalar(select(League.id).where(*where))
-    if found is not None:
-        return found
+    row = (await session.execute(select(League.id, League.country).where(*where))).first()
+    if row is not None:
+        league_id, existing_country = row
+        # Backfill the country once the source provides it — older league rows were
+        # created before country capture (display-only; never clobber a known one).
+        if country and not existing_country:
+            await session.execute(
+                sa_update(League).where(League.id == league_id).values(country=country)
+            )
+        return league_id
     await session.execute(
         pg_insert(League)
-        .values(sport_id=sport_id, key=key, name=key)
+        .values(sport_id=sport_id, key=key, name=key, country=country or None)
         .on_conflict_do_nothing(constraint="uq_leagues_sport_key")
     )
     found = await session.scalar(select(League.id).where(*where))
@@ -379,6 +388,7 @@ async def latest_picks_with_events(
             home.name,
             away.name,
             League.name,
+            League.country,
             Event.starts_at,
             ResultTracking.outcome,
             ResultTracking.pnl,
@@ -404,6 +414,9 @@ async def latest_picks_with_events(
             "event_id": p.event_id,
             "event": f"{home_name} vs {away_name}",
             "league": league_name,
+            # league's country (OddsPortal eventData.countryName) — disambiguates
+            # same-named leagues on the dashboard ("Ethiopia — Premier League").
+            "country": league_country or "",
             # null = kickoff unknown ("TBD" row: no countdown, no settle)
             "starts_at": starts_at.isoformat() if starts_at is not None else None,
             "market": p.market,
@@ -488,6 +501,7 @@ async def latest_picks_with_events(
             home_name,
             away_name,
             league_name,
+            league_country,
             starts_at,
             outcome,
             pnl,
@@ -1125,7 +1139,7 @@ async def persist_odds_snapshots(
                 event_written = 0
                 async with session.begin_nested():
                     league_id = await _get_or_create_league(
-                        session, sport_id, teams.league or default_league
+                        session, sport_id, teams.league or default_league, teams.country
                     )
                     home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
                     away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)

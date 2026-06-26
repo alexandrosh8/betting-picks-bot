@@ -2817,7 +2817,11 @@
         // re-priced fair (closing_fair_probability) once a re-price exists, else the
         // entry fair (model_probability). Showing the entry fair/EV next to a "no value
         // now" live edge contradicted the card (audit 2026-06-26).
-        const reprised = p.closing_fair_probability != null;
+        // Require a live PRICE too (not just a fresh fair): if the book dropped the
+        // selection this cycle, current_odds is null and the live EV can't be computed,
+        // so fall back to the consistent entry card (audit 2026-06-26).
+        const reprised =
+          p.closing_fair_probability != null && p.current_odds != null;
         const liveFair = reprised
           ? Number(p.closing_fair_probability)
           : Number(p.model_probability);

@@ -2560,16 +2560,22 @@
         td(tr, ko).dataset.label = "Kickoff";
       }
 
+      // "Ethiopia — Premier League" when the country is known (disambiguates
+      // same-named leagues like "Premier League"), else just the league name.
+      function leagueLabel(p) {
+        if (!p) return "";
+        return p.country ? p.country + " — " + p.league : p.league;
+      }
       function cellMatch(tr, p) {
         const m = document.createElement("div");
         m.className = "matchwrap";
-        m.title = p.event + "\n" + p.league; // ellipsis-capped; full text on hover
+        m.title = p.event + "\n" + leagueLabel(p); // ellipsis-capped; full text on hover
         const name = document.createElement("span");
         name.className = "match";
         name.textContent = p.event;
         const lg = document.createElement("span");
         lg.className = "league";
-        lg.textContent = p.league;
+        lg.textContent = leagueLabel(p);
         m.append(name, lg);
         // Sport badge on EVERY game (consistency — football was previously the
         // unlabelled default). Tennis / American football are UNVALIDATED
@@ -3343,6 +3349,7 @@
               p.selection,
               p.bookmaker,
               p.league,
+              p.country || "", // searchable by country ("Ethiopia")
               p.market,
               MARKETS[p.market] || "", // searchable by the DISPLAYED label too
               tierOf(p), // "premium" / "volume" are searchable words

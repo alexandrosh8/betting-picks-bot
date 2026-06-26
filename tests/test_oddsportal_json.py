@@ -273,6 +273,25 @@ def test_extract_bootstrap_falls_back_to_event_body_start_date() -> None:
     assert tok.starts_at == datetime(2026, 6, 25, 2, 0, tzinfo=UTC)
 
 
+def test_extract_bootstrap_captures_country_name() -> None:
+    """eventData carries countryName ("Ethiopia") alongside tournamentName ("Premier
+    League") — captured into FeedToken.country so the dashboard can disambiguate
+    same-named leagues (audit 2026-06-26)."""
+    html = _header_html(
+        {
+            "id": "AbC123",
+            "sportId": 1,
+            "home": "Arba Menche",
+            "away": "Welwalo Adigrat",
+            "tournamentName": "Premier League",
+            "countryName": "Ethiopia",
+        }
+    )
+    tok = extract_bootstrap_tokens(html)
+    assert tok.country == "Ethiopia"
+    assert tok.league == "Premier League"
+
+
 def test_extract_bootstrap_event_data_start_date_wins_over_body() -> None:
     """When both are present, eventData.startDate is authoritative (the body is
     only a fallback for the events that omit it)."""

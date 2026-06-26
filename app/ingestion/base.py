@@ -57,6 +57,10 @@ class EventTeams:
     home: str
     away: str
     league: str = ""
+    # The league's country (OddsPortal eventData.countryName, e.g. "Ethiopia") —
+    # disambiguates same-named leagues ("Premier League") on the dashboard. "" when
+    # the source doesn't provide it (non-JSON paths). Display only.
+    country: str = ""
     starts_at: datetime | None = None  # kickoff (UTC) when the source knows it
     # Best-effort final score the loader scraped AFTER the match finished
     # (OddsPortal surfaces it once the game is over), threaded to the event row.

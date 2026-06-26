@@ -63,6 +63,30 @@ def _best_soft_book(books: dict[str, float]) -> tuple[str | None, float | None]:
     return book, soft[book]
 
 
+def _is_implausible_final(sport_key: str, home_score: int, away_score: int) -> bool:
+    """True if a captured "final" score is physically impossible for the sport and
+    must be REJECTED (retry next cycle) rather than recorded + used to settle a pick
+    (audit 2026-06-26). Basketball cannot end tied (no regulation/OT tie) and a real
+    final totals well over 100 points; a tied/low capture (e.g. 24-24) is a
+    mis-scrape, not a result. Other sports carry no plausibility constraint here."""
+    if "basketball" in (sport_key or "").lower():
+        return home_score == away_score or (home_score + away_score) < 100
+    return False
+
+
+def _consistent_current_edge(pick: Pick, fair: float) -> Decimal | None:
+    """current_edge kept consistent with a freshly-stamped fair (audit 2026-06-26):
+    recompute against the pick's last-known current price so the dashboard Edge /
+    "no value now" / valueGone can never contradict the Fair/EV/"ok >=" floor (all of
+    which reason against the fresh fair). None when no current price exists — a stale
+    edge beside a refreshed fair is exactly the bug this prevents. Invariant after any
+    fair refresh: fair - current_edge == 1/effective_odds(current price)."""
+    if pick.current_odds is None:
+        return None
+    eff = effective_odds(pick.current_bookmaker or pick.bookmaker, float(pick.current_odds))
+    return Decimal(f"{fair - 1.0 / eff:.6f}")
+
+
 async def revalidate_open_picks(
     session_factory: "async_sessionmaker",
     snapshots: Sequence[OddsSnapshotIn],
@@ -176,6 +200,12 @@ async def revalidate_open_picks(
                 # like with like at exchanges.
                 current_eff = effective_odds(current_book, current)
                 pick.current_edge = Decimal(f"{closing_fair - 1.0 / current_eff:.6f}")
+            else:
+                # No usable live price THIS cycle: keep current_edge consistent with the
+                # FRESH fair (recompute against the last-known price) or null it — never
+                # leave a stale edge beside a refreshed fair, which made the dashboard
+                # Edge/valueGone contradict the Fair/EV/"ok >=" floor (audit 2026-06-26).
+                pick.current_edge = _consistent_current_edge(pick, closing_fair)
             # Success-only stamp (dashboard "verified" badge) — plus the
             # attempt clock, since a successful re-price is also an attempt.
             pick.revalidated_at = now
@@ -514,6 +544,19 @@ async def _scrape_one_finished_score(
     teams = directory.lookup(ref)
     if teams is None or teams.home_score is None or teams.away_score is None:
         return 0
+    # Sport-aware plausibility guard (audit 2026-06-26): a basketball "final" that is
+    # tied or totals < 100 points is a mis-scrape (e.g. 24-24), not a result — reject
+    # it so the link retries next cycle instead of recording garbage that permanently
+    # settles a pick on an impossible score.
+    if _is_implausible_final(sport_key, teams.home_score, teams.away_score):
+        logger.warning(
+            "rejected implausible %s final for %s: %d-%d (retry next cycle)",
+            sport_key,
+            ref,
+            teams.home_score,
+            teams.away_score,
+        )
+        return 0
     # Explicit finished-status gate — the REAL safeguard (the SQL soft-floor only
     # widens candidates). True = page reports Finished -> capture now. False =
     # in-play/scheduled (a live partial) -> REJECT, never recorded as final.
@@ -806,6 +849,9 @@ async def finalize_closing_from_snapshots(
     pick.closing_fair_probability = Decimal(f"{fair:.6f}")
     pick.clv_log = Decimal(f"{clv:.6f}")
     pick.beat_close = clv > 0
+    # Keep current_edge consistent with the refreshed close fair (audit 2026-06-26):
+    # finalize rewrites the fair, so a stale current_edge would contradict it.
+    pick.current_edge = _consistent_current_edge(pick, fair)
     close_anchor = anchor_by_key.get((pick.market, pick.selection))
     if close_anchor:
         # CLOSE-side provenance from the SNAPSHOT close (pinnacle/sharp/

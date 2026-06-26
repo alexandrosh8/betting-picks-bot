@@ -1242,3 +1242,30 @@ async def test_clv_log_uses_effective_fill_odds_for_exchange_picks(factory) -> N
         # and explicitly NOT the gross-fill value (gap is ln(2.5/2.425)~0.03)
         assert abs(float(pick.clv_log) - math.log(2.50 * fair)) > 0.01
         assert pick.beat_close is (float(pick.clv_log) > 0)
+
+
+def test_is_implausible_final_rejects_tied_or_lowscore_basketball() -> None:
+    # Audit 2026-06-26: a basketball "final" cannot tie and a real one tops 100 pts;
+    # a 24-24 capture is a mis-scrape that must NOT settle a pick.
+    from app.clv_trueup import _is_implausible_final
+
+    assert _is_implausible_final("basketball", 24, 24) is True  # the live garbage: tie
+    assert _is_implausible_final("basketball", 24, 26) is True  # total 50 < 100
+    assert _is_implausible_final("basketball", 110, 105) is False  # real final
+    assert _is_implausible_final("basketball", 95, 90) is False  # total 185, fine
+    # soccer ties / low totals are legitimate results -> never rejected
+    assert _is_implausible_final("soccer", 1, 1) is False
+    assert _is_implausible_final("soccer", 0, 0) is False
+
+
+def test_consistent_current_edge_tracks_fresh_fair_or_nulls() -> None:
+    # Audit 2026-06-26: current_edge must equal fair - 1/effective(current_odds) so the
+    # dashboard Edge can never contradict the fresh fair; None when there is no price.
+    from app.clv_trueup import _consistent_current_edge
+
+    priced = Pick(
+        current_odds=Decimal("2.0000"), current_bookmaker="testbook", bookmaker="testbook"
+    )
+    assert _consistent_current_edge(priced, 0.45) == Decimal("-0.050000")  # 0.45 - 1/2.0
+    no_price = Pick(current_odds=None, current_bookmaker=None, bookmaker="testbook")
+    assert _consistent_current_edge(no_price, 0.45) is None

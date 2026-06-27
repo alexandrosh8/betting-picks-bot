@@ -63,6 +63,13 @@ def _best_soft_book(books: dict[str, float]) -> tuple[str | None, float | None]:
     return book, soft[book]
 
 
+# CLV-2: a CLOSE whose implied edge (closing_fair - 1/fill_eff) exceeds this ceiling
+# — the mint-side value_max_edge data-error bound — is physically implausible: a
+# mispriced or mis-oriented close (the mechanism behind the CLV-1 pollution). BOTH
+# close-write paths skip the CLV stamp rather than persist fabricated edge.
+CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.20
+
+
 def _is_implausible_final(sport_key: str, home_score: int, away_score: int) -> bool:
     """True if a captured "final" score is physically impossible for the sport and
     must be REJECTED (retry next cycle) rather than recorded + used to settle a pick
@@ -151,6 +158,17 @@ async def revalidate_open_picks(
                 continue
             # EFFECTIVE fill vs net-anchored close — see docstring convention.
             fill_eff = effective_odds(pick.bookmaker, float(pick.decimal_odds))
+            # CLV-2: skip a physically-implausible close rather than store fake CLV.
+            if closing_fair - 1.0 / fill_eff > CLV_IMPLAUSIBLE_CLOSE_EDGE:
+                logger.warning(
+                    "pick %d: implausible close-implied edge %.3f (fair=%.3f, fill_eff=%.2f) "
+                    "— skipping CLV write",
+                    pick.id,
+                    closing_fair - 1.0 / fill_eff,
+                    closing_fair,
+                    fill_eff,
+                )
+                continue
             clv = clv_log(fill_eff, closing_fair)
             pick.closing_fair_probability = Decimal(f"{closing_fair:.6f}")
             pick.clv_log = Decimal(f"{clv:.6f}")
@@ -844,6 +862,17 @@ async def finalize_closing_from_snapshots(
         return False
     # EFFECTIVE fill vs net-anchored close — same symmetry as the live path.
     fill_eff = effective_odds(pick.bookmaker, float(pick.decimal_odds))
+    # CLV-2: refuse to finalize a physically-implausible snapshot close (see constant).
+    if fair - 1.0 / fill_eff > CLV_IMPLAUSIBLE_CLOSE_EDGE:
+        logger.warning(
+            "pick %d: implausible snapshot close-implied edge %.3f (fair=%.3f, fill_eff=%.2f) "
+            "— not finalizing",
+            pick.id,
+            fair - 1.0 / fill_eff,
+            fair,
+            fill_eff,
+        )
+        return False
     clv = clv_log(fill_eff, fair)
     books: dict[str, float] = {}
     for (_event, market, _detail), (prices, _captured) in grouped.items():

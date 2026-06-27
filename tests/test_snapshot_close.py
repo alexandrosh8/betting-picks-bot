@@ -416,6 +416,24 @@ async def test_sharp_only_close_sets_snapshot_flag_with_null_closing_odds(sessio
     assert float(pick.closing_fair_probability) == pytest.approx(fair, abs=1e-6)
 
 
+async def test_finalize_skips_physically_implausible_close(session) -> None:  # type: ignore[no-untyped-def]
+    # CLV-2: a close whose fair implies an edge above the 0.20 data-error ceiling
+    # over the fill price (the since-fixed double-chance orientation bug produced a
+    # ~0.89 fair on a long-odds leg) is a data error, not real CLV. finalize must
+    # REFUSE it — no clv_log, not marked a genuine snapshot close — so fabricated
+    # edge can never persist (the write-side mirror of the CLV-1 aggregate guard).
+    pick = await seed_pick(session, "evt-snapclose-implausible", bookmaker="SoftBook")
+    # fill 2.50 => implied 0.40; a Pinnacle close devigging HOME to ~0.90 implies a
+    # ~+0.50 edge — physically implausible.
+    await seed_1x2_snaps(
+        session, pick.event_id, "Pinnacle", (1.05, 15.0, 20.0), KICKOFF - timedelta(hours=1)
+    )
+    ref = await event_ref_of(session, pick)
+    assert not await finalize_closing_from_snapshots(session, pick, ref, KICKOFF, DevigMethod.SHIN)
+    assert pick.has_snapshot_close is not True  # not marked a genuine snapshot close
+    assert pick.clv_log is None  # no fabricated CLV written
+
+
 async def test_closing_odds_from_snapshots_last_row_per_book(session) -> None:  # type: ignore[no-untyped-def]
     # The read helper itself: last pre-kickoff row per (market, book,
     # selection), provider market keys mapped back, post-kickoff excluded,

@@ -522,3 +522,42 @@ def test_consensus_anchor_dedups_casing_variant_books() -> None:
     assert anchor == CONSENSUS_ANCHOR
     assert med is not None
     assert med[0] == pytest.approx(2.0)  # deduped, not the double-counted 1.95
+
+
+def test_logit_pool_consensus_matches_standard_on_identical_books() -> None:
+    # build #1: zero cross-book spread -> the logit pool collapses to the same fair
+    # as the median-of-prices consensus. Proves no regression on the default path.
+    from app.edge.value import CONSENSUS_ANCHOR, anchor_fair_probs
+
+    prices = {
+        "H": {"B1": 1.50, "B2": 1.50, "B3": 1.50},
+        "D": {"B1": 4.00, "B2": 4.00, "B3": 4.00},
+        "A": {"B1": 6.50, "B2": 6.50, "B3": 6.50},
+    }
+    std = anchor_fair_probs(prices, consensus_logit_pool=False)
+    lp = anchor_fair_probs(prices, consensus_logit_pool=True)
+    assert std is not None and lp is not None
+    assert std[0] == lp[0] == CONSENSUS_ANCHOR
+    for s in prices:
+        assert lp[1][s] == pytest.approx(std[1][s], abs=1e-9)
+
+
+def test_logit_pool_consensus_is_valid_and_differs_on_spread() -> None:
+    # build #1: with cross-book spread on a favourite the logit (geometric) pool is a
+    # valid, order-preserving distribution that genuinely differs from the linear
+    # median-of-prices consensus — it does not lose tail sharpness (Gneiting-Ranjan).
+    from app.edge.value import anchor_fair_probs
+
+    prices = {
+        "H": {"B1": 1.45, "B2": 1.50, "B3": 1.40},
+        "D": {"B1": 4.20, "B2": 4.00, "B3": 4.50},
+        "A": {"B1": 7.00, "B2": 6.50, "B3": 7.50},
+    }
+    std = anchor_fair_probs(prices, consensus_logit_pool=False)
+    lp = anchor_fair_probs(prices, consensus_logit_pool=True)
+    assert std is not None and lp is not None
+    fair = lp[1]
+    assert sum(fair.values()) == pytest.approx(1.0, abs=1e-9)
+    assert fair["H"] > fair["D"] > fair["A"]  # order preserved
+    assert all(0.0 < fair[s] < 1.0 for s in prices)
+    assert any(abs(fair[s] - std[1][s]) > 1e-4 for s in prices)  # genuinely different pool

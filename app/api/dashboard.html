@@ -351,7 +351,11 @@
       @media (min-width: 981px) {
         #tape {
           position: sticky; top: calc(var(--bar-h) + env(safe-area-inset-top));
-          max-height: calc(100vh - var(--bar-h));
+          /* keep the height cap in sync with the top offset above, else on a
+             notched/standalone desktop viewport the sticky box (which owns its
+             own overflow) extends below the viewport by the inset and its
+             scrollbar bottom sits off-screen (Codex P2). */
+          max-height: calc(100vh - var(--bar-h) - env(safe-area-inset-top));
           overflow: auto;
         }
       }

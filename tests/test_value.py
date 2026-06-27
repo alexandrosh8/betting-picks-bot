@@ -561,3 +561,54 @@ def test_logit_pool_consensus_is_valid_and_differs_on_spread() -> None:
     assert fair["H"] > fair["D"] > fair["A"]  # order preserved
     assert all(0.0 < fair[s] < 1.0 for s in prices)
     assert any(abs(fair[s] - std[1][s]) > 1e-4 for s in prices)  # genuinely different pool
+
+
+_EX_PRICES = {
+    "H": {"betfair exchange": 1.50, "SoftA": 1.55, "SoftB": 1.52},
+    "D": {"betfair exchange": 4.00, "SoftA": 4.10, "SoftB": 4.05},
+    "A": {"betfair exchange": 7.00, "SoftA": 6.80, "SoftB": 6.90},
+}
+
+
+def test_exchange_liquidity_gate_off_by_default_keeps_exchange_anchor() -> None:
+    # build #3: floor 0 (default) -> the Betfair anchor is chosen, no liquidity needed.
+    from app.edge.value import anchor_fair_probs
+
+    res = anchor_fair_probs(_EX_PRICES)
+    assert res is not None and res[0] == "betfair exchange"
+
+
+def test_exchange_liquidity_gate_demotes_thin_or_unknown_liquidity() -> None:
+    # build #3: floor > 0 + liquidity below floor (or absent) -> Betfair does NOT
+    # earn 'sharp'; the anchor falls back to the consensus median.
+    from app.edge.value import CONSENSUS_ANCHOR, anchor_fair_probs
+
+    thin = {s: {"betfair exchange": 5.0} for s in _EX_PRICES}  # below a 100 floor
+    res = anchor_fair_probs(_EX_PRICES, liquidity=thin, exchange_min_liquidity=100.0)
+    assert res is not None and res[0] == CONSENSUS_ANCHOR
+    # unknown liquidity (no map) also demotes the exchange under a positive floor
+    res2 = anchor_fair_probs(_EX_PRICES, exchange_min_liquidity=100.0)
+    assert res2 is not None and res2[0] == CONSENSUS_ANCHOR
+
+
+def test_exchange_liquidity_gate_keeps_liquid_exchange() -> None:
+    # build #3: liquidity >= floor on every selection -> Betfair stays the sharp anchor.
+    from app.edge.value import anchor_fair_probs
+
+    liquid = {s: {"betfair exchange": 5000.0} for s in _EX_PRICES}
+    res = anchor_fair_probs(_EX_PRICES, liquidity=liquid, exchange_min_liquidity=100.0)
+    assert res is not None and res[0] == "betfair exchange"
+
+
+def test_liquidity_gate_exempts_pinnacle() -> None:
+    # build #3: Pinnacle is fixed-odds (not an exchange) -> the liquidity floor never
+    # applies; it stays the anchor regardless of any floor.
+    from app.edge.value import anchor_fair_probs
+
+    pinn = {
+        "H": {"pinnacle": 1.50, "SoftA": 1.55, "SoftB": 1.52},
+        "D": {"pinnacle": 4.00, "SoftA": 4.10, "SoftB": 4.05},
+        "A": {"pinnacle": 7.00, "SoftA": 6.80, "SoftB": 6.90},
+    }
+    res = anchor_fair_probs(pinn, exchange_min_liquidity=100.0)  # no liquidity map
+    assert res is not None and res[0] == "pinnacle"

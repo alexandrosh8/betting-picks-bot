@@ -40,7 +40,7 @@ from app.probabilities.devig import DevigMethod
 from app.resolution.shadow import arcadia_base_sport
 from app.schemas.odds import OddsSnapshotIn
 from app.settlement.engine import STALE_NULL_KICKOFF_AGE
-from app.storage.models import Event, Pick, Sport, Team
+from app.storage.models import Event, Pick, PickLineDrift, Sport, Team
 from app.storage.repositories import closing_odds_from_snapshots
 
 if TYPE_CHECKING:
@@ -98,6 +98,8 @@ async def revalidate_open_picks(
     session_factory: "async_sessionmaker",
     snapshots: Sequence[OddsSnapshotIn],
     devig_method: DevigMethod,
+    *,
+    record_drift: bool = False,
 ) -> int:
     """Refresh closing-fair/CLV and current-odds/edge on open picks from
     already-scraped snapshots. Returns rows updated.
@@ -232,6 +234,20 @@ async def revalidate_open_picks(
             # attempt clock, since a successful re-price is also an attempt.
             pick.revalidated_at = now
             pick.revalidation_attempted_at = now
+            # build #6 (OFF by default): preserve the full vig-free drift PATH so
+            # bet-time->close line movement survives beyond the single close
+            # snapshot. No-op unless record_drift is enabled.
+            if record_drift:
+                session.add(
+                    PickLineDrift(
+                        pick_id=pick.id,
+                        captured_at=now,
+                        fair_probability=pick.closing_fair_probability,
+                        fair_odds=Decimal(f"{1.0 / closing_fair:.4f}"),
+                        clv_log=pick.clv_log,
+                        anchor_type=pick.closing_anchor_type,
+                    )
+                )
             updated += 1
         await session.commit()
     if updated:

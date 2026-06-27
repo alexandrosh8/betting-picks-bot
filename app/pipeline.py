@@ -260,6 +260,7 @@ class PipelineDeps:
     league: str = ""
     directory: EventDirectory | None = None  # resolves event_id -> readable "Home vs Away"
     session_factory: "async_sessionmaker | None" = None  # set => persist picks to DB
+    clv_record_drift: bool = False  # build #6: append pick_line_drift on re-price (OFF)
     model_name: str = "model"
     model_version: str = "0"
     # value-strategy thresholds (run_value_pipeline). value_min_edge gates
@@ -1064,7 +1065,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             # scrape + injected Pinnacle/Betfair sharp lines), NOT raw snapshots — else
             # current_edge re-anchors on the soft consensus and can flip from an anchor
             # SWITCH rather than a true line move (audit #8, 2026-06-26).
-            await revalidate_open_picks(deps.session_factory, anchor_snapshots, deps.devig_method)
+            await revalidate_open_picks(
+                deps.session_factory,
+                anchor_snapshots,
+                deps.devig_method,
+                record_drift=deps.clv_record_drift,
+            )
             await revalidate_offwindow_picks(
                 deps.loader,
                 deps.session_factory,

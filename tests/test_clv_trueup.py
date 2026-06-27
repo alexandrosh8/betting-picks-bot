@@ -1269,3 +1269,52 @@ def test_consistent_current_edge_tracks_fresh_fair_or_nulls() -> None:
     assert _consistent_current_edge(priced, 0.45) == Decimal("-0.050000")  # 0.45 - 1/2.0
     no_price = Pick(current_odds=None, current_bookmaker=None, bookmaker="testbook")
     assert _consistent_current_edge(no_price, 0.45) is None
+
+
+async def test_drift_recording_off_by_default_writes_no_rows(factory) -> None:  # type: ignore[no-untyped-def]
+    # build #6: the CLV true-up does NOT write pick_line_drift unless record_drift is on.
+    from app.storage.models import PickLineDrift
+
+    event_id = "evt-drift-off"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+    assert await true_up_clv(FakeLoader(closing_snapshots(event_id)), factory, ["soccer"]) == 1
+    async with factory() as session:
+        rows = (await session.execute(select(PickLineDrift))).scalars().all()
+        assert rows == []  # OFF by default -> empty table, re-price path unchanged
+
+
+async def test_drift_recording_appends_path_when_enabled(factory) -> None:  # type: ignore[no-untyped-def]
+    # build #6: record_drift=True appends one vig-free drift point per re-priced pick.
+    from app.clv_trueup import revalidate_open_picks
+    from app.probabilities.devig import DevigMethod
+    from app.storage.models import PickLineDrift
+
+    event_id = "evt-drift-on"
+    async with factory() as session:
+        await persist_pick(
+            session,
+            make_pick(event_id),
+            EventTeams(home="Home FC", away="Away FC"),
+            "value-sharp-vs-soft",
+            "v2-test",
+        )
+        await session.commit()
+    updated = await revalidate_open_picks(
+        factory, closing_snapshots(event_id), DevigMethod.SHIN, record_drift=True
+    )
+    assert updated == 1
+    async with factory() as session:
+        rows = (await session.execute(select(PickLineDrift))).scalars().all()
+        assert len(rows) == 1
+        d = rows[0]
+        assert d.fair_probability is not None  # the de-vigged fair at this observation
+        assert d.clv_log is not None  # CLV-so-far vs the fill
+        assert d.anchor_type == "pinnacle"  # close anchored by Pinnacle

@@ -123,6 +123,9 @@
         backdrop-filter: blur(6px);
         border-bottom: 1px solid var(--line);
         flex-wrap: wrap;
+        /* auto-hide-on-scroll (mobile only — toggled by JS via .hidden) */
+        transition: transform 0.25s ease;
+        will-change: transform;
       }
       .brand { display: flex; align-items: baseline; gap: 9px; }
       .brand .wm {
@@ -146,7 +149,7 @@
       .filters { display: contents; }
       /* engine state + timestamp grouped; inline on desktop, own quiet row on mobile */
       .status { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; }
-      /* reload / EXIT as proper bordered icon-buttons (clear affordance, big tap target) */
+      /* EXIT as a proper bordered icon-button (clear affordance) */
       .iconbtn {
         display: inline-flex; align-items: center; justify-content: center; gap: 6px;
         background: var(--s2); border: 1px solid var(--line); border-radius: 3px;
@@ -158,6 +161,10 @@
         font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
         text-transform: uppercase; color: var(--bone);
       }
+      /* compact variant — small top-right EXIT (~34px), glyph + tiny label */
+      .iconbtn.compact { gap: 5px; padding: 5px 8px; min-height: 32px; }
+      .iconbtn.compact .glyph { font-size: 13px; }
+      .iconbtn.compact .blabel { font-size: 10px; letter-spacing: 0.08em; }
       .eng {
         display: inline-flex;
         align-items: center;
@@ -365,25 +372,42 @@
            background — the fixed height clipped it, letting scrolled content
            bleed through between the two rows. Let the bar grow to fit both. */
         .cmdbar { height: auto; min-height: var(--bar-h); padding-bottom: 8px; }
+        /* auto-hiding header: slides up on scroll-down, back on scroll-up */
+        .cmdbar.hidden { transform: translateY(-100%); }
         /* pane headers must not stick UNDER the now-taller command bar */
         .pane-h { position: static; }
-        /* command-bar reflow: brand + the two action icon-buttons on row 1; the
-           engine/updated status line and the search/tier filter row each drop to
-           their own full-width line, so nothing is squashed or overlapping. */
+        /* command-bar reflow: brand + the compact EXIT on row 1; the engine/
+           updated status line and the search/tier filter row each drop to their
+           own full-width line, so nothing is squashed or overlapping. */
         .cmd-grow { order: 1; }
-        #btn-refresh { order: 2; }
-        #btn-logout { order: 3; }
+        #btn-logout { order: 2; }
         .status { order: 4; flex: 1 1 100%; display: flex; gap: 10px; }
-        /* >=44px tap targets with clear button affordance */
-        .iconbtn { min-width: 44px; min-height: 44px; padding: 8px 12px; }
-        /* THE CLOSE hero shows the SAME overall proof in every view, so its size
-           must be STABLE across tabs. Reserve heights so the "—"/accruing
-           headline and the empty (accruing) drift axis never shrink the band
-           when Results/Closed is active — the accruing state occupies the same
-           height as a populated number. */
-        .close-inner { min-height: 440px; }
-        .hero-num { min-height: 48px; display: flex; align-items: flex-end; }
-        .clvaxis { min-height: 58px; }
+        /* compact EXIT stays small even on mobile (low-frequency action) */
+        .iconbtn.compact { min-height: 36px; }
+
+        /* THE CLOSE — COMPACT on mobile so the picks show within ~one scroll.
+           ONE height, IDENTICAL in every tab (Live/Unverified/Closed/Results):
+           the reserved heights below are fixed, so switching to Results never
+           changes the hero height (that earlier complaint must not regress). */
+        .close-inner { min-height: 208px; padding: 14px 14px 16px; }
+        .hero-num { font-size: 32px; min-height: 32px; display: flex; align-items: flex-end; }
+        .hero-sub {
+          font-size: 11px; max-width: none;
+          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .clvaxis { height: 46px; min-height: 46px; margin: 12px 0 2px; }
+        .clvaxis .mk .cap { font-size: 10px; }
+        .proofmeter { flex: 1 1 100%; min-width: 0; }
+        /* drop the redundant "settling toward the sufficiency floor" caption */
+        .pm-note { display: none; }
+        .hero-stats { gap: 8px 16px; margin-top: 10px; padding-top: 10px; }
+        .hero-stats .hstat .v { font-size: 15px; }
+        /* the beat-close distribution is secondary — small + tucked tight */
+        .hero-lower { margin-top: 12px; gap: 12px; }
+        .dist .bars { height: 30px; margin-top: 5px; }
+        .dist .eye, .dist .ax { font-size: 8.5px; }
+        .dist .muted { font-size: 10px; }
       }
 
       .pane-h {
@@ -691,10 +715,9 @@
           <option value="volume">VOLUME (shadow)</option>
         </select>
       </div>
-      <button id="btn-refresh" class="iconbtn" type="button" aria-label="Refresh now" title="Refresh now">
-        <span class="glyph" aria-hidden="true">↻</span>
-      </button>
-      <button id="btn-logout" class="iconbtn" type="button" aria-label="Log out" title="Log out">
+      <!-- No manual reload: the dashboard auto-refreshes every poll cycle. EXIT
+           is a small compact icon-button pinned top-right. -->
+      <button id="btn-logout" class="iconbtn compact" type="button" aria-label="Log out" title="Log out">
         <span class="glyph" aria-hidden="true">⏻</span><span class="blabel">EXIT</span>
       </button>
     </header>
@@ -1952,7 +1975,6 @@
             $("f-sort").value = savedSortCol;
           }
         } catch (e) {}
-        $("btn-refresh").addEventListener("click", () => load());
         $("f-game-sport").addEventListener("change", renderGames);
         $("f-game-search").addEventListener("input", renderGames);
 
@@ -1975,6 +1997,37 @@
         $("btn-logout").addEventListener("click", () => {
           fetchWithTimeout("/logout", { method: "POST" }).finally(() => window.location.assign("/login"));
         });
+
+        // Auto-hiding command bar on mobile: hide on scroll-DOWN past a small
+        // threshold, reappear on scroll-UP (standard mobile-app pattern). The
+        // bottom tab bar stays fixed; on desktop (>980px) the header never hides.
+        // Pure DOM/scroll — no fetch. CSS handles the smooth transition and
+        // prefers-reduced-motion (the global reduced-motion rule disables it).
+        (function autoHideHeader() {
+          const bar = document.querySelector(".cmdbar");
+          const mq = window.matchMedia("(max-width: 980px)");
+          const SHOW_THRESHOLD = 10; // ignore tiny scroll jitter
+          let lastY = window.scrollY || 0;
+          let ticking = false;
+          function apply() {
+            const y = window.scrollY || 0;
+            if (!mq.matches) { bar.classList.remove("hidden"); lastY = y; ticking = false; return; }
+            const dy = y - lastY;
+            if (Math.abs(dy) >= SHOW_THRESHOLD) {
+              if (dy > 0 && y > bar.offsetHeight) bar.classList.add("hidden"); // down → hide
+              else bar.classList.remove("hidden");                            // up → show
+              lastY = y;
+            }
+            ticking = false;
+          }
+          window.addEventListener("scroll", () => {
+            if (!ticking) { ticking = true; requestAnimationFrame(apply); }
+          }, { passive: true });
+          // never leave it hidden when returning to the desktop layout
+          const onMq = () => { if (!mq.matches) bar.classList.remove("hidden"); };
+          if (mq.addEventListener) mq.addEventListener("change", onMq);
+          else if (mq.addListener) mq.addListener(onMq);
+        })();
 
         // live countdowns + age-out: re-render every 30s so kickoff timers
         // tick and stale picks fall out of the verified window.

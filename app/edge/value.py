@@ -231,6 +231,7 @@ def anchor_fair_probs(
     devig_method: DevigMethod = DevigMethod.POWER,
     sharp_books: Sequence[str] = SHARP_BOOKS,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+    consensus_logit_pool: bool = False,
 ) -> tuple[str, dict[str, float]] | None:
     """Trustworthy fair probabilities for one market, or None.
 
@@ -244,7 +245,14 @@ def anchor_fair_probs(
         prices, selections, sharp_books, commissions, max_overround
     )
     if anchor_book is None:
-        anchor_book, anchor_odds = _consensus_anchor(prices, selections, commissions, max_overround)
+        if consensus_logit_pool:
+            anchor_book, anchor_odds = _logit_consensus_anchor(
+                prices, selections, commissions, max_overround, devig_method
+            )
+        else:
+            anchor_book, anchor_odds = _consensus_anchor(
+                prices, selections, commissions, max_overround
+            )
     if anchor_book is None or anchor_odds is None:
         return None
     fair = devig(anchor_odds, method=devig_method)
@@ -261,6 +269,7 @@ def find_value_bets(
     devig_method: DevigMethod = DevigMethod.POWER,
     sharp_books: Sequence[str] = SHARP_BOOKS,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
+    consensus_logit_pool: bool = False,
 ) -> list[ValueBet]:
     """Find value selections for one market.
 
@@ -275,6 +284,7 @@ def find_value_bets(
         devig_method=devig_method,
         sharp_books=sharp_books,
         commissions=commissions,
+        consensus_logit_pool=consensus_logit_pool,
     )
     if anchored is None:
         return []
@@ -493,6 +503,62 @@ def _consensus_anchor(
     if not 0.0 <= _overround(med) <= max_overround:
         return None, None
     return CONSENSUS_ANCHOR, med
+
+
+def _logit_consensus_anchor(
+    prices: Mapping[str, Mapping[str, float]],
+    selections: Sequence[str],
+    commissions: Mapping[str, float],
+    max_overround: float,
+    devig_method: DevigMethod,
+) -> tuple[str | None, list[float] | None]:
+    """Log-odds (logit) POOL consensus across full-market books (build #1).
+
+    Devig EACH book to a fair distribution, then pool per selection in LOGIT
+    space: ``consensus_p = sigmoid(mean_b logit(p_b))``, renormalized to sum 1.
+    Unlike the median-of-PRICES consensus, a logit pool is non-extremizing and
+    order-invariant — it does not lose tail sharpness on heavy favourites /
+    longshots, where a linear price average is provably under-confident
+    (Gneiting & Ranjan 2010). Returns synthetic NO-VIG prices (1/p) so the shared
+    downstream devig in ``anchor_fair_probs`` recovers p unchanged. Requires
+    >= MIN_CONSENSUS_BOOKS books pricing the full market. Outlier handling matches
+    ``_consensus_anchor``: dedupe by normalized book, keep best effective price."""
+    books = set.intersection(*[{_norm(b) for b in prices[s]} for s in selections])
+    if len(books) < MIN_CONSENSUS_BOOKS:
+        return None, None
+    book_vec: dict[str, dict[str, float]] = {nb: {} for nb in books}
+    for s in selections:
+        by_norm: dict[str, float] = {}
+        for b, o in prices[s].items():
+            nb = _norm(b)
+            if nb not in books:
+                continue
+            e = effective_odds(b, o, commissions)
+            if nb not in by_norm or e > by_norm[nb]:
+                by_norm[nb] = e
+        for nb, e in by_norm.items():
+            book_vec[nb][s] = e
+    logit_sum = {s: 0.0 for s in selections}
+    k = 0
+    for vec in book_vec.values():
+        if any(s not in vec for s in selections):
+            continue
+        fair_b = devig([vec[s] for s in selections], method=devig_method)
+        k += 1
+        for s, p in zip(selections, fair_b, strict=True):
+            p = min(max(p, 1e-12), 1.0 - 1e-12)
+            logit_sum[s] += math.log(p / (1.0 - p))
+    if k < MIN_CONSENSUS_BOOKS:
+        return None, None
+    pooled = {s: 1.0 / (1.0 + math.exp(-logit_sum[s] / k)) for s in selections}
+    total = sum(pooled.values())
+    if total <= 0.0:
+        return None, None
+    # Synthetic NO-VIG prices (renormalized): 1 / (pooled/total) = total/pooled.
+    synth_prices = [total / pooled[s] for s in selections]
+    if not 0.0 <= _overround(synth_prices) <= max_overround:
+        return None, None
+    return CONSENSUS_ANCHOR, synth_prices
 
 
 def _best_other_book(

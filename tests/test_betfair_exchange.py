@@ -1143,3 +1143,55 @@ async def test_row_extract_js_basketball_decimal() -> None:
     assert [q.designation for q in quotes] == ["home", "away"]
     assert [q.decimal_odds for q in quotes] == [1.80, 2.10]
     assert [q.liquidity for q in quotes] == [5000.0, 4200.0]
+
+
+def test_bs4_extractor_matches_js_tokens_on_real_fixture() -> None:
+    # The bs4 HTML extractor reproduces the in-page JS tokens TOKEN-FOR-TOKEN on a
+    # REAL captured betting-exchanges-section (Lanus v River, 2026-06-27). Proves
+    # the unit-testable parser is a faithful, browser-free mirror of the JS path.
+    from pathlib import Path
+
+    from app.ingestion.betfair_exchange import extract_betfair_tokens_from_section_html
+
+    html = (Path(__file__).parent / "fixtures" / "betfair_section_soccer.html").read_text()
+    assert extract_betfair_tokens_from_section_html(html) == [
+        "33/50",
+        "(23)",
+        "57/20",
+        "(24)",
+        "21/5",
+        "(13)",
+        "39/50",
+        "(12)",
+        "17/5",
+        "(17)",
+        "26/5",
+        "(28)",
+    ]
+
+
+def test_bs4_extracted_back_quotes_align_to_1x2_outcomes() -> None:
+    # End-to-end through the existing pairer + gate: BACK triple -> home/draw/away.
+    from pathlib import Path
+
+    from app.ingestion.betfair_exchange import (
+        _pair_tokens,
+        extract_back_quotes,
+        extract_betfair_tokens_from_section_html,
+    )
+
+    html = (Path(__file__).parent / "fixtures" / "betfair_section_soccer.html").read_text()
+    tokens = extract_betfair_tokens_from_section_html(html)
+    assert tokens is not None
+    quotes = extract_back_quotes(
+        _pair_tokens(tokens), outcomes=("home", "draw", "away"), min_liquidity=0.0
+    )
+    assert [q.designation for q in quotes] == ["home", "draw", "away"]
+    assert abs(quotes[0].decimal_odds - 1.66) < 1e-9  # 33/50
+    assert quotes[0].liquidity == 23.0
+
+
+def test_bs4_extractor_returns_none_without_betfair_row() -> None:
+    from app.ingestion.betfair_exchange import extract_betfair_tokens_from_section_html
+
+    assert extract_betfair_tokens_from_section_html("<div><p>no exchange here</p></div>") is None

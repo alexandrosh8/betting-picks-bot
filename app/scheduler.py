@@ -734,6 +734,7 @@ def build_scheduler(
                 min_liquidity=settings.betfair_exchange_min_liquidity,
                 proxy_pool=settings.scraper_proxies(),
                 locale=settings.oddsportal_locale,
+                use_html_parser=settings.betfair_html_parser,
             ),
             session_factory=session_factory,
             targets_fn=_betfair_targets,

@@ -359,6 +359,74 @@ def _pair_tokens(tokens: Sequence[str]) -> list[tuple[str, float | None]]:
     return cells
 
 
+def extract_betfair_tokens_from_section_html(
+    section_html: str,
+    *,
+    alt: str = _EXCHANGE_ALT,
+    max_up: int = _ANCESTOR_WALK_UP,
+) -> list[str] | None:
+    """bs4 mirror of ``_ROW_EXTRACT_JS`` — UNIT-TESTABLE (no browser needed).
+
+    Parses rendered ``betting-exchanges-section`` HTML and returns the Betfair
+    row's ordered ``[odd, liq, odd, liq, ...]`` tokens (BACK triple first, then
+    LAY), or None when no Betfair Exchange row / price cells are present. Same
+    contract as the in-page JS (validated token-for-token against a real fixture):
+    climb from the Betfair anchor to the nearest ancestor holding >= 2
+    odd-container cells, then emit ONE odds token per cell (a ``'0'`` sentinel for
+    an empty/suspended cell so the home/draw/away pairing never shifts) plus its
+    liquidity. bs4/lxml are already project deps — no new dependency."""
+    from bs4 import BeautifulSoup
+    from bs4.element import Tag
+
+    soup = BeautifulSoup(section_html, "lxml")
+    alt_lower = alt.lower()
+
+    def _alt_is_betfair(tag: Tag) -> bool:
+        a = tag.get("alt")
+        return isinstance(a, str) and a.lower() == alt_lower
+
+    img = next((i for i in soup.select("img[alt]") if _alt_is_betfair(i)), None)
+    row: Tag | None = None
+    for r in soup.select(f'[data-testid="{_ROW_TESTID}"]'):
+        ri = r.select_one("img[alt]")
+        if ri is not None and _alt_is_betfair(ri):
+            row = r
+            break
+    if row is None and img is None:
+        return None
+    node: Tag | None = row or img
+    cells: list[Tag] = []
+    for _ in range(max_up + 1):
+        if node is None:
+            break
+        found = node.select('[data-testid="odd-container"]')
+        if len(found) >= 2:
+            cells = found
+            break
+        node = node.parent if isinstance(node.parent, Tag) else None
+    if len(cells) < 2:
+        return None
+    out: list[str] = []
+    any_real = False
+    for cell in cells:
+        odd: str | None = None
+        liq: str | None = None
+        for el in cell.find_all(True):
+            if el.find(True) is not None:  # leaf elements only (no child tags)
+                continue
+            t = el.get_text(strip=True)
+            if odd is None and (_DECIMAL_RE.match(t) or _FRACTION_RE.match(t)):
+                odd = t
+            if liq is None and _LIQUIDITY_RE.match(t):
+                liq = t
+        if odd is not None:
+            any_real = True
+        out.append(odd if odd is not None else "0")
+        if liq is not None:
+            out.append(liq)
+    return out if any_real else None
+
+
 class BetfairExchangeReader:
     """Loads a single OddsPortal match page (read-only) and returns the Betfair
     Exchange row's BACK quotes for the 1X2 market.
@@ -388,6 +456,7 @@ class BetfairExchangeReader:
         settle_ms: int = 6000,
         hydrate_timeout_ms: int = 12000,
         hydrate_step_ms: int = 500,
+        use_html_parser: bool = False,
     ) -> None:
         self._min_liquidity = min_liquidity
         self._proxy_pool = tuple(proxy_pool)
@@ -405,6 +474,9 @@ class BetfairExchangeReader:
         # `hydrate_step_ms` per step, until odds appear or the budget is spent.
         self._hydrate_timeout_ms = hydrate_timeout_ms
         self._hydrate_step_ms = hydrate_step_ms
+        # Default-off: when True, extract tokens from the rendered section HTML via
+        # the unit-testable bs4 parser instead of the in-page JS (identical output).
+        self._use_html_parser = use_html_parser
 
     async def _load_tokens(self, url: str, proxy: ScraperProxy | None) -> list[str] | None:
         """Return the Betfair row's ordered DOM tokens, or None if the page has
@@ -450,7 +522,19 @@ class BetfairExchangeReader:
                 tokens: list[str] | None = None
                 waited = 0
                 while True:
-                    raw = await page.evaluate(_ROW_EXTRACT_JS, args)
+                    if self._use_html_parser:
+                        section_html = await page.evaluate(
+                            "(id) => { var s = document.querySelector('[data-testid=\"' "
+                            "+ id + '\"]'); return s ? s.outerHTML : null; }",
+                            _SECTION_TESTID,
+                        )
+                        raw = (
+                            extract_betfair_tokens_from_section_html(section_html)
+                            if section_html
+                            else None
+                        )
+                    else:
+                        raw = await page.evaluate(_ROW_EXTRACT_JS, args)
                     tokens = list(raw) if raw else None
                     if tokens is not None and len(tokens) >= 2:
                         break

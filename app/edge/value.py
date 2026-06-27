@@ -232,6 +232,8 @@ def anchor_fair_probs(
     sharp_books: Sequence[str] = SHARP_BOOKS,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
     consensus_logit_pool: bool = False,
+    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    exchange_min_liquidity: float = 0.0,
 ) -> tuple[str, dict[str, float]] | None:
     """Trustworthy fair probabilities for one market, or None.
 
@@ -242,7 +244,13 @@ def anchor_fair_probs(
     if len(selections) < 2 or len(set(selections)) != len(selections):
         return None
     anchor_book, anchor_odds = _named_sharp_anchor(
-        prices, selections, sharp_books, commissions, max_overround
+        prices,
+        selections,
+        sharp_books,
+        commissions,
+        max_overround,
+        liquidity=liquidity,
+        exchange_min_liquidity=exchange_min_liquidity,
     )
     if anchor_book is None:
         if consensus_logit_pool:
@@ -270,6 +278,8 @@ def find_value_bets(
     sharp_books: Sequence[str] = SHARP_BOOKS,
     commissions: Mapping[str, float] = EXCHANGE_COMMISSION,
     consensus_logit_pool: bool = False,
+    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    exchange_min_liquidity: float = 0.0,
 ) -> list[ValueBet]:
     """Find value selections for one market.
 
@@ -285,6 +295,8 @@ def find_value_bets(
         sharp_books=sharp_books,
         commissions=commissions,
         consensus_logit_pool=consensus_logit_pool,
+        liquidity=liquidity,
+        exchange_min_liquidity=exchange_min_liquidity,
     )
     if anchored is None:
         return []
@@ -448,9 +460,17 @@ def _named_sharp_anchor(
     sharp_books: Sequence[str],
     commissions: Mapping[str, float],
     max_overround: float,
+    liquidity: Mapping[str, Mapping[str, float]] | None = None,
+    exchange_min_liquidity: float = 0.0,
 ) -> tuple[str | None, list[float] | None]:
     """First preferred sharp book that prices the FULL market with a sane
-    overround. Odds are commission-netted before devig."""
+    overround. Odds are commission-netted before devig.
+
+    Build #3 Phase 1 (default OFF): when ``exchange_min_liquidity > 0``, an EXCHANGE
+    candidate (Betfair/Smarkets/Matchbook) must show matched ``liquidity`` >= that
+    floor on EVERY selection to earn 'sharp' grade — a thin / just-firmed / unknown-
+    liquidity exchange line is not trustworthy-sharp (the Welwalo lesson). At the
+    default floor 0 the gate is inert and behaviour is bit-for-bit unchanged."""
     raw_by_norm: dict[str, str] = {}
     for s in selections:
         for b in prices[s]:
@@ -467,6 +487,19 @@ def _named_sharp_anchor(
             odds.append(effective_odds(pref, o, commissions))
         if not complete:
             continue
+        if exchange_min_liquidity > 0.0 and _norm(pref) in commissions:
+            # Exchange anchor: require matched liquidity >= floor on EVERY selection.
+            # Unknown (None) liquidity does NOT qualify a 'sharp' exchange anchor.
+            ok = liquidity is not None
+            for s in selections:
+                if not ok:
+                    break
+                sel_liq = liquidity.get(s) if liquidity is not None else None
+                lq = _lookup(sel_liq, _norm(pref)) if sel_liq is not None else None
+                if lq is None or lq < exchange_min_liquidity:
+                    ok = False
+            if not ok:
+                continue
         if 0.0 <= _overround(odds) <= max_overround:
             return raw_by_norm[pref], odds
         # implausible anchor (stale/arb-looking) -> try next sharp / consensus

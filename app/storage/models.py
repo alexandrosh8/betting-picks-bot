@@ -424,3 +424,26 @@ class DashboardCredential(Base):
     session_secret: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(onupdate=func.now())
+
+
+class PickLineDrift(Base):
+    """Append-only time-series of a pick's vig-free fair line drift, bet-time ->
+    close (build #6 / plan C8). One row per (pick, re-price observation): the
+    de-vigged FAIR probability at that moment + the implied CLV-so-far vs the
+    pick's fill. The ``picks`` row keeps only a SINGLE close snapshot
+    (closing_fair_probability / clv_log); this preserves the whole drift PATH so
+    good/bad-variance attribution + steam analysis become possible. ADDITIVE —
+    never touches picks/odds_snapshots; written ONLY when CLV_RECORD_DRIFT is on
+    (default OFF), so the table simply stays empty until the flag is enabled."""
+
+    __tablename__ = "pick_line_drift"
+    __table_args__ = (Index("idx_pick_line_drift_pick", "pick_id", "captured_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    pick_id: Mapped[int] = mapped_column(ForeignKey("picks.id"))
+    captured_at: Mapped[datetime]  # provider-reported time of this observation
+    fair_probability: Mapped[Decimal] = mapped_column(PROB)
+    fair_odds: Mapped[Decimal | None] = mapped_column(ODDS)
+    clv_log: Mapped[Decimal | None] = mapped_column(METRIC)
+    anchor_type: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(server_default=func.now())

@@ -406,6 +406,7 @@ def build_scheduler(
             league=league_label,
             directory=directory,
             session_factory=session_factory,
+            clv_record_drift=settings.clv_record_drift,
             model_name="value-sharp-vs-soft" if use_value else model.name,
             model_version="v3" if use_value else model.version,
             devig_method=value_devig if use_value else DevigMethod.POWER,

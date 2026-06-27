@@ -673,6 +673,12 @@ class Settings(BaseSettings):
     # Betfair (index 2), so Pinnacle wins where both price the market and Betfair
     # only fills the gap. Requires BETFAIR_EXCHANGE_ENABLED so a close exists.
     clv_use_betfair_exchange: bool = False
+    # build #6 (plan C8): when true, each open-pick re-price also appends a row to
+    # pick_line_drift (the vig-free fair + CLV-so-far at that moment), building the
+    # full bet-time->close drift path. OFF by default -> the table stays empty and
+    # the re-price loop is bit-for-bit unchanged; a pure measurement add, flip it on
+    # in-season to start accumulating drift history.
+    clv_record_drift: bool = False
 
     # When true, the LIVE pick pipeline MERGES the captured free Betfair Exchange
     # + Pinnacle ARCADIA prices (re-keyed to each scraped event) into the anchor

@@ -168,4 +168,5 @@ def test_cookie_from_setup_authenticates_dashboard(monkeypatch) -> None:  # type
     # TestClient carries the Set-Cookie forward.
     page = client.get("/", headers={"accept": "text/html"})
     assert page.status_code == 200
-    assert 'id="picks-table"' in page.text
+    # TAPE redesign: the picks feed lives in the id="tape" pane (was id="picks-table").
+    assert 'id="tape"' in page.text

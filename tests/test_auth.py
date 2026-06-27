@@ -100,7 +100,8 @@ def test_valid_session_cookie_unlocks_dashboard_and_data(monkeypatch) -> None:  
     # TestClient carries the Set-Cookie forward on subsequent requests.
     page = client.get("/", headers={"accept": "text/html"})
     assert page.status_code == 200
-    assert 'id="picks-table"' in page.text
+    # TAPE redesign: the picks feed lives in the id="tape" pane (was id="picks-table").
+    assert 'id="tape"' in page.text
     assert client.get("/picks").status_code != 401
 
 

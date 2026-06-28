@@ -46,7 +46,13 @@ async def factory():  # type: ignore[no-untyped-def]
     await engine.dispose()
 
 
-def make_pick(event_id: str, stake_fraction: float, marker: str, tier: str = "premium") -> PickOut:
+def make_pick(
+    event_id: str,
+    stake_fraction: float,
+    marker: str,
+    tier: str = "premium",
+    selection: str = "Home FC",
+) -> PickOut:
     return PickOut(
         pick_id=f"p-{marker}",
         sport="soccer",
@@ -54,7 +60,7 @@ def make_pick(event_id: str, stake_fraction: float, marker: str, tier: str = "pr
         event="Home FC vs Away FC",
         event_id=event_id,
         market=Market.H2H,
-        selection="Home FC",
+        selection=selection,
         bookmaker="SoftBook",
         decimal_odds=2.50,
         model_probability=0.45,
@@ -82,11 +88,12 @@ async def _persist_with_created_at(
     marker: str,
     created_at: datetime,
     tier: str = "premium",
+    selection: str = "Home FC",
 ) -> None:
     async with factory() as session:
         await persist_pick(
             session,
-            make_pick(event_id, stake_fraction, marker, tier=tier),
+            make_pick(event_id, stake_fraction, marker, tier=tier, selection=selection),
             EventTeams(home="Home FC", away="Away FC"),
             "value-sharp-vs-soft",
             "v-seeding-test",
@@ -150,3 +157,47 @@ async def test_seeding_is_idempotent_preload_not_accumulate(factory) -> None:  #
     first = ledger.used(today_utc)
     await seed_exposure_ledger(ledger, factory)
     assert ledger.used(today_utc) == pytest.approx(first, abs=1e-9)
+
+
+async def test_seeding_rebuilds_per_event_subcap(factory) -> None:  # type: ignore[no-untyped-def]
+    # BUG 1: a mid-day restart must reconstruct the per-event correlation
+    # sub-cap from the SAME persisted picks as the daily total — not just the
+    # daily total. Two premium picks on ONE event must seed event_used to their
+    # sum, so the sub-cap keeps bounding correlated same-event exposure from the
+    # first post-restart cycle. Property: seeded event_used == sum over today's
+    # persisted premium picks for that event.
+    today_utc = NOW.date()
+    ledger0 = DailyExposureLedger(max_daily_fraction=1.0, max_event_fraction=0.03)
+    await seed_exposure_ledger(ledger0, factory)
+    base_event = ledger0.event_used(today_utc, "evt-seed-corr")
+
+    now = datetime.now(tz=UTC)
+    # two selections on the SAME event (distinct unique key -> both INSERT)
+    await _persist_with_created_at(
+        factory, "evt-seed-corr", 0.02, "seed-corr-a", now, selection="Home FC"
+    )
+    await _persist_with_created_at(
+        factory, "evt-seed-corr", 0.01, "seed-corr-b", now, selection="Away FC"
+    )
+
+    ledger = DailyExposureLedger(max_daily_fraction=1.0, max_event_fraction=0.03)
+    await seed_exposure_ledger(ledger, factory)
+    # the per-event sub-cap is rebuilt: both same-event picks sum into event_used
+    assert ledger.event_used(today_utc, "evt-seed-corr") == pytest.approx(
+        base_event + 0.03, abs=1e-9
+    )
+
+
+async def test_seeding_skips_per_event_when_subcap_disabled(factory) -> None:  # type: ignore[no-untyped-def]
+    # max_event_fraction=None: the per-event accounting is inert, so seeding
+    # must not populate it (no wasted work, and event_remaining stays the full
+    # daily room as documented).
+    today_utc = NOW.date()
+    now = datetime.now(tz=UTC)
+    await _persist_with_created_at(
+        factory, "evt-seed-nocap", 0.02, "seed-nocap", now, selection="Home FC"
+    )
+
+    ledger = DailyExposureLedger(max_daily_fraction=1.0)  # no per-event cap
+    await seed_exposure_ledger(ledger, factory)
+    assert ledger.event_used(today_utc, "evt-seed-nocap") == pytest.approx(0.0)

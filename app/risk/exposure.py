@@ -69,6 +69,22 @@ class DailyExposureLedger:
             raise ValueError(f"preloaded fraction must be >= 0, got {fraction}")
         self._used[day] = fraction
 
+    def preload_event(self, day: date, event_id: str, fraction: float) -> None:
+        """SET the per-event used exposure for `day`/`event_id` (idempotent;
+        overwrites, never adds — mirrors `preload`).
+
+        Seeds the per-event correlation sub-cap from persisted picks on startup.
+        `preload` alone only restores the DAILY total; without ALSO restoring
+        the per-event accounting, a mid-day restart resets every sub-cap to ~0
+        and correlated same-event exposure goes unbounded until natural accrual
+        rebuilds it. No-op in effect when `max_event_fraction is None` (the
+        per-event accounting is inert), but stored regardless so enabling the
+        sub-cap mid-day still sees a faithful history.
+        """
+        if fraction < 0.0:
+            raise ValueError(f"preloaded event fraction must be >= 0, got {fraction}")
+        self._used_by_event[(day, event_id)] = fraction
+
     def release(self, day: date, fraction: float, event_id: str | None = None) -> None:
         """Hand back an unused grant (e.g. the pick was a DB duplicate).
 

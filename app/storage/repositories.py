@@ -2315,6 +2315,54 @@ async def persist_pick(
     return "duplicate"
 
 
+async def update_pick_stake(
+    session: AsyncSession,
+    pick: PickOut,
+    teams: EventTeams,
+    model_name: str,
+    model_version: str,
+) -> bool:
+    """Overwrite an already-persisted pick's recommended stake with the value
+    actually reserved by the daily-exposure ledger.
+
+    BUG 2: picks are persisted (per-bet-capped Kelly) BEFORE the daily-exposure
+    reservation runs, so a pick whose stake the daily cap then clips would keep
+    the pre-clip amount on its row — the persisted/reported stake would escape
+    the daily cap and diverge from what the ledger reserved. The pipeline calls
+    this AFTER a clip to bring the row in line with the granted stake.
+
+    Resolves the same natural key as `persist_pick` (the get-or-create lookups
+    are idempotent: the row already exists). Returns True when a row was
+    updated, False when none matched (nothing to correct). Stakes remain
+    informational/recommended only.
+    """
+    sport_id = await _get_or_create_sport(session, pick.sport, pick.sport.title())
+    league_id = await _get_or_create_league(session, sport_id, pick.league)
+    home_id = await _get_or_create_team(session, sport_id, league_id, teams.home)
+    away_id = await _get_or_create_team(session, sport_id, league_id, teams.away)
+    event_id = await _get_or_create_event(
+        session, sport_id, league_id, home_id, away_id, pick.event_id, starts_at=teams.starts_at
+    )
+    model_version_id = await _get_or_create_model_version(
+        session, sport_id, model_name, model_version
+    )
+    existing = await session.scalar(
+        select(Pick).where(
+            Pick.event_id == event_id,
+            Pick.market == str(pick.market),
+            Pick.selection == pick.selection,
+            Pick.model_version_id == model_version_id,
+        )
+    )
+    if existing is None:
+        return False
+    existing.recommended_stake_fraction = Decimal(str(pick.recommended_stake_fraction))
+    existing.recommended_stake_amount = pick.recommended_stake_amount
+    existing.stake_breakdown = pick.stake_breakdown.model_dump()
+    await session.flush()
+    return True
+
+
 async def load_dashboard_credentials(
     session: AsyncSession,
 ) -> tuple[str, str, str] | None:

@@ -160,26 +160,52 @@ async def seed_exposure_ledger(
     """
     from sqlalchemy import func, select
 
-    from app.storage.models import Pick
+    from app.storage.models import Event, Pick
 
     now = datetime.now(tz=UTC)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
+    today_premium = (
+        Pick.created_at >= day_start,
+        Pick.created_at < day_end,
+        Pick.tier == "premium",
+    )
+    # Seed EVERY cap dimension the ledger enforces, not just the daily total: the
+    # ledger also tracks a per-event correlation sub-cap keyed on the same event
+    # ref the pipeline reserves under (Event.external_ref == pick.event_id). A
+    # restart that preloaded only the daily total left every sub-cap at ~0, so
+    # correlated same-event exposure went unbounded until natural accrual rebuilt
+    # it (BUG 1). When the sub-cap is disabled (max_event_fraction is None) the
+    # per-event query is skipped — the accounting is inert.
+    per_event: list[tuple[str, float]] = []
     async with session_factory() as session:
         total = await session.scalar(
             select(func.coalesce(func.sum(Pick.recommended_stake_fraction), 0)).where(
-                Pick.created_at >= day_start,
-                Pick.created_at < day_end,
-                Pick.tier == "premium",
+                *today_premium
             )
         )
+        if ledger.max_event_fraction is not None:
+            rows = await session.execute(
+                select(
+                    Event.external_ref,
+                    func.coalesce(func.sum(Pick.recommended_stake_fraction), 0),
+                )
+                .join(Event, Pick.event_id == Event.id)
+                .where(*today_premium)
+                .group_by(Event.external_ref)
+            )
+            per_event = [(ref, float(amount or 0)) for ref, amount in rows.all()]
     used = float(total or 0)
     ledger.preload(now.date(), used)
+    for external_ref, event_used in per_event:
+        ledger.preload_event(now.date(), external_ref, event_used)
     if used > 0.0:
         logger.info(
-            "exposure ledger seeded for %s: %.4f of bankroll already recommended today",
+            "exposure ledger seeded for %s: %.4f of bankroll already recommended "
+            "today across %d event(s)",
             now.date().isoformat(),
             used,
+            len(per_event),
         )
 
 

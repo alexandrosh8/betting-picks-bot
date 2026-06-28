@@ -496,7 +496,7 @@ async def run_pick_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut]
             # (kr-1 / kelly-risk-r2-1); and (b) never lets an exhausted cap
             # (granted<=0) skip the re-dispatch of an ALREADY-persisted pick.
             outcome = await _maybe_persist(deps, pick, snap.event_id)
-            staked = _reserve_for_outcome(deps, pick, breakdown, outcome, snap.event_id, now)
+            staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, snap.event_id, now)
             if staked is None:
                 # brand-new pick with no remaining daily/event capacity: skip it
                 logger.info("daily exposure cap reached; skipping %s", snap.selection)
@@ -648,7 +648,36 @@ async def _maybe_persist(deps: "PipelineDeps", pick: PickOut, event_id: str) -> 
         return "unpersisted"
 
 
-def _reserve_for_outcome(
+async def _persist_stake_clip(deps: "PipelineDeps", pick: PickOut, event_id: str) -> None:
+    """Rewrite the persisted row's stake to the daily-clipped amount (BUG 2).
+
+    The row was persisted with the pre-clip (per-bet-capped) stake BEFORE the
+    daily-exposure reservation ran; when that reservation clips the stake, the
+    stored/reported value must be brought in line with what the ledger actually
+    reserved, or the persisted stake escapes the daily cap. Best-effort, with
+    the SAME guards as `_maybe_persist`: without a session factory, directory,
+    or resolvable teams there is no row to correct, and a failure here must
+    never break alerting (the in-memory pick already carries the clip)."""
+    if deps.session_factory is None or deps.directory is None:
+        return
+    teams = deps.directory.lookup(event_id)
+    if teams is None:
+        return
+    from app.storage import repositories
+
+    try:
+        async with deps.session_factory() as session:
+            await repositories.update_pick_stake(
+                session, pick, teams, deps.model_name, deps.model_version
+            )
+            await session.commit()
+    except Exception as exc:  # persistence must never break alerting
+        logger.error(
+            "pick stake-clip persistence failed for %s: %s", pick.pick_id, type(exc).__name__
+        )
+
+
+async def _reserve_for_outcome(
     deps: "PipelineDeps",
     pick: PickOut,
     breakdown: StakeBreakdown,
@@ -660,9 +689,10 @@ def _reserve_for_outcome(
 
     - inserted/upgraded: reserve breakdown.final, bounded by the daily AND the
       optional per-event cap. A clip below breakdown.final rebuilds the pick
-      with the daily-clipped stake. A brand-new INSERTED pick with a zero grant
-      returns None (no capacity -> skip); an already-persisted UPGRADED pick is
-      never skipped on a zero grant — its alert moment must still fire.
+      with the daily-clipped stake AND rewrites the persisted row to match (the
+      row was stored pre-clip — BUG 2). A brand-new INSERTED pick with a zero
+      grant returns None (no capacity -> skip); an already-persisted UPGRADED
+      pick is never skipped on a zero grant — its alert moment must still fire.
     - duplicate: already persisted; reserve NOTHING (a re-detection is not new
       exposure). The pick keeps breakdown.final, matching its persisted row.
     - unpersisted: DB state is unknown; reserve NOTHING it could never release,
@@ -675,7 +705,7 @@ def _reserve_for_outcome(
     if granted <= 0.0 and outcome == "inserted":
         return None
     if granted < breakdown.final:
-        return pick.model_copy(
+        clipped = pick.model_copy(
             update={
                 "recommended_stake_fraction": granted,
                 "recommended_stake_amount": stake_amount(granted, deps.bankroll),
@@ -684,6 +714,10 @@ def _reserve_for_outcome(
                 ),
             }
         )
+        # BUG 2: the row was persisted with the pre-clip stake; correct it so the
+        # stored/reported stake honours the daily cap and matches the reservation.
+        await _persist_stake_clip(deps, clipped, event_id)
+        return clipped
     return pick
 
 
@@ -1029,7 +1063,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     picks.append(pick)
                     n_volume += 1
                 continue
-            staked = _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
+            staked = await _reserve_for_outcome(deps, pick, breakdown, outcome, event_id, now)
             if staked is None:
                 # brand-new premium pick with no remaining daily/event capacity
                 logger.info("daily exposure cap reached; skipping %s", v.selection)

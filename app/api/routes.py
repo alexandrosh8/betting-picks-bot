@@ -811,19 +811,20 @@ async def resolution_match_rate(
     # pick sports that appear in the match rate above.
     pinnacle_capture = await pinnacle_archive_capture_by_sport(session)
     report["archive_capture"] = pinnacle_capture
-    # Betfair Exchange coverage alongside Pinnacle. Two distinct readings:
-    #   - archive (``betfair:`` namespace): the SEPARATE betfair_exchange capture
-    #     path, gated behind BETFAIR_EXCHANGE_ENABLED (default OFF) — kept for the
-    #     per-sport panel body but expected near-zero (it no longer receives
-    #     Betfair since the inline-bind, commit 882bb42);
-    #   - inline (canonical event): the REAL anchor availability that feeds picks —
-    #     of our scraped fixtures with soft odds, the share also carrying an inline
-    #     ``bookmaker='Betfair Exchange'`` row (OddsPortal bookie 44, JSON feed),
-    #     which the value engine recognises as sharp via SHARP_BOOKS name matching.
-    betfair_capture = await betfair_archive_capture_by_sport(session)
-    report["betfair_capture"] = betfair_capture
+    # Betfair Exchange coverage alongside Pinnacle. The INLINE (canonical-event)
+    # reading is CANONICAL: of our scraped fixtures with soft odds, the share also
+    # carrying an inline ``bookmaker='Betfair Exchange'`` row (OddsPortal bookie 44,
+    # JSON feed) — the REAL anchor that feeds picks (the value engine recognises it as
+    # sharp via SHARP_BOOKS name matching). BOTH the per-sport panel (``betfair_capture``)
+    # AND the headline now read this same INLINE instrument so the panel matches the
+    # headline. The archive (``betfair:`` namespace) capture path — gated behind
+    # BETFAIR_EXCHANGE_ENABLED (default OFF) and near-zero since the inline-bind
+    # (commit 882bb42) — is kept ONLY as a SEPARATE diagnostic (``betfair_archive_capture``),
+    # never the panel source.
     betfair_inline_capture = await betfair_inline_capture_by_sport(session)
+    report["betfair_capture"] = betfair_inline_capture
     report["betfair_inline_capture"] = betfair_inline_capture
+    report["betfair_archive_capture"] = await betfair_archive_capture_by_sport(session)
     # Scraped-weighted "Betfair X% · Pinnacle Y%" headline — the always-populated
     # summary the dashboard's coverage-panel HEADER shows up front (replaces the
     # bare "—"). Betfair uses the INLINE coverage (the real pick-feeding anchor),

@@ -76,6 +76,18 @@ class ValuePolicy:
     # liquid market, so the value scan rejects it (a feed defect can't mint a
     # phantom +EV pick). Default math.inf = OFF; set from Settings.value_max_edge.
     max_edge: float = math.inf
+    # (market_key, ceiling): per-market DATA-ERROR ceiling override — the per-market
+    # sibling of max_edge. Markets without an entry use the GLOBAL max_edge passed
+    # alongside this policy (Settings.value_max_edge). Empty () = DISABLED — every
+    # market uses the global ceiling (current behavior, the BIT-IDENTICAL default).
+    # Keys are matched line-detail-first then family, exactly like min_edge_by_market
+    # (most specific wins). Settings validates each ceiling > value_min_edge at the
+    # composition root; a bad entry fails fast there, never reaching this frozen
+    # policy. WHY per-market: 0.20 is soccer-appropriate, but a wider true-edge market
+    # (e.g. a sparse AH line) may legitimately clear 0.20 while a tight 2-way market's
+    # real ceiling is lower — but WHICH ceiling per market is folklore until learned,
+    # so the default leaves the validated global ceiling in force everywhere.
+    max_edge_by_market: tuple[tuple[str, float], ...] = ()
     # (market_key, DevigMethod): per-market-type devig override (ADR-0006 —
     # method selection is a config policy, never hardcoded in pipeline code).
     # Markets without an entry use the GLOBAL devig method passed alongside
@@ -119,6 +131,25 @@ def min_edge_for(
 ) -> float:
     """Premium-tier min-edge floor for a market: override or the global default."""
     by_key = dict(policy.min_edge_by_market)
+    for key in market_lookup_keys(market, market_detail):
+        value = by_key.get(key)
+        if value is not None:
+            return value
+    return default
+
+
+def max_edge_for(
+    policy: ValuePolicy, market: str, market_detail: str | None, default: float
+) -> float:
+    """Per-market DATA-ERROR ceiling for a market: an override or the global default.
+
+    Mirrors ``min_edge_for`` / ``devig_method_for`` — line-detail key first, then
+    market family; most specific wins. An empty ``policy.max_edge_by_market`` (the
+    default) always returns ``default`` (the global Settings.value_max_edge), so every
+    market keeps the validated global ceiling unless an override is explicitly
+    configured — bit-identical to the pre-knob behavior.
+    """
+    by_key = dict(policy.max_edge_by_market)
     for key in market_lookup_keys(market, market_detail):
         value = by_key.get(key)
         if value is not None:

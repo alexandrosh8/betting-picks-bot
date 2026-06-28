@@ -67,6 +67,28 @@ def parse_market_min_edges(raw: str) -> tuple[tuple[str, float], ...]:
     return tuple(out)
 
 
+def parse_market_max_edges(raw: str) -> tuple[tuple[str, float], ...]:
+    """VALUE_MAX_EDGE_PER_MARKET entries as (market_key, ceiling) pairs.
+
+    The per-market sibling of VALUE_MAX_EDGE (the data-error ceiling above which an
+    edge is treated as a corrupted/mislabeled anchor, never real value). Each ceiling
+    must be a number in (0, 1); Settings further validates it sits ABOVE
+    VALUE_MIN_EDGE (a ceiling at/under the min floor would reject every real edge).
+    """
+    out: list[tuple[str, float]] = []
+    for key, value in _parse_market_map(raw, "VALUE_MAX_EDGE_PER_MARKET"):
+        try:
+            ceiling = float(value)
+        except ValueError:
+            raise ValueError(
+                f"VALUE_MAX_EDGE_PER_MARKET[{key}]: {value!r} is not a number"
+            ) from None
+        if not 0.0 < ceiling < 1.0:
+            raise ValueError(f"VALUE_MAX_EDGE_PER_MARKET[{key}]={ceiling} must be in (0, 1)")
+        out.append((key, ceiling))
+    return tuple(out)
+
+
 def parse_market_min_books(raw: str) -> tuple[tuple[str, int], ...]:
     """VALUE_MIN_BOOKS_PER_MARKET entries as (market_key, count) pairs."""
     out: list[tuple[str, int]] = []
@@ -342,6 +364,16 @@ class Settings(BaseSettings):
     # suffixes because line-qualified keys ("asian_handicap_-1_5") are not
     # legal env-var fragments and new markets must not need code changes.
     value_min_edge_per_market: str = ""
+    # Per-market DATA-ERROR ceiling overrides, csv of "market_key:ceiling" — e.g.
+    # "asian_handicap_-1_5:0.30,h2h:0.18". The per-market sibling of VALUE_MAX_EDGE
+    # (the global upper sanity bound above which an edge is a corrupted/mislabeled
+    # anchor, never real value). Keys match line-detail-first then family, exactly
+    # like VALUE_MIN_EDGE_PER_MARKET (most specific wins); markets without an entry
+    # keep the global VALUE_MAX_EDGE. Empty = DISABLED — every market uses the global
+    # ceiling (BIT-IDENTICAL to today). Each ceiling must be in (0, 1) AND >
+    # VALUE_MIN_EDGE (validated at startup; a ceiling at/under the min floor would
+    # reject every real edge).
+    value_max_edge_per_market: str = ""
     # Odds-band gate refinement, csv of "lo-hi" inclusive RAW-odds bands —
     # e.g. "1.8-2.6" or "1.6-2.4,3.0-4.2". Empty = only the VALUE_MIN_ODDS
     # floor (current behavior). FLB literature establishes margin is loaded
@@ -987,6 +1019,16 @@ class Settings(BaseSettings):
                     f"VALUE_VOLUME_MIN_EDGE={self.value_volume_min_edge} — a per-market "
                     "premium floor under the volume floor inverts the tiers."
                 )
+        # Per-market data-error ceiling: each override must be a number in (0, 1)
+        # (parse) AND sit ABOVE VALUE_MIN_EDGE — a ceiling at/under the min floor
+        # would reject every real edge, silently minting nothing on those markets.
+        for key, ceiling in parse_market_max_edges(self.value_max_edge_per_market):
+            if ceiling <= self.value_min_edge:
+                raise ValueError(
+                    f"VALUE_MAX_EDGE_PER_MARKET[{key}]={ceiling} must be > "
+                    f"VALUE_MIN_EDGE={self.value_min_edge} (it is the per-market data-error "
+                    "ceiling; at/under the min floor it would reject every real edge)."
+                )
         parse_market_min_books(self.value_min_books_per_market)
         # Per-market devig override: a bad method name must fail fast at startup,
         # never silently fall through to the global method on those markets.
@@ -1088,6 +1130,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         major_leagues=parse_major_leagues(settings.value_major_leagues),
         require_sharp_anchor=settings.value_require_sharp_anchor,
         max_edge=settings.value_max_edge,
+        max_edge_by_market=parse_market_max_edges(settings.value_max_edge_per_market),
         devig_by_market=parse_market_devig(settings.value_devig_per_market),
         consensus_logit_pool=settings.value_consensus_logit_pool,
     )

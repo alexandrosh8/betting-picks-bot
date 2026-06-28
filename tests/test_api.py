@@ -519,14 +519,16 @@ def test_resolution_match_rate_endpoint_serializes_report(monkeypatch) -> None: 
     # panel can show coverage instead of an empty cell.
     assert cap["tennis"]["matched"] == 5
     assert cap["american_football"]["scraped"] == 0
-    # The headline's Betfair number now comes from the INLINE coverage (the real
-    # pick-feeding anchor: Betfair Exchange bound onto the canonical event), NOT
-    # the near-empty archive path. The per-sport panel body keeps the archive
-    # numbers so a structural-vs-thin-slate read stays available.
+    # The per-sport panel AND the headline both now come from the INLINE coverage
+    # (the real pick-feeding anchor: Betfair Exchange bound onto the canonical event),
+    # NOT the near-empty archive path — the panel matches the headline instrument.
     bf_panel = {row["sport"]: row for row in body["betfair_capture"]}
-    assert bf_panel["soccer"]["captured"] == 4  # archive path stays near-empty
+    assert bf_panel["soccer"]["captured"] == 99  # panel = INLINE canonical coverage
     bf_inline = {row["sport"]: row for row in body["betfair_inline_capture"]}
     assert bf_inline["soccer"]["captured"] == 99  # inline canonical-event coverage
+    # The archive counter survives ONLY as a separate diagnostic, never the panel.
+    bf_archive = {row["sport"]: row for row in body["betfair_archive_capture"]}
+    assert bf_archive["soccer"]["captured"] == 4  # archive path stays near-empty
     # coverage_summary is the always-populated headline the panel shows BEFORE
     # the operator expands it (replaces the bare "—"). Betfair = sum(INLINE
     # captured)/sum(scraped) = 99/(149+64)=99/213; Pinnacle = sum(matched)/

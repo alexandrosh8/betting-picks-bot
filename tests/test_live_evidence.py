@@ -29,6 +29,8 @@ def row(
     has_snapshot: bool = False,
     close_independent: bool | None = True,
     sport: str | None = None,
+    closing_fair: float | None = None,
+    model_prob: float | None = None,
 ) -> SettledPickRow:
     return SettledPickRow(
         tier=tier,
@@ -42,6 +44,8 @@ def row(
         has_snapshot_close=has_snapshot,
         close_independent_of_fill=close_independent,
         sport=sport,
+        closing_fair_probability=closing_fair,
+        model_probability=model_prob,
     )
 
 
@@ -175,6 +179,93 @@ def test_sharp_close_excludes_circular_close_anchored_by_fill_book() -> None:
     # The invariant the guard guarantees: every row in the sharp subset is
     # independent of its fill book (no circular close contaminates the subset).
     assert all(r.close_independent_of_fill is not False for r in rows if r.sharp_close)
+
+
+def test_sharp_close_excludes_tautological_close_echoing_pick_anchor() -> None:
+    """#137 mirror: a named-sharp snapshot close that the persisted independence
+    flag calls independent (close_independent_of_fill=True — a DIFFERENT book)
+    but whose CLOSE fair merely ECHOES the pick-time fair (closing == model, the
+    SAME archived sharp line reused at pick- and close-time) is a TAUTOLOGY:
+    clv_log re-encodes the pick-time edge, not real CLV. It must NOT enter the
+    trusted sharp subset even though the fill-book-only flag passed it."""
+    rows = [
+        # tautological: closing_fair == model_probability (line did NOT move) ->
+        # excluded despite an 'independent' flag and a named sharp snapshot close.
+        row(
+            clv=0.03,
+            closing_anchor="pinnacle",
+            has_snapshot=True,
+            close_independent=True,
+            closing_fair=0.50,
+            model_prob=0.50,
+        ),
+        # genuine: the close fair MOVED from the pick-time fair -> real CLV.
+        row(
+            clv=0.04,
+            closing_anchor="pinnacle",
+            has_snapshot=True,
+            close_independent=True,
+            closing_fair=0.55,
+            model_prob=0.50,
+        ),
+    ]
+    sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
+    assert sc["n"] == 1  # only the MOVED-line close survives
+    assert sc["stake_weighted_clv_log"] == pytest.approx(0.04)
+    assert all(not r.is_tautological_close for r in rows if r.sharp_close)
+
+
+def test_tautological_close_excluded_from_close_anchor_clv() -> None:
+    """A pinnacle-CLOSED row whose close fair equals its pick-time fair (identical
+    archived line, |move|<=eps) carries a TAUTOLOGICAL clv_log. Like the circular
+    guard, it must NOT move by_close_anchor['pinnacle'].mean_clv_log — _stratum_stats
+    drops proven-tautological closes from the CLV/beat samples (pnl_rows untouched)."""
+    moved = row(
+        clv=0.02,
+        beat=True,
+        pnl=1.0,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+        close_independent=True,
+        closing_fair=0.62,
+        model_prob=0.60,
+    )
+    tautological = row(
+        clv=0.99,
+        beat=True,
+        pnl=-1.0,
+        closing_anchor="pinnacle",
+        has_snapshot=True,
+        close_independent=True,  # the fill-book-only flag says "independent"...
+        closing_fair=0.60,
+        model_prob=0.60,  # ...but the line did NOT move => tautology
+    )
+    pin = live_evidence_report([moved, tautological], ml_threshold=None, min_n=1)[
+        "by_close_anchor"
+    ]["pinnacle"]
+    assert pin["n"] == 2  # both rows still in the honest n
+    assert pin["n_clv"] == 1  # ...but only the MOVED close in the CLV sample
+    assert pin["mean_clv_log"] == pytest.approx(0.02)  # tautological 0.99 did NOT move it
+    assert pin["n_roi"] == 2  # pnl_rows untouched: ROI still sees both realized P&Ls
+
+
+def test_tautology_guard_needs_both_fairs_present() -> None:
+    """Feature-detection contract (mirrors the persisted guard): a tautology is
+    only PROVABLE when a clv_log AND BOTH fair probabilities are present. A row
+    with a missing fair (pre-column / unknowable) is NOT treated as tautological,
+    so historical sharp closes keep their existing trusted status."""
+    # closing_fair present but model_prob absent -> cannot prove tautology -> kept.
+    kept = row(
+        clv=0.03,
+        closing_anchor="sharp",
+        has_snapshot=True,
+        close_independent=True,
+        closing_fair=0.50,
+        model_prob=None,
+    )
+    assert kept.is_tautological_close is False
+    sc = live_evidence_report([kept], ml_threshold=None, min_n=1)["sharp_close"]
+    assert sc["n"] == 1
 
 
 def test_sharp_close_independence_unknown_does_not_exclude() -> None:

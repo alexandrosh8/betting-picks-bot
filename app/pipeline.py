@@ -27,6 +27,7 @@ from app.edge.value_policy import (
     devig_method_for,
     distinct_book_count,
     is_major_league,
+    max_edge_for,
     min_books_for,
     min_edge_for,
     odds_in_bands,
@@ -911,7 +912,13 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             anchor_book,
             min_edge=scan_min_edge,
             min_odds=deps.value_min_odds,
-            max_edge=deps.value_policy.max_edge,
+            # Per-market DATA-ERROR ceiling override (default: the global
+            # value_policy.max_edge). Resolved per (market, detail) at this
+            # chokepoint exactly like devig_method_for in event_fair_probs; an
+            # empty map leaves the global ceiling in force (bit-identical).
+            max_edge=max_edge_for(
+                deps.value_policy, str(market), detail, deps.value_policy.max_edge
+            ),
         )
         for v in value_bets:
             cap = captured.get((v.selection, v.best_book))

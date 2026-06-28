@@ -33,8 +33,10 @@ import httpx
 
 from app.backtesting.clv import clv_log
 from app.ingestion.beatthebookie_series import load_series_dir, to_fd_row
+from app.ingestion.betfair_bsp import attach_betfair_close, load_betfair_dir
 from app.ingestion.football_data import fetch_season_csv
 from app.probabilities.devig import DevigMethod, devig
+from app.resolution.matching import default_aliases
 
 
 def _f(x: object) -> float | None:
@@ -328,13 +330,97 @@ async def run_beatthebookie(args: argparse.Namespace) -> None:
     )
 
 
+async def run_betfair_bsp(args: argparse.Namespace) -> None:
+    """Backtest CLV vs a TRUE SHARP CLOSE — the Betfair Starting Price / settled
+    pre-in-play exchange close — joined onto football-data PRE-MATCH prices.
+
+    HONEST SCOPE: the Betfair source supplies the CLOSE ONLY (BSP / last
+    pre-in-play best-back) plus the settled result. It is NOT a pre-match price
+    you could have bet in this dataset. The bet price is the football-data Max
+    (soft, line-shopping) pre-match line the backtest already loads; the Betfair
+    sharp close is JOINED to it by kickoff DATE + canonical team-name match
+    (``app/resolution/matching``, strict — never guesses). CLV is then the bet's
+    value vs that real sharp close — the sharp-anchor complement to the
+    consensus-anchored BeatTheBookie breadth path. Data is OPERATOR-PLACED
+    (account-gated, sandbox-unreachable); when the dir is absent we print the
+    operator instruction and place no bets.
+    """
+    bsp_dir = Path(args.betfair_bsp_dir)
+    markets = load_betfair_dir(bsp_dir)
+    if not markets:
+        print("Betfair historical data not found. Operator must place the unzipped")
+        print("per-market STREAM files (one market per .bz2 / .json, Exchange Stream")
+        print(f"market-change format) at, e.g.:\n    {bsp_dir}")
+        print("Source (account-gated Basic tier): historicdata.betfair.com — soccer")
+        print("(eventTypeId=1) + basketball (eventTypeId=7522) MATCH_ODDS markets.")
+        print("A live fetch from this sandbox returns HTTP 401. Read-only; places no bets.")
+        return
+
+    leagues = [x.strip() for x in args.leagues.split(",") if x.strip()]
+    train_s = [x.strip() for x in args.train_seasons.split(",") if x.strip()]
+    test_s = [x.strip() for x in args.test_seasons.split(",") if x.strip()]
+    min_odds, max_odds = args.min_odds, args.max_odds
+    aliases = default_aliases()
+
+    print("\nBETFAIR-BSP BACKTEST — sharp CLOSE = Betfair BSP/last-pre-in-play")
+    print(f"{len(markets)} operator-placed markets | pre-match = football-data Max (soft)")
+    print("CLV is vs a REAL sharp close (not consensus). BSP is CLOSE-only; the bet")
+    print("price is the pre-match Max line, joined by date + canonical team name.\n")
+
+    fd_train = await load(leagues, train_s)
+    fd_test = await load(leagues, test_s)
+    train_rows, train_stats = attach_betfair_close(fd_train, markets, aliases=aliases)
+    test_rows, test_stats = attach_betfair_close(fd_test, markets, aliases=aliases)
+    for label, st in (("train", train_stats), ("test", test_stats)):
+        print(
+            f"join[{label}]: fd_rows={st.n_fd_rows} markets={st.n_markets} "
+            f"joined={st.n_joined} unmatched={st.n_unmatched} "
+            f"result_conflict={st.n_result_conflict}"
+        )
+    if not train_rows or not test_rows:
+        print("\nToo few joined rows to evaluate (place more overlapping Betfair markets).")
+        print("Read-only; this script places no bets.")
+        return
+
+    devig_methods = (
+        DevigMethod.POWER,
+        DevigMethod.SHIN,
+        DevigMethod.MULTIPLICATIVE,
+        DevigMethod.ODDS_RATIO,
+    )
+    thresholds = (0.005, 0.010, 0.020, 0.030, 0.050)
+    _sweep_and_eval(
+        train_rows,
+        test_rows,
+        ("1x2",),
+        min_odds,
+        max_odds,
+        devig_methods,
+        thresholds,
+        train_label="train (fd Max + Betfair close)",
+        test_label="test (fd Max + Betfair close)",
+    )
+    print(
+        "\nNote: 'CLVpinn' here is CLV vs the BETFAIR sharp close (the close slots were "
+        "overwritten with BSP/last-pre-in-play). Manual review required; places no bets."
+    )
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--source",
-        choices=("football-data", "beatthebookie"),
+        choices=("football-data", "beatthebookie", "betfair-bsp"),
         default="football-data",
-        help="football-data.co.uk (Pinnacle, default) or BeatTheBookie odds_series",
+        help=(
+            "football-data.co.uk (Pinnacle, default), BeatTheBookie odds_series "
+            "(consensus breadth), or betfair-bsp (sharp close joined to fd Max)"
+        ),
+    )
+    p.add_argument(
+        "--betfair-bsp-dir",
+        default="data/betfair/bsp",
+        help="dir of operator-placed Betfair historical STREAM market files (.bz2/.json)",
     )
     p.add_argument(
         "--btb-dir",
@@ -359,6 +445,9 @@ async def main() -> None:
     args = p.parse_args()
     if args.source == "beatthebookie":
         await run_beatthebookie(args)
+        return
+    if args.source == "betfair-bsp":
+        await run_betfair_bsp(args)
         return
     leagues = [x.strip() for x in args.leagues.split(",") if x.strip()]
     train_s = [x.strip() for x in args.train_seasons.split(",") if x.strip()]

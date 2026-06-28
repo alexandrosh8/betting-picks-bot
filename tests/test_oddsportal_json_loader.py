@@ -224,6 +224,95 @@ async def test_json_cycle_rotates_proxy_per_match_when_pool_configured(
     assert seen[3] == seen[0]
 
 
+async def test_json_cycle_scrapes_soonest_kickoff_last_for_freshness() -> None:
+    """KICKOFF-PRIORITIZED ORDER: the soonest-to-kick-off match is scraped LAST so
+    it lands in the cycle's freshness-surviving TAIL.
+
+    A worldwide slate can't refresh inside MAX_ODDS_AGE_SECONDS, and picks evaluate
+    at `now` taken AFTER the fetch — so everything captured earlier than one window
+    before the cycle ends is discarded by the odds-age gate ("only the scrape's
+    tail survives", config.py). Whatever is scraped LAST has the freshest
+    captured_at at evaluation, so the betable window (soonest kickoffs) must be in
+    the tail. Kickoffs come from the EventDirectory (registered by a prior cycle);
+    the listing here is the opposite order (soonest first) to prove the reorder.
+    """
+    from datetime import UTC, datetime
+
+    from app.ingestion.base import EventTeams
+
+    directory = EventDirectory()
+    base = datetime(2026, 6, 28, tzinfo=UTC)
+    soon = "https://www.oddsportal.com/f/soon/"
+    mid = "https://www.oddsportal.com/f/mid/"
+    late = "https://www.oddsportal.com/f/late/"
+    # event_id == match_link for these URLs; a prior cycle knows each kickoff.
+    for link, hour in ((soon, 12), (mid, 15), (late, 18)):
+        directory.register(
+            link, EventTeams(home="H", away="A", league="L", starts_at=base.replace(hour=hour))
+        )
+    # Listing yields soonest-FIRST (the natural OddsPortal dated-page order — the
+    # order that today leaves the betable window in the discarded HEAD).
+    matches = [{"match_link": soon}, {"match_link": mid}, {"match_link": late}]
+    seen: list[str] = []
+
+    async def scrape_match(match_url: str, **kwargs: Any) -> list[Any]:
+        seen.append(match_url)
+        return []
+
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        markets=("1x2",),
+        scrape_fn=_listing_scrape(matches),
+        use_json_feed=True,
+        json_scrape_fn=scrape_match,
+        json_concurrency=1,  # serialize the fan-out so the scrape order is observable
+    )
+    await loader.fetch_odds("soccer")
+
+    # Soonest (12:00) scraped LAST; latest (18:00) first — descending by kickoff.
+    assert seen == [late, mid, soon]
+
+
+async def test_json_cycle_first_sighting_unknown_kickoff_leads_head() -> None:
+    """A first-sighting match (kickoff not yet known — the JSON listing carries
+    only a URL) must NOT displace a confirmed-betable game from the tail: unknown
+    kickoffs lead the HEAD, known kickoffs fill the tail soonest-LAST. The
+    unknown's kickoff is learned next cycle once it has been scraped once."""
+    from datetime import UTC, datetime
+
+    from app.ingestion.base import EventTeams
+
+    directory = EventDirectory()
+    base = datetime(2026, 6, 28, tzinfo=UTC)
+    known_soon = "https://www.oddsportal.com/f/known-soon/"
+    brand_new = "https://www.oddsportal.com/f/brand-new/"
+    directory.register(
+        known_soon, EventTeams(home="H", away="A", league="L", starts_at=base.replace(hour=13))
+    )
+    # brand_new has no directory entry -> kickoff unknown.
+    matches = [{"match_link": known_soon}, {"match_link": brand_new}]
+    seen: list[str] = []
+
+    async def scrape_match(match_url: str, **kwargs: Any) -> list[Any]:
+        seen.append(match_url)
+        return []
+
+    loader = OddsPortalLoader(
+        directory=directory,
+        leagues_by_sport_key={"soccer": ("football", ["testland-league"])},
+        markets=("1x2",),
+        scrape_fn=_listing_scrape(matches),
+        use_json_feed=True,
+        json_scrape_fn=scrape_match,
+        json_concurrency=1,
+    )
+    await loader.fetch_odds("soccer")
+
+    # Unknown-kickoff first sighting in the head; the confirmed-betable game last.
+    assert seen == [brand_new, known_soon]
+
+
 async def test_json_listing_requests_no_markets_so_no_per_match_playwright() -> None:
     """SAVINGS INVARIANT: with JSON on, the dated LISTING scrape is invoked with
     an EMPTY markets list, so OddsHarvester does NOT run the expensive per-match

@@ -12,6 +12,7 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.edge.gates import GatePolicy
+from app.edge.steam import SteamPolicy
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import ScraperProxy
 from app.risk.exposure import DailyExposureLedger
@@ -354,6 +355,33 @@ class Settings(BaseSettings):
     # so it stops obscure-league bleed (~37% sharp coverage is structural, see
     # .claude/memory/pitfalls.md 2026-06-20) without any per-season list upkeep.
     value_require_sharp_anchor: bool = False
+
+    # --- Line-movement / steam-awareness gate (app/edge/steam.py) ------------
+    # Guards the dominant soft-book FALSE POSITIVE: a phantom edge from a moving
+    # market read on a single snapshot — the soft price has already CONVERGED on
+    # the anchor (edge correcting/evaporating) or the sharp anchor is STALE (last
+    # seen beyond the freshness window). Default False = SHADOW: the per-candidate
+    # verdict is computed + logged but the tier is UNCHANGED, so its effect on
+    # real picks is measured before it enforces. True = ENFORCE: a tripped premium
+    # candidate is DEMOTED to volume (shadow) — persisted + CLV-tracked, never
+    # alerted — exactly like the other built-but-off premium gates (never a silent
+    # drop). Enable only after the shadow logs show it would not bleed live edge.
+    value_steam_gate_enabled: bool = False
+    # Trajectory window the gate consults (seconds). Bounds the per-book history.
+    value_steam_lookback_seconds: float = Field(default=21600.0, gt=0.0)  # 6h
+    # Min in-window observations of the FILL book before any movement judgement.
+    value_steam_min_points: int = Field(default=2, ge=2)
+    # Convergence trip: fraction of the ORIGINAL fill-vs-anchor gap already closed.
+    value_steam_close_frac: float = Field(default=0.5, gt=0.0, le=1.0)
+    # Opening gap (prob units) below which there was no edge to close (suppresses
+    # the convergence signal — avoids dividing a negligible gap).
+    value_steam_min_initial_gap: float = Field(default=0.01, ge=0.0)
+    # Stale-anchor trip: anchor's most-recent observation no older than this (s).
+    value_steam_anchor_staleness_seconds: float = Field(default=7200.0, gt=0.0)  # 2h
+    # Soft-steamed-away FLAG threshold (prob units the fill implied dropped).
+    value_steam_soft_steam_away_delta: float = Field(default=0.04, gt=0.0)
+    # Whether a soft-steamed-away flag also TRIPS the gate (default: flag only).
+    value_steam_demote_on_soft_steam: bool = False
 
     # --- Optional drawdown-constrained staking (default OFF) -----------------
     # Both set => Kelly multiplier = min(FRACTIONAL_KELLY, lambda*) where
@@ -1018,6 +1046,25 @@ def value_policy(settings: Settings) -> ValuePolicy:
         major_leagues=parse_major_leagues(settings.value_major_leagues),
         require_sharp_anchor=settings.value_require_sharp_anchor,
         max_edge=settings.value_max_edge,
+    )
+
+
+def steam_policy(settings: Settings) -> SteamPolicy:
+    """Line-movement / steam-awareness gate policy from Settings (root only).
+
+    Always built so the gate RUNS once wired into the pipeline; the default
+    ``enabled=False`` keeps it in SHADOW (compute + log, no tier change). The
+    pure gate (app/edge/steam.py) never reads the environment — policy crosses
+    the boundary as this frozen dataclass."""
+    return SteamPolicy(
+        enabled=settings.value_steam_gate_enabled,
+        lookback_seconds=settings.value_steam_lookback_seconds,
+        min_points=settings.value_steam_min_points,
+        soft_toward_anchor_close_frac=settings.value_steam_close_frac,
+        min_initial_gap=settings.value_steam_min_initial_gap,
+        anchor_staleness_seconds=settings.value_steam_anchor_staleness_seconds,
+        soft_steam_away_delta=settings.value_steam_soft_steam_away_delta,
+        demote_on_soft_steam=settings.value_steam_demote_on_soft_steam,
     )
 
 

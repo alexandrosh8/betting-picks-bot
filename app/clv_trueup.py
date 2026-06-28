@@ -1119,6 +1119,33 @@ def build_sharp_anchor_loader(
     return loader
 
 
+def build_steam_history_loader(
+    session_factory: "async_sessionmaker",
+    *,
+    lookback_seconds: float,
+) -> Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[list[OddsSnapshotIn]]]:
+    """Pick-time odds-HISTORY loader for PipelineDeps.steam_history_loader.
+
+    Returns recent odds_snapshots history (per-book time series) for the cycle's
+    events within the steam lookback window, so the steam gate can read each
+    book's price trajectory. Read-only; the cycle's ``now`` is the no-leakage
+    upper bound. Per-cycle failures propagate to the pipeline's isolated
+    try/except so a history-read error never breaks picking.
+    """
+    from app.storage.repositories import recent_odds_trajectories
+
+    async def loader(sport_key: str, snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
+        now = datetime.now(tz=UTC)
+        since = now - timedelta(seconds=lookback_seconds)
+        refs = sorted({s.event_id for s in snapshots})
+        if not refs:
+            return []
+        async with session_factory() as session:
+            return await recent_odds_trajectories(session, refs, since=since, until=now)
+
+    return loader
+
+
 async def true_up_clv(
     loader: OddsLoader,
     session_factory: "async_sessionmaker",

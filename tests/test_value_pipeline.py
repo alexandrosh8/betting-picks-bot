@@ -1,12 +1,13 @@
 """Value pipeline: multi-book snapshots -> anchor -> value pick -> alert."""
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from app.edge.gates import GatePolicy
+from app.edge.steam import SteamPolicy
 from app.edge.value_policy import ValuePolicy
 from app.ingestion.base import EventDirectory, EventTeams
 from app.models.base import NullModel
@@ -1069,3 +1070,107 @@ async def test_min_books_floor_at_actual_count_changes_nothing() -> None:
     deps = make_deps(sink, FakeLoader(market_snapshots()))
     deps.value_policy = ValuePolicy(min_books_by_market=(("h2h", 1),))
     assert len(await run_value_pipeline(deps, "soccer")) == 1
+
+
+# --- line-movement / steam-awareness gate (app/edge/steam.py) ---------------
+
+
+def _steam_history_loader(
+    old_soft_home_odds: float,
+) -> Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[list[OddsSnapshotIn]]]:
+    """A stub PipelineDeps.steam_history_loader: returns ONE older SoftBook Home
+    observation so the fill book shows a trajectory (old generous -> current
+    less generous = converging toward the Pinnacle anchor)."""
+
+    async def _loader(sport_key: str, snapshots: Sequence[OddsSnapshotIn]) -> list[OddsSnapshotIn]:
+        return [snap("SoftBook", "Home FC", old_soft_home_odds, age_s=7200.0)]
+
+    return _loader
+
+
+def stale_anchor_market() -> list[OddsSnapshotIn]:
+    # Pinnacle anchors but its prices are 3h old (the freshness window is 2h);
+    # the soft book is fresh. The anchor is STALE -> phantom edge.
+    return [
+        snap("Pinnacle", "Home FC", 2.50, age_s=10800.0),
+        snap("Pinnacle", "Draw", 3.30, age_s=10800.0),
+        snap("Pinnacle", "Away FC", 3.10, age_s=10800.0),
+        snap("SoftBook", "Home FC", 2.90, age_s=30.0),
+        snap("SoftBook", "Draw", 3.20, age_s=30.0),
+        snap("SoftBook", "Away FC", 2.95, age_s=30.0),
+    ]
+
+
+async def test_steam_gate_enabled_demotes_converging_premium_to_no_alert() -> None:
+    # The soft Home price has corrected 3.80 -> 2.90 toward the Pinnacle anchor
+    # (>50% of the original edge gone): an evaporating edge. ENABLED steam gate
+    # DEMOTES it to volume (shadow) -> no premium pick, no alert.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.steam_policy = SteamPolicy(enabled=True)
+    deps.steam_history_loader = _steam_history_loader(3.80)
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []  # demoted (unpersisted volume) -> not a premium pick
+    assert sink.sent == []
+    assert LAST_POLL["soccer"]["picks"] == 0
+
+
+async def test_steam_gate_enabled_demotes_on_stale_anchor() -> None:
+    # The anchor's prices are 3h old (> 2h freshness window): a stale anchor =
+    # phantom edge. ENABLED steam gate demotes -> no alert.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(stale_anchor_market()))
+    deps.steam_policy = SteamPolicy(enabled=True)
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert picks == []
+    assert sink.sent == []
+    assert LAST_POLL["soccer"]["picks"] == 0
+
+
+async def test_steam_gate_shadow_keeps_tier_but_annotates() -> None:
+    # SHADOW (enabled=False, the default): the SAME converging candidate stays
+    # PREMIUM and alerts, but the verdict is surfaced on the pick for measurement.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.steam_policy = SteamPolicy(enabled=False)  # shadow
+    deps.steam_history_loader = _steam_history_loader(3.80)
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    assert picks[0].tier == "premium"  # tier UNCHANGED in shadow
+    assert "steam(shadow)" in picks[0].reason_summary
+    assert "soft_toward_anchor" in picks[0].reason_summary
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+
+
+async def test_steam_gate_enabled_inert_without_history() -> None:
+    # With only the current cycle's single point per book (no history loader),
+    # the gate cannot judge movement and the anchor is fresh -> no trip, even
+    # ENABLED. The premium pick alerts unchanged.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    deps.steam_policy = SteamPolicy(enabled=True)  # no steam_history_loader
+
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    assert picks[0].tier == "premium"
+    assert "steam" not in picks[0].reason_summary
+
+
+async def test_steam_gate_absent_is_strict_noop() -> None:
+    # Default deps.steam_policy is None: the gate is ABSENT (no history read, no
+    # verdict) — behaviour is byte-for-byte the pre-feature pick.
+    sink = RecordingSink()
+    deps = make_deps(sink, FakeLoader(market_snapshots()))
+    picks = await run_value_pipeline(deps, "soccer")
+    assert len(picks) == 1
+    assert "steam" not in picks[0].reason_summary

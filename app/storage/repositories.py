@@ -1469,6 +1469,61 @@ async def closing_odds_from_snapshots(
     return snaps, last_capture
 
 
+async def recent_odds_trajectories(
+    session: AsyncSession,
+    external_refs: Sequence[str],
+    *,
+    since: datetime,
+    until: datetime,
+) -> list[OddsSnapshotIn]:
+    """Recent odds_snapshots HISTORY for a set of events, re-keyed to external_ref.
+
+    Every observation with ``since <= captured_at <= until`` for the given events,
+    rebuilt as OddsSnapshotIn (keyed by the event's external_ref + mapped market)
+    so the steam gate (app/edge/steam.py) can read each book's per-selection price
+    trajectory. ``until`` (the cycle's ``now``) is the NO-LEAKAGE upper bound — no
+    future row ever crosses the boundary. Read-only; [] when no events match.
+
+    The append-only, change-only odds_snapshots store means one row per price
+    MOVE, so this returns exactly the recent movement history per book — the
+    trajectory the gate needs, at no extra scrape cost.
+    """
+    refs = [r for r in external_refs if r]
+    if not refs:
+        return []
+    rows = (
+        await session.execute(
+            select(OddsSnapshot, Event.external_ref)
+            .join(Event, OddsSnapshot.event_id == Event.id)
+            .where(
+                Event.external_ref.in_(refs),
+                OddsSnapshot.captured_at >= since,
+                OddsSnapshot.captured_at <= until,
+            )
+        )
+    ).all()
+    out: list[OddsSnapshotIn] = []
+    for row, external_ref in rows:
+        mapped = market_from_snapshot_key(row.market)
+        if mapped is None or row.decimal_odds <= 1:
+            continue  # unknown legacy key / degenerate price: skip, never guess
+        market, detail = mapped
+        out.append(
+            OddsSnapshotIn(
+                event_id=external_ref,
+                bookmaker=row.bookmaker,
+                market=market,
+                selection=row.selection,
+                decimal_odds=float(row.decimal_odds),
+                liquidity=float(row.liquidity) if row.liquidity is not None else None,
+                captured_at=row.captured_at,
+                ingested_at=row.ingested_at,
+                market_detail=detail,
+            )
+        )
+    return out
+
+
 async def resolve_pinnacle_close_snaps(
     session: AsyncSession,
     *,

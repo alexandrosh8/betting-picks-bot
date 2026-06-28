@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings, gate_policy, stake_policy, value_policy
+from app.config import Settings, gate_policy, stake_policy, steam_policy, value_policy
 from app.edge.value_policy import ValuePolicy
 
 
@@ -87,6 +87,45 @@ def test_policies_built_from_settings() -> None:
     stakes = stake_policy(s)
     assert stakes.fractional_kelly == 0.25
     assert stakes.max_stake_fraction == 0.02
+
+
+def test_steam_policy_default_is_shadow() -> None:
+    # Default-OFF: the gate is built (so it RUNS in shadow) but does not enforce.
+    s = make_settings()
+    pol = steam_policy(s)
+    assert pol.enabled is False
+    assert pol.lookback_seconds == 21600.0
+    assert pol.anchor_staleness_seconds == 7200.0
+    assert pol.soft_toward_anchor_close_frac == 0.5
+
+
+def test_steam_policy_enforce_and_overrides_from_settings() -> None:
+    s = make_settings(
+        value_steam_gate_enabled=True,
+        value_steam_lookback_seconds=10800.0,
+        value_steam_close_frac=0.6,
+        value_steam_anchor_staleness_seconds=3600.0,
+    )
+    pol = steam_policy(s)
+    assert pol.enabled is True
+    assert pol.lookback_seconds == 10800.0
+    assert pol.soft_toward_anchor_close_frac == 0.6
+    assert pol.anchor_staleness_seconds == 3600.0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"value_steam_close_frac": 0.0},  # must be > 0
+        {"value_steam_close_frac": 1.5},  # must be <= 1
+        {"value_steam_lookback_seconds": 0.0},  # must be > 0
+        {"value_steam_min_points": 1},  # must be >= 2
+        {"value_steam_anchor_staleness_seconds": -1.0},  # must be > 0
+    ],
+)
+def test_steam_policy_bad_knobs_fail_fast(overrides: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**overrides)
 
 
 def test_odds_api_key_rotation_drops_empties() -> None:

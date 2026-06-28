@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.backtesting.clv import mean_significance, wilson_interval
 from app.ingestion.base import EventTeams, prefer_kickoff
 from app.schemas.base import Market
 from app.schemas.odds import OddsSnapshotIn
@@ -829,6 +830,49 @@ def _clv_row_is_fabricated(
     return abs(float(clv_log)) > CLV_IMPLAUSIBLE_LOG
 
 
+# P2 SIGNIFICANCE alpha. The whole strategy's proof rests on mean clv_log being
+# statistically > 0; a point estimate without a significance test reads small-sample
+# noise as signal. 0.05 -> a two-sided 95% CI; ``*_clv_significant`` is True only when
+# that CI excludes 0 on the positive side (ci_low > 0), ``*_beat_close_wilson_significant``
+# only when the Wilson lower bound clears 0.5. Honest by construction: with the live
+# trusted sharp n ~3 the flags read NOT significant.
+CLV_SIGNIFICANCE_ALPHA = 0.05
+
+
+def _significance_fields(
+    prefix: str,
+    clv_series: Sequence[float],
+    beat_true: int,
+    beat_known: int,
+    alpha: float = CLV_SIGNIFICANCE_ALPHA,
+) -> dict[str, Any]:
+    """Expand a CLEAN clv_log series + beat-close tally into JSON-ready
+    significance fields for one stratum (prefix "" = blended, "sharp_" = trusted).
+
+    Pure passthrough to the math helpers in app.backtesting.clv: a one-sample
+    t-test of mean CLV vs 0 (with a t-based 95% CI) and a Wilson 95% CI on the
+    beat-close rate. Numerics are None when not computable (n<2 for the t-test,
+    n==0 for Wilson); the boolean flags default to False — an honest "not
+    significant", never a fabricated claim. ``clv_series``/``beat_*`` MUST already
+    exclude fabricated + tautological rows (significance on the clean subset only).
+    """
+    sig = mean_significance(clv_series, alpha=alpha)
+    wilson = wilson_interval(beat_true, beat_known, alpha=alpha) if beat_known else None
+    return {
+        f"{prefix}clv_n": len(clv_series),
+        f"{prefix}clv_mean": sig.mean if sig is not None else None,
+        f"{prefix}clv_std": sig.std if sig is not None else None,
+        f"{prefix}clv_tstat": sig.tstat if sig is not None else None,
+        f"{prefix}clv_ci_low": sig.ci_low if sig is not None else None,
+        f"{prefix}clv_ci_high": sig.ci_high if sig is not None else None,
+        f"{prefix}clv_significant": bool(sig is not None and sig.significant),
+        f"{prefix}clv_alpha": alpha,
+        f"{prefix}beat_close_wilson_low": wilson[0] if wilson is not None else None,
+        f"{prefix}beat_close_wilson_high": wilson[1] if wilson is not None else None,
+        f"{prefix}beat_close_wilson_significant": bool(wilson is not None and wilson[0] > 0.5),
+    }
+
+
 def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     """Aggregate (outcome, pnl, stake, clv_log, beat_close, closing_odds,
     closing_anchor_type) rows into the report fields. Decimals serialize as
@@ -869,6 +913,12 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     sharp_clv_stake = Decimal("0")
     sharp_beat_known = sharp_beat_true = n_sharp = 0
     sharp_all_independent = True  # invariant: no circular close in the sharp subset
+    # P2 SIGNIFICANCE: the per-pick CLEAN clv_log series for each stratum (the rows
+    # that actually feed the blended / trusted point estimates — fabricated and
+    # tautological rows already excluded). These drive the t-test + CI; collecting
+    # the series (not just the stake-weighted sum) is what makes significance possible.
+    blended_clv_series: list[float] = []
+    sharp_clv_series: list[float] = []
     for (
         outcome,
         pnl,
@@ -905,6 +955,7 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         if clv_log is not None and not clv_excluded:
             clv_weighted += stake * clv_log
             clv_stake += stake
+            blended_clv_series.append(float(clv_log))
         if beat_close is not None and not clv_excluded:
             beat_known += 1
             beat_true += int(beat_close)
@@ -932,6 +983,7 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
             n_sharp += 1
             sharp_clv_weighted += stake * clv_log
             sharp_clv_stake += stake
+            sharp_clv_series.append(float(clv_log))
             sharp_all_independent = sharp_all_independent and close_independent is True
             if beat_close is not None:
                 sharp_beat_known += 1
@@ -973,6 +1025,11 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         "sharp_beat_close_rate": (
             _ratio(Decimal(sharp_beat_true), Decimal(sharp_beat_known)) if sharp_ok else None
         ),
+        # P2 SIGNIFICANCE (NOT min-n suppressed: this IS the honesty gate). One-sample
+        # t-test of mean clv_log vs 0 + t-CI, and a Wilson CI on beat_close_rate, for
+        # BOTH strata on the CLEAN subset. At tiny live n the flags read False — honest.
+        **_significance_fields("", blended_clv_series, beat_true, beat_known),
+        **_significance_fields("sharp_", sharp_clv_series, sharp_beat_true, sharp_beat_known),
     }
 
 

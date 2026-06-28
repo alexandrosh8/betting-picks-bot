@@ -304,6 +304,109 @@ def test_tautological_close_excluded_from_blended_and_trusted() -> None:
     assert agg["stake_weighted_clv_log"] == "0.04"
 
 
+def test_significance_surfaced_for_positive_large_n_blended_and_sharp() -> None:
+    # P2 significance: a large-n, clearly-positive CLV series surfaces a one-sample
+    # t-stat > 0, a 95% CI excluding 0, and significant=True on BOTH the blended and
+    # the trusted sharp stratum. The Wilson beat-close CI is present and (here)
+    # clears 0.5. These are the proof-of-edge fields the headline previously lacked.
+    rows = [
+        _row(
+            clv_log=0.10 + (0.02 if i % 2 else -0.02),  # mean ~0.10, tight spread
+            beat_close=True,
+            closing_anchor="pinnacle",
+            close_independent=True,
+            has_snapshot_close=True,
+            closing_fair_probability=0.55,  # in-bounds close-implied edge
+            decimal_odds=2.0,
+        )
+        for i in range(200)
+    ]
+    agg = _aggregate_settled(rows)
+    # blended stratum
+    assert agg["clv_n"] == 200
+    assert agg["clv_tstat"] > 0
+    assert agg["clv_ci_low"] > 0
+    assert agg["clv_ci_high"] > agg["clv_ci_low"]
+    assert agg["clv_significant"] is True
+    assert agg["clv_alpha"] == 0.05
+    assert 0.0 <= agg["beat_close_wilson_low"] <= agg["beat_close_wilson_high"] <= 1.0
+    assert agg["beat_close_wilson_significant"] is True  # 200/200 beat -> low > 0.5
+    # trusted sharp stratum (same rows are all genuine independent sharp closes)
+    assert agg["sharp_clv_n"] == 200
+    assert agg["sharp_clv_tstat"] > 0
+    assert agg["sharp_clv_ci_low"] > 0
+    assert agg["sharp_clv_significant"] is True
+    assert agg["sharp_beat_close_wilson_significant"] is True
+
+
+def test_significance_not_significant_for_tiny_sharp_n() -> None:
+    # HONEST live state: only 3 genuine sharp closes. The sharp significance fields
+    # ARE computed (n=3) but read NOT significant — a wide CI straddling 0 — so the
+    # platform never claims a real edge off 3 picks. Blended has a big-n base.
+    rows = [_row(closing_anchor="consensus", clv_log=0.01) for _ in range(MIN_HEADLINE_N)]
+    rows += [
+        _row(
+            closing_anchor="pinnacle", clv_log=clv, close_independent=True, has_snapshot_close=True
+        )
+        for clv in (0.30, -0.10, 0.05)  # 3 sharp closes, noisy
+    ]
+    agg = _aggregate_settled(rows)
+    assert agg["sharp_clv_n"] == 3
+    assert agg["sharp_clv_significant"] is False
+    assert agg["sharp_clv_ci_low"] < 0 < agg["sharp_clv_ci_high"]
+
+
+def test_significance_none_for_empty_and_singleton_strata() -> None:
+    # Empty stratum: significance fields are None (not a crash); flags read False.
+    empty = _aggregate_settled([])
+    assert empty["clv_n"] == 0
+    assert empty["clv_tstat"] is None
+    assert empty["clv_ci_low"] is None
+    assert empty["clv_significant"] is False
+    assert empty["beat_close_wilson_low"] is None
+    assert empty["beat_close_wilson_significant"] is False
+    assert empty["sharp_clv_tstat"] is None
+    assert empty["sharp_clv_significant"] is False
+
+    # Singleton blended stratum: t-test undefined (n<2) -> None, flag False.
+    one = _aggregate_settled([_row(closing_anchor="consensus", clv_log=0.05)])
+    assert one["clv_n"] == 1
+    assert one["clv_tstat"] is None
+    assert one["clv_significant"] is False
+
+
+def test_significance_computed_on_clean_subset_only() -> None:
+    # Significance must use the SAME clean subset as the point estimates: fabricated
+    # (impossible close-implied edge) and tautological (identical-line) rows are
+    # dropped BEFORE the t-test, so they cannot manufacture significance.
+    honest = [
+        _row(
+            clv_log=0.04,
+            closing_anchor="pinnacle",
+            close_independent=True,
+            has_snapshot_close=True,
+            decimal_odds=2.0,
+            closing_fair_probability=0.51,
+            model_probability=0.46,  # close moved -> real CLV
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    poison = _row(
+        clv_log=1.756877,  # fabricated, would blow up mean/tstat if admitted
+        closing_anchor="pinnacle",
+        close_independent=True,
+        has_snapshot_close=True,
+        decimal_odds=6.50,
+        closing_fair_probability=0.891433,  # impossible close-implied edge
+    )
+    agg = _aggregate_settled(honest + [poison])
+    # Only the 50 honest rows feed significance (the poison row is excluded).
+    assert agg["clv_n"] == MIN_HEADLINE_N
+    assert agg["sharp_clv_n"] == MIN_HEADLINE_N
+    assert agg["clv_mean"] == 0.04  # not inflated by the 1.76 poison
+    assert agg["sharp_clv_mean"] == 0.04
+
+
 def test_null_independence_excluded_from_trusted_subset() -> None:
     # Audit 2026-06-28 P2: the trusted subset now requires close_independent_of_fill
     # IS TRUE (not merely "IS NOT FALSE"). A NULL/unknown independence (pre-column or

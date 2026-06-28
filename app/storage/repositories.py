@@ -1188,6 +1188,8 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
         ResultTracking.pnl,  # 5
         Pick.closing_odds,  # 6 — snapshot-close marker (NON-NULL = a true close)
         Sport.key,  # 7 — per-sport split key (Batch 3)
+        Pick.closing_fair_probability,  # 8 — close fair, for the TAUTOLOGY guard (#137)
+        Pick.model_probability,  # 9 — pick-time fair, for the TAUTOLOGY guard (#137)
     ]
     sport_idx = 7
     # closing_anchor_type / close_independent_of_fill are FEATURE-DETECTED like
@@ -1230,6 +1232,11 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             # (excluded from sharp subset); None = unknown (pre-column, NOT
             # treated as circular).
             close_independent_of_fill=row[indep_idx] if indep_idx is not None else None,
+            # TAUTOLOGY guard inputs (#137): close fair vs pick-time fair. A close
+            # that merely ECHOES the pick-time sharp anchor (closing == model) re-encodes
+            # the pick-time edge — fake CLV the fill-book-only independence flag missed.
+            closing_fair_probability=float(row[8]) if row[8] is not None else None,
+            model_probability=float(row[9]) if row[9] is not None else None,
         )
         for row in rows
     ]

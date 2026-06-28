@@ -67,6 +67,28 @@ def parse_market_min_edges(raw: str) -> tuple[tuple[str, float], ...]:
     return tuple(out)
 
 
+def parse_market_max_edges(raw: str) -> tuple[tuple[str, float], ...]:
+    """VALUE_MAX_EDGE_PER_MARKET entries as (market_key, ceiling) pairs.
+
+    The per-market sibling of VALUE_MAX_EDGE (the data-error ceiling above which an
+    edge is treated as a corrupted/mislabeled anchor, never real value). Each ceiling
+    must be a number in (0, 1); Settings further validates it sits ABOVE
+    VALUE_MIN_EDGE (a ceiling at/under the min floor would reject every real edge).
+    """
+    out: list[tuple[str, float]] = []
+    for key, value in _parse_market_map(raw, "VALUE_MAX_EDGE_PER_MARKET"):
+        try:
+            ceiling = float(value)
+        except ValueError:
+            raise ValueError(
+                f"VALUE_MAX_EDGE_PER_MARKET[{key}]: {value!r} is not a number"
+            ) from None
+        if not 0.0 < ceiling < 1.0:
+            raise ValueError(f"VALUE_MAX_EDGE_PER_MARKET[{key}]={ceiling} must be in (0, 1)")
+        out.append((key, ceiling))
+    return tuple(out)
+
+
 def parse_market_min_books(raw: str) -> tuple[tuple[str, int], ...]:
     """VALUE_MIN_BOOKS_PER_MARKET entries as (market_key, count) pairs."""
     out: list[tuple[str, int]] = []
@@ -342,6 +364,16 @@ class Settings(BaseSettings):
     # suffixes because line-qualified keys ("asian_handicap_-1_5") are not
     # legal env-var fragments and new markets must not need code changes.
     value_min_edge_per_market: str = ""
+    # Per-market DATA-ERROR ceiling overrides, csv of "market_key:ceiling" — e.g.
+    # "asian_handicap_-1_5:0.30,h2h:0.18". The per-market sibling of VALUE_MAX_EDGE
+    # (the global upper sanity bound above which an edge is a corrupted/mislabeled
+    # anchor, never real value). Keys match line-detail-first then family, exactly
+    # like VALUE_MIN_EDGE_PER_MARKET (most specific wins); markets without an entry
+    # keep the global VALUE_MAX_EDGE. Empty = DISABLED — every market uses the global
+    # ceiling (BIT-IDENTICAL to today). Each ceiling must be in (0, 1) AND >
+    # VALUE_MIN_EDGE (validated at startup; a ceiling at/under the min floor would
+    # reject every real edge).
+    value_max_edge_per_market: str = ""
     # Odds-band gate refinement, csv of "lo-hi" inclusive RAW-odds bands —
     # e.g. "1.8-2.6" or "1.6-2.4,3.0-4.2". Empty = only the VALUE_MIN_ODDS
     # floor (current behavior). FLB literature establishes margin is loaded
@@ -703,10 +735,13 @@ class Settings(BaseSettings):
     betfair_html_parser: bool = False
     # csv of sport keys to capture. "soccer" (the 3-way 1X2 BACK row) and
     # "basketball" (the 2-way moneyline BACK row) are supported; the default
-    # stays "soccer" (committed) but "soccer,basketball" works end-to-end. A
-    # basketball capture only sees fixtures when the basketball scrape is also
-    # enabled (ODDSPORTAL_BASKETBALL_LEAGUES). Unsupported sport keys are skipped.
-    betfair_exchange_sports: str = "soccer"
+    # DEFAULT "soccer,basketball" (2026-06-28): the capture rides the fast curl_cffi
+    # JSON feed (Betfair provider id 44) for soccer 1x2 + over_under_2_5 and basketball
+    # home_away — all feasibility-proven present in the feed (basketball totals/handicaps
+    # are NOT — Betfair doesn't price them on OddsPortal). A basketball capture only sees
+    # fixtures when the basketball scrape is also enabled (ODDSPORTAL_BASKETBALL_LEAGUES).
+    # Unsupported sport keys are skipped.
+    betfair_exchange_sports: str = "soccer,basketball"
     # Capture cadence. Change-gated on the per-selection BACK price, so a short
     # interval just tracks repricings; near kickoff is what matters. The >=30s
     # floor blocks hammering-by-typo on a free scraped source.
@@ -720,10 +755,11 @@ class Settings(BaseSettings):
     # majors). Each capture cycle opens at most this many match pages, so the
     # reader can NEVER try all ~91 pages at once and worsen the CPU overload.
     # Ordered never-captured-first then stalest-Betfair-capture, so a small bound
-    # ROTATES through the whole slate over successive cycles. Per-cycle page-load
-    # cost == min(this, eligible events). 20 pages / 300s ≈ one page every 15s —
-    # gentle on a CPU-bound box; raise only if the box has spare headroom.
-    betfair_exchange_max_targets_per_cycle: int = Field(default=20, ge=1, le=200)
+    # ROTATES through the whole slate over successive cycles. Per-cycle cost ==
+    # min(this, eligible events). DEFAULT 35 (2026-06-28): the curl_cffi JSON feed
+    # is far lighter than the retired Playwright reader, so a higher bound is cheap
+    # and covers soccer+basketball without cannibalizing soccer coverage.
+    betfair_exchange_max_targets_per_cycle: int = Field(default=35, ge=1, le=200)
     # Only events kicking off within this many hours ahead are eligible targets
     # (and only those NOT yet started). Bounds the candidate set to the
     # actionable near slate — far-future fixtures carry thin/!absent exchange
@@ -987,6 +1023,16 @@ class Settings(BaseSettings):
                     f"VALUE_VOLUME_MIN_EDGE={self.value_volume_min_edge} — a per-market "
                     "premium floor under the volume floor inverts the tiers."
                 )
+        # Per-market data-error ceiling: each override must be a number in (0, 1)
+        # (parse) AND sit ABOVE VALUE_MIN_EDGE — a ceiling at/under the min floor
+        # would reject every real edge, silently minting nothing on those markets.
+        for key, ceiling in parse_market_max_edges(self.value_max_edge_per_market):
+            if ceiling <= self.value_min_edge:
+                raise ValueError(
+                    f"VALUE_MAX_EDGE_PER_MARKET[{key}]={ceiling} must be > "
+                    f"VALUE_MIN_EDGE={self.value_min_edge} (it is the per-market data-error "
+                    "ceiling; at/under the min floor it would reject every real edge)."
+                )
         parse_market_min_books(self.value_min_books_per_market)
         # Per-market devig override: a bad method name must fail fast at startup,
         # never silently fall through to the global method on those markets.
@@ -1088,6 +1134,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         major_leagues=parse_major_leagues(settings.value_major_leagues),
         require_sharp_anchor=settings.value_require_sharp_anchor,
         max_edge=settings.value_max_edge,
+        max_edge_by_market=parse_market_max_edges(settings.value_max_edge_per_market),
         devig_by_market=parse_market_devig(settings.value_devig_per_market),
         consensus_logit_pool=settings.value_consensus_logit_pool,
     )

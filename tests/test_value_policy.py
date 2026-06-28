@@ -7,6 +7,7 @@ from app.edge.value_policy import (
     distinct_book_count,
     is_major_league,
     market_lookup_keys,
+    max_edge_for,
     min_books_for,
     min_edge_for,
     normalize_league,
@@ -43,6 +44,31 @@ def test_lookup_keys_are_normalized_and_ordered() -> None:
     assert market_lookup_keys("totals", "  ") == ("totals",)
     # detail equal to family is deduplicated
     assert market_lookup_keys("h2h", "h2h") == ("h2h",)
+
+
+def test_max_edge_empty_policy_always_returns_global_default() -> None:
+    # Empty map => every market keeps the GLOBAL value_max_edge (bit-identical no-op).
+    policy = ValuePolicy()
+    for market, detail in (("h2h", "1x2"), ("totals", "over_under_2_5"), ("h2h", None)):
+        assert max_edge_for(policy, market, detail, default=0.20) == 0.20
+
+
+def test_max_edge_override_routes_detail_before_family() -> None:
+    policy = ValuePolicy(
+        max_edge_by_market=(
+            ("totals", 0.25),
+            ("over_under_2_5", 0.30),
+            ("asian_handicap_-1_5", 0.35),
+        )
+    )
+    # most specific (line detail) wins
+    assert max_edge_for(policy, "totals", "over_under_2_5", default=0.20) == 0.30
+    # a different line of the same family falls back to the family entry
+    assert max_edge_for(policy, "totals", "over_under_3_5", default=0.20) == 0.25
+    # detail-only key (no family entry) routes on the line detail
+    assert max_edge_for(policy, "asian_handicap", "asian_handicap_-1_5", default=0.20) == 0.35
+    # an unlisted market keeps the global default
+    assert max_edge_for(policy, "btts", None, default=0.20) == 0.20
 
 
 def test_min_books_lookup_mirrors_min_edge_lookup() -> None:

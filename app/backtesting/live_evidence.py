@@ -49,6 +49,17 @@ MIN_STRATUM_N = 50
 #: excluded (a soft-book median close is not a sharp close).
 _SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
 
+#: CLV TAUTOLOGY epsilon — mirrors #137 (app.edge.value.CLV_TAUTOLOGY_EPS) and the
+#: headline path (app.storage.repositories.CLV_TAUTOLOGY_EPS), kept local so this
+#: module stays stdlib-pure. When a settled pick's CLOSE fair equals its PICK-TIME
+#: fair (the SAME archived sharp line reused at pick-time and close-time), clv_log =
+#: ln(fill_eff * closing_fair) merely re-encodes the pick-time edge — a TAUTOLOGY,
+#: not independent close evidence. The persisted close_independent_of_fill flag was
+#: fill-book-only for legacy rows, so an unmoved close that just ECHOES the pick-time
+#: anchor would read as independent here without this guard. 1e-3 = the 4-dp
+#: archived-line resolution.
+CLV_TAUTOLOGY_EPS = 1e-3
+
 
 @dataclass(frozen=True)
 class SettledPickRow:
@@ -76,38 +87,82 @@ class SettledPickRow:
     # |clv_log|~0 — the fake-CLV that masked the -EV); None = unknown
     # (pre-column row, feature-detected). Only a definite False excludes.
     close_independent_of_fill: bool | None = None
+    # CLOSE-vs-PICK fair, for the TAUTOLOGY guard (mirrors #137 —
+    # app.edge.value.close_moved_from_pick_fair / persisted_close_independent):
+    # the persisted close_independent_of_fill flag was fill-BOOK-only for legacy
+    # rows, so a close that merely ECHOES the pick-time sharp anchor (closing_fair
+    # == model_probability, the SAME archived line at pick- and close-time) reads as
+    # independent there even though its clv_log just re-encodes the pick-time edge.
+    # Both are feature-detected (None = column absent / unknowable fair); a tautology
+    # can only be PROVEN when BOTH are present, so None on either side is NEVER
+    # treated as tautological (conservative, exactly like the persisted guard).
+    closing_fair_probability: float | None = None
+    model_probability: float | None = None  # the pick-time fair (1/fair_odds anchor)
+
+    @property
+    def is_tautological_close(self) -> bool:
+        """The CLOSE fair equals the PICK-TIME fair (the identical archived line).
+
+        clv_log is then a TAUTOLOGY that re-encodes the pick-time edge, NOT
+        independent close evidence — mirrors #137 (app.edge.value.
+        close_moved_from_pick_fair, inverted) and the headline path
+        (app.storage.repositories._clv_row_is_tautological). Only PROVABLE when a
+        clv_log AND both fair probabilities are present; a None on either side
+        (feature-detected absent / unknowable fair) is never treated as
+        tautological. A row with no CLV (clv_log is None) carries no close to judge.
+        """
+        if self.clv_log is None:
+            return False
+        if self.closing_fair_probability is None or self.model_probability is None:
+            return False
+        return abs(self.closing_fair_probability - self.model_probability) <= CLV_TAUTOLOGY_EPS
 
     @property
     def sharp_close(self) -> bool:
         """A TRUSTED close for honest CLV: snapshot-sourced (not a poll-time
         revalidation fallback), anchored by a named sharp book (not a soft-book
-        consensus median), AND independent of the fill book — the close anchor
+        consensus median), independent of the fill book — the close anchor
         is NOT the pick's own fill book (a circular self-priced close is fake
-        CLV, |clv_log|~0, and is what masked the -EV). `close_independent_of_fill
-        is False` is the ONLY value that excludes; None (unknown / pre-column) is
-        treated as not-proven-circular so historical sharp closes are unchanged.
-        These are the closes whose CLV the platform can stand behind."""
+        CLV, |clv_log|~0, and is what masked the -EV) — AND non-tautological:
+        the close fair MOVED from the pick-time fair (an identical archived line
+        re-encodes the pick-time edge — fake CLV #137). `close_independent_of_fill
+        is False` and a proven tautology each EXCLUDE; None / unknowable-fair
+        (pre-column) is treated as not-proven-circular and not-proven-tautological
+        so historical sharp closes are unchanged. These are the closes whose CLV
+        the platform can stand behind."""
         return (
             self.has_snapshot_close
             and self.closing_anchor_type in _SHARP_CLOSE_ANCHORS
             and self.close_independent_of_fill is not False
+            and not self.is_tautological_close
         )
 
 
 def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]:
     """Aggregates for one stratum — every estimate rides with its n."""
     # CLV-2: a CIRCULAR close (close_independent_of_fill is False — the pick's own
-    # fill book pricing its own close, |clv_log|~0 fake CLV) must NOT enter the CLV
-    # or beat-close samples of ANY stratum; it would drag a per-anchor mean toward a
-    # mechanical zero (or a fabricated value). Only a definite False excludes; None
-    # (pre-column / unknown) is treated as not-proven-circular. pnl_rows is left
-    # untouched — realized P&L is real regardless of how the close was priced.
+    # fill book pricing its own close, |clv_log|~0 fake CLV) OR a TAUTOLOGICAL close
+    # (is_tautological_close — the close fair equals the pick-time fair, the SAME
+    # archived line re-encoding the pick-time edge, #137) must NOT enter the CLV or
+    # beat-close samples of ANY stratum; either would drag a per-anchor mean toward a
+    # mechanical zero (or a fabricated value). Only a definite False / proven tautology
+    # excludes; None (pre-column / unknown) and unknowable-fair are treated as
+    # not-proven-circular and not-proven-tautological. pnl_rows is left untouched —
+    # realized P&L is real regardless of how the close was priced.
     clv_rows = [
-        r for r in rows if r.clv_log is not None and r.close_independent_of_fill is not False
+        r
+        for r in rows
+        if r.clv_log is not None
+        and r.close_independent_of_fill is not False
+        and not r.is_tautological_close
     ]
     pnl_rows = [r for r in rows if r.pnl is not None]
     beat_rows = [
-        r for r in rows if r.beat_close is not None and r.close_independent_of_fill is not False
+        r
+        for r in rows
+        if r.beat_close is not None
+        and r.close_independent_of_fill is not False
+        and not r.is_tautological_close
     ]
 
     mean_clv: float | None = None

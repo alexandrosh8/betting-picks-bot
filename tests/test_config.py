@@ -464,6 +464,31 @@ def test_value_devig_per_market_rejects_unknown_method() -> None:
         make_settings(value_devig_per_market="1x2:not_a_method")
 
 
+def test_value_max_edge_per_market_defaults_to_global_ceiling() -> None:
+    # Empty (default) => the built policy carries NO per-market ceiling map, so
+    # every market uses the global value_max_edge — bit-identical to today.
+    s = make_settings()
+    assert s.value_max_edge_per_market == ""
+    policy = value_policy(s)
+    assert policy.max_edge_by_market == ()
+    assert policy.max_edge == 0.20  # the global ceiling still flows through
+
+
+def test_value_max_edge_per_market_parses_and_routes() -> None:
+    s = make_settings(value_max_edge_per_market="asian_handicap_-1_5:0.35, H2H:0.18")
+    policy = value_policy(s)
+    # keys lowercased, order preserved; the global ceiling is unchanged
+    assert policy.max_edge_by_market == (("asian_handicap_-1_5", 0.35), ("h2h", 0.18))
+    assert policy.max_edge == 0.20
+
+
+def test_value_max_edge_per_market_below_min_edge_is_fatal() -> None:
+    # A per-market ceiling at/under VALUE_MIN_EDGE (0.03) would reject EVERY real
+    # edge on that market — it must fail fast at startup, not silently mint nothing.
+    with pytest.raises(ValidationError, match="must be >"):
+        make_settings(value_max_edge_per_market="h2h:0.02")
+
+
 def test_value_policy_parses_major_leagues() -> None:
     s = make_settings(value_major_leagues="Premier League, LaLiga , Serie A,")
     # names kept as given (normalized only at compare time), blanks dropped
@@ -485,6 +510,12 @@ def test_value_policy_parses_major_leagues() -> None:
         ("value_odds_bands", "abc"),
         ("value_min_books_per_market", "h2h:0"),  # < 1 is a pointless entry
         ("value_min_books_per_market", "h2h:1.5"),  # not an integer
+        ("value_max_edge_per_market", "h2h"),  # no value
+        ("value_max_edge_per_market", "h2h:abc"),  # not a number
+        ("value_max_edge_per_market", ":0.30"),  # empty key
+        ("value_max_edge_per_market", "h2h:0.30,h2h:0.25"),  # duplicate key
+        ("value_max_edge_per_market", "h2h:1.5"),  # ceiling outside (0, 1)
+        ("value_max_edge_per_market", "h2h:0.02"),  # ceiling <= value_min_edge
     ],
 )
 def test_malformed_adjustment_knobs_fail_at_startup(field: str, value: str) -> None:

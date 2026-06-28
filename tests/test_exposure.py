@@ -149,3 +149,42 @@ def test_per_event_release_returns_event_capacity() -> None:
     assert ledger.event_used(DAY, "evt-1") == pytest.approx(0.0)
     # full event room is available again
     assert ledger.reserve(DAY, 0.03, "evt-1") == pytest.approx(0.03)
+
+
+# --- Per-event sub-cap startup seeding (BUG 1: restart must rebuild it) -------
+
+
+def test_preload_event_sets_event_used_and_caps_further_reservations() -> None:
+    # Restart regression (BUG 1): the per-event correlation sub-cap must be
+    # reconstructed from today's persisted picks, not reset to ~0. After a
+    # simulated restart the seeded event_used binds the per-event room exactly
+    # as if the morning's reservations were still in memory.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05, max_event_fraction=0.03)
+    ledger.preload(DAY, 0.025)  # daily total seeded
+    ledger.preload_event(DAY, "evt-1", 0.025)  # one event holds all of it
+    assert ledger.event_used(DAY, "evt-1") == pytest.approx(0.025)
+    assert ledger.event_remaining(DAY, "evt-1") == pytest.approx(0.005)
+    # a fresh selection on the SAME event is bounded by the seeded sub-cap room
+    assert ledger.reserve(DAY, 0.02, "evt-1") == pytest.approx(0.005)
+    # the per-event cap is now exhausted even though daily room remained
+    assert ledger.reserve(DAY, 0.02, "evt-1") == 0.0
+
+
+def test_preload_event_overwrites_rather_than_accumulates() -> None:
+    # SETS the event's used amount: a re-seed must be idempotent (mirrors
+    # preload), so repeated seeding cycles do not inflate the sub-cap.
+    ledger = DailyExposureLedger(max_daily_fraction=0.05, max_event_fraction=0.03)
+    ledger.preload_event(DAY, "evt-1", 0.02)
+    ledger.preload_event(DAY, "evt-1", 0.02)
+    assert ledger.event_used(DAY, "evt-1") == pytest.approx(0.02)
+    ledger.preload_event(DAY, "evt-1", 0.01)
+    assert ledger.event_used(DAY, "evt-1") == pytest.approx(0.01)
+
+
+def test_preload_event_other_keys_untouched_and_negative_raises() -> None:
+    ledger = DailyExposureLedger(max_daily_fraction=0.05, max_event_fraction=0.03)
+    ledger.preload_event(DAY, "evt-1", 0.02)
+    assert ledger.event_used(DAY, "evt-2") == pytest.approx(0.0)
+    assert ledger.event_used(OTHER_DAY, "evt-1") == pytest.approx(0.0)
+    with pytest.raises(ValueError):
+        ledger.preload_event(DAY, "evt-1", -0.01)

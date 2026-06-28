@@ -311,6 +311,77 @@ async def test_duplicate_realert_uses_persisted_stake_even_when_cap_exhausted(
     assert captured[1] == pytest.approx(persisted_stake)
 
 
+async def test_daily_clip_persists_clipped_stake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BUG 2: when the daily-exposure cap clips an INSERTED pick's stake at
+    reservation, the value persisted to the DB row must be the CLIPPED
+    (actually-reserved) stake, not the pre-clip per-bet-capped Kelly amount.
+    Otherwise the persisted/reported stake escapes the daily cap and the
+    ledger's reserved-vs-persisted diverge."""
+    import app.storage.repositories as repos
+
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        return "inserted"
+
+    persisted_clips: list[float] = []
+
+    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        persisted_clips.append(pick.recommended_stake_fraction)
+        return True
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", spy_update_pick_stake)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)
+    day = datetime.now(tz=UTC).date()
+
+    # Pre-exhaust the daily cap to leave only 0.005 room. The pick is per-bet
+    # capped at 0.02, so the reservation clips it down to 0.005.
+    deps.ledger.reserve(day, deps.ledger.remaining(day) - 0.005)
+    remaining_at_reservation = deps.ledger.remaining(day)
+    assert remaining_at_reservation == pytest.approx(0.005)
+
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(picks) == 1
+    pick = picks[0]
+    # the returned (alerted) pick reflects the daily clip ...
+    assert pick.recommended_stake_fraction == pytest.approx(0.005)
+    assert pick.stake_breakdown.daily_clipped is True
+    # ... and the SAME clipped stake was persisted back to the row
+    assert persisted_clips == [pytest.approx(0.005)]
+    # property: the persisted stake never exceeds the daily room at reservation
+    assert persisted_clips[0] <= remaining_at_reservation + 1e-12
+
+
+async def test_uncapped_pick_does_not_rewrite_persisted_stake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The clip-persist is a NO-OP when no daily clip occurs: an inserted pick
+    with ample daily room keeps its first-write stake and update_pick_stake is
+    never called (no needless second write, no double-application)."""
+    import app.storage.repositories as repos
+
+    async def fake_persist_pick(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        return "inserted"
+
+    update_calls: list[float] = []
+
+    async def spy_update_pick_stake(session, pick, teams, model_name, model_version):  # type: ignore[no-untyped-def]
+        update_calls.append(pick.recommended_stake_fraction)
+        return True
+
+    monkeypatch.setattr(repos, "persist_pick", fake_persist_pick)
+    monkeypatch.setattr(repos, "update_pick_stake", spy_update_pick_stake)
+
+    sink = RecordingSink()
+    deps = make_persisting_deps(sink)  # full 0.05 daily room, pick caps at 0.02
+
+    picks = await run_pick_pipeline(deps, "soccer_epl")
+    assert len(picks) == 1
+    assert picks[0].stake_breakdown.daily_clipped is False
+    assert update_calls == []  # no clip -> no stake-rewrite
+
+
 async def test_pipeline_no_model_predictions_no_picks() -> None:
     sink = RecordingSink()
     deps = make_deps(sink)

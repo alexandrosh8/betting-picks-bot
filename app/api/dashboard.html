@@ -1512,6 +1512,19 @@
             heroSub.textContent =
               "Stake-weighted CLV over " + nSharp + " genuine sharp closes (independent of your fill) — " +
               "the trustworthy proof-of-edge figure. Consensus/fallback closes are excluded.";
+            // Compact significance note: a positive CLV is only proof if it is
+            // statistically > 0. Show the t-based 95% CI (in % space) + whether it
+            // clears zero — honest "not yet significant" when the CI still spans 0.
+            if (perf.sharp_clv_ci_low != null && perf.sharp_clv_ci_high != null) {
+              const lo = clvFromLog(perf.sharp_clv_ci_low), hiC = clvFromLog(perf.sharp_clv_ci_high);
+              const nSig = perf.sharp_clv_n || nSharp;
+              heroSub.textContent +=
+                " 95% CI [" + (lo >= 0 ? "+" : "") + lo.toFixed(1) + "%, " +
+                (hiC >= 0 ? "+" : "") + hiC.toFixed(1) + "%], n=" + nSig + " — " +
+                (perf.sharp_clv_significant === true
+                  ? "significant (CLV > 0)."
+                  : "not yet significant (CI includes 0).");
+            }
             drawClvAxis(axis, v);
           }
 

@@ -16,6 +16,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from app.backtesting import clv as _clv  # noqa: F401  (settlement uses this module)
 from app.edge.gates import GatePolicy, PickCandidate, evaluate
+from app.edge.steam import (
+    SteamPolicy,
+    build_trajectories,
+    evaluate_steam,
+    lookup_trajectory,
+)
 from app.edge.value_policy import (
     ValuePolicy,
     distinct_book_count,
@@ -246,6 +252,13 @@ def _loader_matches_found(loader: OddsLoader, sport_key: str) -> int | None:
 #: into the scrape before anchoring. One line so ruff format is version-stable.
 SharpAnchorLoader = Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequence[OddsSnapshotIn]]]
 
+#: Pick-time odds-history reader (PipelineDeps.steam_history_loader): given the
+#: cycle's current snapshots, returns recent odds_snapshots HISTORY rows (per-book
+#: time series, captured_at <= now) for those events so the steam gate can read
+#: each book's trajectory. Read-only; bound to a repository at the composition
+#: root, stubbed in tests. One line so ruff format is version-stable.
+SteamHistoryLoader = Callable[[str, Sequence[OddsSnapshotIn]], Awaitable[Sequence[OddsSnapshotIn]]]
+
 
 @dataclass
 class PipelineDeps:
@@ -313,6 +326,22 @@ class PipelineDeps:
     # -> list[OddsSnapshotIn]. Wired at the composition root (app/scheduler.py)
     # behind VALUE_SHARP_ANCHOR_FROM_ARCHIVES; tests inject a stub.
     sharp_anchor_loader: SharpAnchorLoader | None = None
+    # OPTIONAL line-movement / steam-awareness gate (app/edge/steam.py). Default
+    # None = gate ABSENT: a strict no-op, zero extra work, current behavior. When
+    # the composition root builds a SteamPolicy (always, from Settings) the gate
+    # RUNS: with policy.enabled False it is SHADOW (computes + logs the per-
+    # candidate verdict, never changes the tier — measure before enforcing); with
+    # policy.enabled True a tripped verdict DEMOTES a premium candidate to volume
+    # (shadow) — persisted + CLV-tracked, never alerted — exactly like the other
+    # built-but-off premium gates (never a silent drop). NO leakage: only odds
+    # captured_at <= now are consulted (see app/edge/steam.py).
+    steam_policy: SteamPolicy | None = None
+    # Reader of recent odds_snapshots HISTORY for the steam gate (per-book
+    # trajectories). Default None => only the current cycle's snapshots are
+    # available (one point per book => the gate stays inert until history
+    # accumulates). Bound to a repository at the composition root; stubbed in
+    # tests. Failure is isolated — a history-read error never breaks picking.
+    steam_history_loader: SteamHistoryLoader | None = None
     # change-only persistence cache (see ODDS_SEEN_* above) — one per deps,
     # i.e. per process: both sport keys share it (event refs are distinct).
     odds_seen: OddsSeenCache = field(default_factory=dict)
@@ -820,12 +849,34 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             if teams is not None and teams.starts_at is not None and teams.starts_at <= now:
                 started.add(event_id)
 
+    # Steam gate trajectories: per-(market) per-(selection, book) recent price
+    # history for the line-movement / steam-awareness gate. Built ONLY when the
+    # gate is configured (default None => skipped entirely, zero extra work). The
+    # current cycle's anchor_snapshots seed the LATEST point per book; the
+    # optional history loader appends recent odds_snapshots rows so a trajectory
+    # exists. NO leakage: build_trajectories drops any captured_at > now.
+    steam_trajectories: dict[
+        tuple[str, object, str | None], dict[tuple[str, str], list[tuple[datetime, float]]]
+    ] = {}
+    if deps.steam_policy is not None:
+        steam_history: list[OddsSnapshotIn] = list(anchor_snapshots)
+        if deps.steam_history_loader is not None:
+            try:
+                steam_history.extend(await deps.steam_history_loader(sport_key, snapshots))
+            except Exception as exc:  # history read must NEVER break picking
+                logger.error("steam history load failed for %s: %s", sport_key, type(exc).__name__)
+        steam_trajectories = build_trajectories(
+            steam_history, now, deps.steam_policy.lookback_seconds
+        )
+
     picks: list[PickOut] = []
     n_volume = 0
     n_stale = 0
     n_ml_demoted = 0
     n_major_demoted = 0
     n_no_sharp_demoted = 0
+    n_steam_demoted = 0
+    n_steam_shadow = 0
     n_experimental = 0
     n_off_band = 0
     n_thin_books = 0
@@ -969,6 +1020,55 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     f" | ml-filter {ml_score:.3f} < q* "
                     f"{deps.value_filter.threshold:.3f}: demoted to volume"
                 )
+            # Line-movement / steam-awareness gate (app/edge/steam.py): reads the
+            # recent trajectory of BOTH the fill book and the sharp anchor for this
+            # selection and trips when the soft price is CONVERGING toward the anchor
+            # (edge correcting/evaporating) or the anchor is STALE (last seen beyond
+            # the freshness window -> phantom edge). Scoped to NAMED-anchor picks:
+            # a consensus(median) anchor has no single-book trajectory to test, and
+            # the require-sharp-anchor gate already targets that path. Default
+            # steam_policy None disables it entirely. With policy.enabled False the
+            # gate is SHADOW: the verdict is computed + logged but the tier is
+            # UNCHANGED, so its effect on real picks is measured before it enforces.
+            # With policy.enabled True a tripped verdict DEMOTES a premium candidate
+            # to volume (shadow) — persisted + CLV-tracked, never alerted — exactly
+            # like the gates above (never a silent drop).
+            steam_note = ""
+            if deps.steam_policy is not None and anchor_book != CONSENSUS_ANCHOR:
+                market_traj = steam_trajectories.get((event_id, market, detail), {})
+                verdict = evaluate_steam(
+                    fill_trajectory=lookup_trajectory(market_traj, v.selection, v.best_book),
+                    anchor_trajectory=lookup_trajectory(market_traj, v.selection, anchor_book),
+                    now=now,
+                    policy=deps.steam_policy,
+                )
+                if verdict.tripped:
+                    reason_str = ",".join(verdict.reasons)
+                    if deps.steam_policy.enabled and tier == "premium":
+                        tier = "volume"
+                        n_steam_demoted += 1
+                        steam_note = f" | steam ({reason_str}): demoted to volume (shadow)"
+                    else:
+                        # SHADOW (gate off) or an already-demoted candidate: record
+                        # the verdict, never change the tier. Surfaced on the pick so
+                        # its forward CLV can be measured against the would-be demote.
+                        n_steam_shadow += 1
+                        steam_note = f" | steam(shadow) ({reason_str}): would demote"
+                        logger.info(
+                            "value pipeline %s: steam(shadow) %s/%s/%s closed_frac=%s "
+                            "anchor_age_s=%s reasons=%s",
+                            sport_key,
+                            event_id,
+                            market,
+                            v.selection,
+                            f"{verdict.closed_fraction:.3f}"
+                            if verdict.closed_fraction is not None
+                            else "na",
+                            f"{verdict.anchor_age_seconds:.0f}"
+                            if verdict.anchor_age_seconds is not None
+                            else "na",
+                            reason_str,
+                        )
             # Stake from the sharp fair prob at the EFFECTIVE (net) price. The
             # daily-exposure ledger is consumed AFTER persistence (below), and
             # ONLY for brand-new premium detections — so the pick is built with
@@ -1031,6 +1131,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                     + sharp_note
                     + experimental_note
                     + ml_note
+                    + steam_note
                 ),
                 tier=tier,
                 value_filter_score=ml_score,
@@ -1122,6 +1223,22 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         n_premium,
         n_volume,
     )
+    if n_steam_demoted:
+        # ENFORCING steam gate: premium candidates demoted because the soft price
+        # is converging on the anchor (edge correcting) or the anchor is stale.
+        logger.info(
+            "value pipeline %s: steam gate demoted %d premium candidate(s) to volume",
+            sport_key,
+            n_steam_demoted,
+        )
+    if n_steam_shadow:
+        # SHADOW steam gate: candidates the gate WOULD demote if enforcing — tier
+        # unchanged, surfaced for measurement before VALUE_STEAM_GATE_ENABLED flips.
+        logger.info(
+            "value pipeline %s: steam(shadow) flagged %d candidate(s) (no tier change)",
+            sport_key,
+            n_steam_shadow,
+        )
     if n_ml_demoted:
         # VALUE_ML_FILTER intervention is never silent: these candidates
         # cleared the premium edge gate and were demoted by the meta-model.

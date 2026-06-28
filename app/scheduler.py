@@ -28,7 +28,14 @@ from redis.asyncio import Redis
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.config import Settings, exposure_ledger, gate_policy, stake_policy, value_policy
+from app.config import (
+    Settings,
+    exposure_ledger,
+    gate_policy,
+    stake_policy,
+    steam_policy,
+    value_policy,
+)
 from app.ingestion.base import EventDirectory, EventTeams, OddsLoader
 from app.ingestion.football_data import (
     MatchRow,
@@ -419,6 +426,24 @@ def build_scheduler(
                 settings.betfair_exchange_enabled,
                 settings.arcadia_enabled,
             )
+        # Line-movement / steam-awareness gate (value path only). The policy is
+        # always built (default SHADOW: compute + log, no tier change); the
+        # history loader reads recent odds_snapshots trajectories and needs a
+        # session. Without persistence the gate stays inert (single-point series).
+        steam_gate_policy = steam_policy(settings) if use_value else None
+        steam_history_loader = None
+        if steam_gate_policy is not None and session_factory is not None:
+            from app.clv_trueup import build_steam_history_loader
+
+            steam_history_loader = build_steam_history_loader(
+                session_factory, lookback_seconds=steam_gate_policy.lookback_seconds
+            )
+            logger.info(
+                "steam gate %s (lookback=%.0fs) — value picks screened for soft-toward-anchor "
+                "convergence + stale anchors",
+                "ENFORCING" if steam_gate_policy.enabled else "SHADOW (no tier change)",
+                steam_gate_policy.lookback_seconds,
+            )
         deps = PipelineDeps(
             loader=loader,
             model=model,
@@ -450,6 +475,8 @@ def build_scheduler(
             visibility_only_sports=visibility_only_sports,
             experimental_sports=experimental_sports,
             sharp_anchor_loader=sharp_anchor_loader,
+            steam_policy=steam_gate_policy,
+            steam_history_loader=steam_history_loader,
         )
         pipeline_fn = run_value_pipeline if use_value else run_pick_pipeline
 

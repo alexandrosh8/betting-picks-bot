@@ -1015,6 +1015,51 @@ class OddsPortalLoader:
     def _markets_for(self, sport_key: str) -> tuple[str, ...]:
         return self._markets_by_sport.get(sport_key, self._markets)
 
+    def _kickoff_for(self, match: dict[str, Any]) -> datetime | None:
+        """Best-known kickoff (UTC) for a listed match, for freshness ordering.
+
+        The JSON listing dict carries ONLY a ``match_link``, so the kickoff comes
+        from the EventDirectory (registered by a PRIOR cycle's scrape). The
+        Playwright listing dict additionally carries ``match_date``, used as a
+        same-cycle fallback. None when the kickoff is not yet known (a
+        first-sighting match) — we never guess one."""
+        home = str(match.get("home_team") or "").strip()
+        away = str(match.get("away_team") or "").strip()
+        link = str(match.get("match_link") or "")
+        event_id = normalize_match_link(link or f"{home}|{away}|{match.get('match_date', '')}")
+        teams = self._directory.lookup(event_id)
+        if teams is not None and teams.starts_at is not None:
+            return teams.starts_at
+        return _parse_ts(match.get("match_date"))
+
+    def _order_for_freshness(self, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Reorder a cycle's listed matches so the SOONEST-to-kick-off games are
+        scraped LAST — i.e. they land in the cycle's freshness-surviving TAIL.
+
+        A worldwide all-leagues slate cannot be refreshed inside
+        MAX_ODDS_AGE_SECONDS, and picks evaluate at ``now`` taken AFTER the fetch
+        (pipeline.run_pick_pipeline). Each snapshot's captured_at is stamped at its
+        own scrape moment, so everything captured earlier than one window before
+        the cycle ends is discarded by the odds-age gate — "only the scrape's tail
+        survives" (see config.py ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET). Whatever is
+        scraped LAST therefore has the freshest captured_at at evaluation; the
+        betable window is the soonest-to-kick-off games, so they go in the tail.
+
+        Known-kickoff matches are ordered by kickoff DESCENDING (latest first,
+        soonest last); the sort is STABLE so the listing's natural per-day order is
+        preserved within ties. Matches whose kickoff isn't known yet (first
+        sighting — the JSON listing carries only the URL) LEAD the head: never
+        guess a kickoff to displace a confirmed-betable game from the tail; the
+        kickoff is known next cycle once the match has been scraped once.
+
+        Order only — the returned list has exactly the same elements. The
+        event-id / last_fetch_* contracts (membership sets) are unaffected."""
+        keyed = [(self._kickoff_for(m), m) for m in matches]
+        unknown = [m for kickoff, m in keyed if kickoff is None]
+        known = [(kickoff, m) for kickoff, m in keyed if kickoff is not None]
+        known.sort(key=lambda km: km[0], reverse=True)  # latest first => soonest LAST
+        return unknown + [m for _kickoff, m in known]
+
     def _new_registry(self) -> BookmakerRegistry | None:
         """A fresh per-cycle bookmaker id->NAME registry when the JSON feed is on
         (None otherwise). Shared across one cycle's per-match scrapes so the
@@ -1363,6 +1408,13 @@ class OddsPortalLoader:
                     continue  # same fixture on adjacent date pages OR its in-play fork
                 seen_links.add(link)
                 matches.append(match)
+
+        # KICKOFF-PRIORITIZED ORDER: scrape soonest-to-kick-off LAST so the betable
+        # window lands in the cycle's freshness-surviving TAIL (see
+        # _order_for_freshness). Order-only — the event-id / last_fetch_* sets below
+        # are unchanged; the per-match fan-out (run_cycle gather + semaphore) admits
+        # in this order, so the tail is scraped closest to the post-fetch `now`.
+        matches = self._order_for_freshness(matches)
 
         markets_for_sport = self._markets_for(sport_key)
         # event_ids (the Betfair-target / /games contract) come from the LISTING

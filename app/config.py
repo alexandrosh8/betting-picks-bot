@@ -870,6 +870,47 @@ class Settings(BaseSettings):
     # no new false-match surface. Betfair needs a UK/EU proxy + a liquid major.
     value_sharp_anchor_from_archives: bool = False
 
+    # --- Betfair Exchange API (STRICTLY READ-ONLY market data; opt-in, OFF) ---
+    # A direct read-only price feed from the official Betfair Exchange API
+    # (app/ingestion/betfair_api.py): interactive login -> session token (held in
+    # memory only, NEVER persisted) -> GET-equivalent JSON-RPC calls for market
+    # data ONLY (listEventTypes/listCompetitions/listEvents/listMarketCatalogue/
+    # listMarketBook). It contains NO order-placement and NO account/order-ledger
+    # method, by audit (scripts/safety_audit.sh) and by unit test. Authorized as a
+    # read-only exception to Rule 1 by the operator (commit 0e27433, 2026-06-29).
+    #
+    # SHADOW-FIRST + OFF by default: when enabled it fetches the Betfair Match-Odds
+    # catalogue, routes each market through the EXISTING hardened cross-source
+    # matcher (app/resolution/matching.match_event_hardened), and LOGS the match
+    # rate + the would-be BACK anchor. It does NOT replace the existing
+    # OddsPortal-sourced "Betfair Exchange" anchor (measure before trusting). Fully
+    # INERT when this flag is false OR any credential below is blank: no login, no
+    # network call, no scheduler job.
+    value_betfair_api_enabled: bool = False
+    # Betfair application key (the "delayed"/live App Key from the developer
+    # account). NOT a betting scope — it only identifies the app to the read-only
+    # market-data API. Secret: never logged, never persisted.
+    betfair_app_key: SecretStr = SecretStr("")
+    # Betfair account username/password used ONLY for the interactive
+    # market-data login (identitysso). These authenticate read-only price access;
+    # the session token they mint is held in memory and never written to disk.
+    # Secrets: never logged, never persisted, never echoed in errors.
+    betfair_read_only_username: SecretStr = SecretStr("")
+    betfair_read_only_password: SecretStr = SecretStr("")
+    # SINGLE dedicated outbound proxy for the Betfair API (operator requirement:
+    # NO rotation — one stable IP for the session). http(s)://[user:pass@]host:port.
+    # Empty -> direct egress. Secret (may carry proxy creds): never logged.
+    betfair_api_proxy: SecretStr = SecretStr("")
+    # Shadow-capture cadence (seconds). >=30s floor blocks hammering-by-typo.
+    betfair_api_poll_interval_seconds: int = Field(default=300, ge=30)
+    # Only Betfair markets starting within this many hours ahead are fetched —
+    # bounds the catalogue to the actionable near slate (the matcher needs a
+    # canonical event already in the warehouse to attach to).
+    betfair_api_window_hours: int = Field(default=72, ge=1, le=336)
+    # Max canonical candidate events handed to the matcher per cycle (bounds the
+    # DB read + the per-cycle catalogue join cost).
+    betfair_api_max_targets_per_cycle: int = Field(default=200, ge=1, le=1000)
+
     # --- ESPN free results auto-settlement (read-only SCORES, never odds) ----
     # ESPN's public site API gives final scores for basketball / NFL / tennis
     # with no key (app/ingestion/espn_scores.py), so the CLOSED tab auto-shows
@@ -1145,6 +1186,25 @@ class Settings(BaseSettings):
     def scraper_proxies(self) -> tuple[ScraperProxy, ...]:
         """Live OddsPortal scrape outbound proxy pool, in rotation order."""
         return parse_scraper_proxy_pool(self.scraper_proxy_pool.get_secret_value())
+
+    def betfair_api_credentials(self) -> tuple[str, str, str] | None:
+        """(`app_key`, `username`, `password`) for the read-only Betfair API, or
+        None when ANY is blank. None means the integration is fully INERT — no
+        login, no call, no scheduler job — even if the enable flag is set. The
+        returned secrets are passed straight to the in-memory client; they are
+        NEVER logged or persisted."""
+        app_key = self.betfair_app_key.get_secret_value().strip()
+        username = self.betfair_read_only_username.get_secret_value().strip()
+        password = self.betfair_read_only_password.get_secret_value()
+        if not app_key or not username or not password:
+            return None
+        return (app_key, username, password)
+
+    def betfair_api_proxy_url(self) -> str | None:
+        """The single dedicated Betfair API outbound proxy URL, or None for direct
+        egress. NO rotation (operator requirement). Secret — never logged."""
+        url = self.betfair_api_proxy.get_secret_value().strip()
+        return url or None
 
     def arcadia_effective_proxy_urls(self) -> tuple[str, ...]:
         """Proxy URLs for the Pinnacle Arcadia client, in rotation order.

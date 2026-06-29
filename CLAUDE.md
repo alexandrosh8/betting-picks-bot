@@ -10,9 +10,16 @@ places any bet personally.
 
 1. **This system never places bets.** Never write, scaffold, or suggest code
    that: places/modifies/cancels a bet; submits Betfair or any exchange
-   orders; logs into a bookmaker; drives a browser to a betting slip; stores
-   betting credentials, cookies, or session tokens; bypasses anti-bot
-   protections.
+   orders; drives a browser to a betting slip; bypasses anti-bot protections.
+   **READ-ONLY EXCEPTION (operator-authorized 2026-06-29):** a STRICTLY
+   read-only Betfair Exchange API integration for market data (odds) is
+   permitted. It MAY authenticate a read-only session and read credentials
+   from `.env`, but it MUST be GET-only (e.g. `listMarketCatalogue`,
+   `listMarketBook`), contain NO order-placement code or scopes, and keep
+   `scripts/safety_audit.sh` green. The absolute prohibition on
+   placing/modifying/cancelling bets and on any order-placement scope STANDS.
+   Betting credentials live ONLY in `.env` (gitignored, 0600) — never in code,
+   git, logs, or memory.
 2. **Any code path that could place a bet is a build-breaking defect** —
    `scripts/safety_audit.sh` (run in CI) greps for such paths and must exit 0.
 3. All market-data integrations are **read-only (GET-only)**. Betfair

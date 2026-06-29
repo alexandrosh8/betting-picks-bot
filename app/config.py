@@ -24,9 +24,12 @@ from app.risk.staking import StakePolicy
 # per match page. Measured live (2026-06-12): ~73 s/match at 18 tabs and
 # concurrency 3, i.e. multi-hour cycles; everything captured more than
 # MAX_ODDS_AGE_SECONDS before a cycle ends is then discarded by the odds-age
-# gate, so only the scrape's tail survives. Cap the per-sport market list
-# whenever 'all' is configured: 4 tabs at concurrency 5 keeps a 300-400 match
-# slate inside a ~30-minute freshness window.
+# gate, so only the scrape's tail survives. The freshness window IS that gate:
+# max_odds_age_seconds (default 300s = 5 minutes), NOT a cycle length. Cap the
+# per-sport market list whenever 'all' is configured: 4 tabs at concurrency 5
+# keeps a 300-400 match slate's prices inside that ~5-minute freshness window
+# (a cycle slower than the window starves picks — surfaced as the per-cycle
+# stale-drop ratio + a "picks starving" warning in app/pipeline.py).
 ODDSPORTAL_ALL_LEAGUES_MARKET_BUDGET = 4
 
 
@@ -268,6 +271,14 @@ class Settings(BaseSettings):
     min_confidence: float = 0.60
     max_odds_age_seconds: float = 300.0
     min_liquidity: float = 0.0
+    # Stale-starvation alarm: when MORE than this fraction of a cycle's mintable
+    # candidates are dropped SOLELY by the odds-age gate (the scrape outran the
+    # ~5-minute freshness window above), the pipeline logs a WARNING "picks
+    # starving" line and the ratio rides on LAST_POLL for the self-audit/alert
+    # layer. 0.5 = warn once a slow cycle costs us over half the slate. Pass into
+    # PipelineDeps.stale_drop_ratio_warn at the composition root (app/scheduler.py)
+    # to override the deps' matching 0.5 default with this env-tunable value.
+    stale_drop_ratio_warn_threshold: float = Field(default=0.5, gt=0.0, le=1.0)
 
     # --- Recommended stake sizing (informational only) ------------------------
     # Bounds-validated (audit #1): a fat-fingered .env (e.g. 5 read as 500%)

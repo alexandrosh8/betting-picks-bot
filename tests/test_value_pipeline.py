@@ -821,6 +821,53 @@ async def test_stale_age_gate_discards_are_counted_and_logged(
     assert not any("odds-age gate" in r.getMessage() for r in caplog.records)
 
 
+def test_candidate_age_fails_closed_on_unknown_capture() -> None:
+    """P2 (holes audit): the odds-age gate is a SAFETY gate and must fail
+    CLOSED. A candidate whose best-book capture time is unknown (None) has an
+    UNKNOWABLE age — minting from it (the old ``... if cap else 0.0`` which made
+    age 0.0) silently bypasses the freshness guarantee. Unknown age => +inf so
+    the gate always drops it. A future capture (live scrapes stamp DURING the
+    multi-minute fetch) still clamps to 0.0 (fresh, never negative)."""
+    from app.pipeline import _candidate_age_seconds
+
+    now = datetime.now(tz=UTC)
+    # Unknown capture time -> +inf -> always exceeds any finite freshness cap.
+    assert _candidate_age_seconds(now, None) == float("inf")
+    # Old price -> positive age (would trip a 300s gate).
+    assert _candidate_age_seconds(now, now - timedelta(seconds=400)) == pytest.approx(400.0)
+    # Future capture -> clamped to 0.0, never negative.
+    assert _candidate_age_seconds(now, now + timedelta(seconds=90)) == 0.0
+
+
+async def test_stale_drop_ratio_observable_and_warns_on_starvation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """H2 (holes audit): when a slow cycle drops most mintable candidates for
+    staleness the slate silently STARVES of picks — visible before only as the
+    unalerted stale_candidates count. Expose the per-cycle STALE-DROP RATIO on
+    LAST_POLL and emit a loud WARNING when it exceeds the configured threshold,
+    so the self-audit layer can alert on starvation."""
+    import logging as _logging
+
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    # Entire slate older than the 300s gate -> every mintable candidate stale.
+    deps = make_deps(sink, FakeLoader(market_snapshots(age_s=400.0)))
+    with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
+        await run_value_pipeline(deps, "soccer")
+    assert LAST_POLL["soccer"]["stale_drop_ratio"] == pytest.approx(1.0)
+    assert any("starv" in r.getMessage().lower() for r in caplog.records)
+
+    # Fresh slate: ratio 0.0 and NO starvation warning.
+    caplog.clear()
+    deps2 = make_deps(sink, FakeLoader(market_snapshots()))
+    with caplog.at_level(_logging.WARNING, logger="app.pipeline"):
+        await run_value_pipeline(deps2, "soccer")
+    assert LAST_POLL["soccer"]["stale_drop_ratio"] == pytest.approx(0.0)
+    assert not any("starv" in r.getMessage().lower() for r in caplog.records)
+
+
 async def test_value_pipeline_skips_started_events() -> None:
     """In-play gate: matches flip in-play between page listing and scrape
     (long cycles); OddsPortal then serves in-play prices. A started event

@@ -15,15 +15,31 @@ and NEVER raises (a monitoring job must not crash the scheduler).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.notifications.base import Alert
 from app.storage.models import Event, OddsSnapshot, Pick
 
 logger = logging.getLogger(__name__)
+
+#: Default dead-man's-switch threshold (P0-4): alert after this many CONSECUTIVE
+#: self-audit cycles see zero fresh (non-archive) odds rows. The composition root
+#: (app/scheduler.py) may override per deployment.
+DEAD_MANS_DEFAULT_K = 3
+
+
+class _Dispatcher(Protocol):
+    """Minimal alert-dispatch surface (app.notifications.dispatcher.AlertDispatcher
+    satisfies it). Kept structural so the job stays trivially mockable in tests —
+    no real sink/network is ever constructed under test."""
+
+    async def dispatch(self, alert: Alert) -> object: ...
+
 
 # The sharp-archive captures (Pinnacle arcadia, Betfair Exchange) ingest on their
 # OWN ~60s cadence, independent of the live OddsPortal scrape. They are EXCLUDED
@@ -76,13 +92,87 @@ def evaluate_anomalies(
     return found
 
 
+def evaluate_dead_mans_switch(
+    fresh_odds_rows: int,
+    *,
+    prior_streak: int,
+    k_empty_cycles: int,
+    already_alerted: bool,
+) -> tuple[int, bool, Anomaly | None]:
+    """Pure dead-man's-switch step (P0-4): distinguishes a quiet night from a dead
+    scraper over a RUN of cycles.
+
+    `fresh_odds_rows` is the count of NEW non-archive odds rows this cycle. The
+    switch fires EXACTLY ONCE when the consecutive-empty streak first reaches
+    `k_empty_cycles` (not before), stays quiet while the outage persists, and
+    re-arms after any fresh cycle resets the streak.
+
+    Returns (new_streak, new_already_alerted, anomaly|None)."""
+    if fresh_odds_rows > 0:
+        return 0, False, None
+    streak = prior_streak + 1
+    if streak >= k_empty_cycles and not already_alerted:
+        return (
+            streak,
+            True,
+            Anomaly(
+                "ERROR",
+                "dead_mans_switch",
+                f"{streak} consecutive self-audit cycles produced ZERO fresh odds "
+                "rows — the live scrape appears DEAD (not merely a quiet slate)",
+            ),
+        )
+    return streak, already_alerted, None
+
+
+@dataclass
+class SelfAuditMonitorState:
+    """Process-local state the scheduled self-audit carries across cycles.
+
+    Rebuilt on every process start (so a persisting anomaly re-alerts once after
+    a restart — accepted). `active_anomalies` powers per-anomaly-type transition
+    dedupe (P0-2: alert when an anomaly APPEARS, stay quiet while it persists,
+    re-alert if it clears then recurs). `empty_odds_streak`/`dead_man_alerted`
+    drive the dead-man's-switch one-shot (P0-4)."""
+
+    active_anomalies: set[str] = field(default_factory=set)
+    empty_odds_streak: int = 0
+    dead_man_alerted: bool = False
+
+
+def anomaly_alert(anomaly: Anomaly, now: datetime) -> Alert:
+    """Render an anomaly as a decision-support alert (never a bet).
+
+    The dedupe key is minute-bucketed per anomaly code: unique enough that the
+    dispatcher's own idempotency store can never wrongly suppress a genuine later
+    recurrence, while the in-process transition tracker (SelfAuditMonitorState)
+    is what prevents per-cycle repeats of an ONGOING anomaly."""
+    mark = "🛑" if anomaly.severity == "ERROR" else "⚠️"
+    return Alert(
+        pick_id=f"self-audit-{anomaly.code}",
+        title=f"{mark} Self-audit: {anomaly.code}",
+        body=(
+            f"{mark} {anomaly.detail}\n\n"
+            "(automated monitor — decision-support only, no bets are placed)"
+        ),
+        dedupe_key=f"self-audit:{anomaly.code}:{now.strftime('%Y%m%dT%H%M')}",
+    )
+
+
 async def run_self_audit(
     session_factory: async_sessionmaker[AsyncSession],
     now: datetime | None = None,
     *,
     awaiting_grace: timedelta = timedelta(hours=6),
-) -> list[Anomaly]:
-    """READ-ONLY DB self-audit -> anomalies (empty == healthy)."""
+    cycle_window: timedelta | None = None,
+) -> tuple[list[Anomaly], int]:
+    """READ-ONLY DB self-audit.
+
+    Returns (anomalies, fresh_odds_rows): the anomaly list (empty == healthy)
+    plus the count of NEW non-archive odds rows ingested within `cycle_window`
+    (0 when no window is given) — the dead-man's-switch input. The fresh count
+    EXCLUDES the sharp archives, matching the stale-odds check, so an archive
+    heartbeat can never mask a dead live (OddsPortal) scrape."""
     now = now or datetime.now(tz=UTC)
     async with session_factory() as session:
         backlog = (
@@ -101,6 +191,18 @@ async def run_self_audit(
                 OddsSnapshot.bookmaker.notin_(_SHARP_ARCHIVE_BOOKMAKERS)
             )
         )
+        fresh_odds = 0
+        if cycle_window is not None:
+            fresh_odds = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(OddsSnapshot)
+                    .where(
+                        OddsSnapshot.bookmaker.notin_(_SHARP_ARCHIVE_BOOKMAKERS),
+                        OddsSnapshot.ingested_at >= now - cycle_window,
+                    )
+                )
+            ) or 0
     found = evaluate_anomalies(
         now,
         awaiting_backlog=backlog,
@@ -115,24 +217,84 @@ async def run_self_audit(
     from app.maintenance.wrong_game_audit import audit_live_pinnacle_anchors
 
     found.extend(await audit_live_pinnacle_anchors(session_factory, now))
-    return found
+    return found, fresh_odds
 
 
 async def self_audit_job(
     session_factory: async_sessionmaker[AsyncSession],
     now: datetime | None = None,
+    *,
+    dispatcher: _Dispatcher | None = None,
+    monitor_state: SelfAuditMonitorState | None = None,
+    cycle_window: timedelta = timedelta(seconds=600),
+    dead_mans_k: int = DEAD_MANS_DEFAULT_K,
 ) -> int:
-    """Run the self-audit and emit one WARNING/ERROR per anomaly (so the health
-    monitor catches them), or one INFO when clean. NEVER raises — a monitoring
-    job must not crash the scheduler. Returns the anomaly count (-1 on failure)."""
+    """Run the self-audit, emit one WARNING/ERROR per anomaly (so the health
+    monitor catches them) or one INFO when clean, AND (P0-2) dispatch an alert
+    per NEW anomaly through the injected dispatcher. NEVER raises — a monitoring
+    job must not crash the scheduler. Returns the anomaly count (-1 on failure).
+
+    Alerting is transition-deduped via `monitor_state`: an anomaly alerts when it
+    APPEARS and stays quiet while it persists; it re-alerts only after it clears
+    and recurs. The dead-man's-switch (P0-4) rides the same dispatcher with its
+    own one-shot. Unconfigured channels degrade gracefully (the dispatcher
+    no-ops on sinks with no token/url); `dispatcher=None` skips alerting entirely."""
+    now = now or datetime.now(tz=UTC)
     try:
-        anomalies = await run_self_audit(session_factory, now)
+        anomalies, fresh_odds = await run_self_audit(
+            session_factory, now, cycle_window=cycle_window
+        )
     except Exception as exc:  # a monitoring job must never take the scheduler down
         logger.error("self_audit failed: %s", type(exc).__name__)
         return -1
-    for anomaly in anomalies:
+
+    # P0-4 dead-man's-switch: stateful across cycles, so it needs monitor_state.
+    dead_man: Anomaly | None = None
+    if monitor_state is not None:
+        streak, alerted, dead_man = evaluate_dead_mans_switch(
+            fresh_odds,
+            prior_streak=monitor_state.empty_odds_streak,
+            k_empty_cycles=dead_mans_k,
+            already_alerted=monitor_state.dead_man_alerted,
+        )
+        monitor_state.empty_odds_streak = streak
+        monitor_state.dead_man_alerted = alerted
+
+    all_found = [*anomalies, *([dead_man] if dead_man is not None else [])]
+    for anomaly in all_found:
         emit = logger.error if anomaly.severity == "ERROR" else logger.warning
         emit("self_audit %s: %s", anomaly.code, anomaly.detail)
-    if not anomalies:
+    if not all_found:
         logger.info("self_audit: ok — no anomalies")
-    return len(anomalies)
+
+    if dispatcher is not None:
+        await _dispatch_anomalies(anomalies, dead_man, dispatcher, monitor_state, now)
+    return len(all_found)
+
+
+async def _dispatch_anomalies(
+    anomalies: list[Anomaly],
+    dead_man: Anomaly | None,
+    dispatcher: _Dispatcher,
+    monitor_state: SelfAuditMonitorState | None,
+    now: datetime,
+) -> None:
+    """Dispatch alerts for newly-APPEARED anomalies (transition dedupe) plus the
+    already-one-shot dead-man's-switch. Per-alert failures are logged (type only)
+    and never propagate — alerting must not crash the monitor."""
+    prior = monitor_state.active_anomalies if monitor_state is not None else set()
+    codes = {a.code for a in anomalies}
+    to_send = [a for a in anomalies if a.code not in prior]
+    if dead_man is not None:
+        to_send.append(dead_man)
+    if monitor_state is not None:
+        monitor_state.active_anomalies = codes
+    for anomaly in to_send:
+        try:
+            await dispatcher.dispatch(anomaly_alert(anomaly, now))
+        except Exception as exc:  # belt-and-braces — sinks shouldn't raise
+            logger.error(
+                "self_audit alert dispatch failed for %s: %s",
+                anomaly.code,
+                type(exc).__name__,
+            )

@@ -8,6 +8,7 @@ place a bet.
 import asyncio
 import logging
 import secrets
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
@@ -597,17 +598,79 @@ async def setup_submit(
     )
 
 
+#: P0-3 /health liveness ceiling: the newest recorded poll must have FINISHED
+#: within HEALTH_MAX_POLL_AGE_MULTIPLIER x poll_interval_seconds, else the engine
+#: is judged starved/dead (HTTP 503). Named here rather than env (config.py is
+#: owned elsewhere) — a one-line promotion to Settings if it ever needs tuning.
+HEALTH_MAX_POLL_AGE_MULTIPLIER = 3
+
+
+def _newest_poll_finish(polls: Mapping[str, Mapping[str, Any]]) -> datetime | None:
+    """Most-recent `finished_at` across all recorded poll cycles (None if none).
+
+    Parses the ISO-8601 UTC string each cycle writes to LAST_POLL; a missing or
+    unparseable value is skipped rather than treated as a death signal."""
+    newest: datetime | None = None
+    for poll in polls.values():
+        raw = poll.get("finished_at")
+        if not isinstance(raw, str):
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        if newest is None or parsed > newest:
+            newest = parsed
+    return newest
+
+
+def _poll_health(
+    polls: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+    poll_interval_seconds: int,
+    max_age_multiplier: int = HEALTH_MAX_POLL_AGE_MULTIPLIER,
+) -> tuple[str, int, float | None]:
+    """Liveness from poll FRESHNESS, not pick count — a quiet slate that still
+    completes cycles is healthy; a stale newest-cycle means a starved/dead engine.
+
+    Returns (status, http_status, newest_poll_age_seconds):
+    - No recorded cycle at all -> ok/200 (cold start / router-only test app /
+      no engine — there is no evidence of death yet, so never 503 here).
+    - Newest cycle finished within max_age_multiplier x poll_interval -> ok/200.
+    - Older than that ceiling -> degraded/503."""
+    newest = _newest_poll_finish(polls)
+    if newest is None:
+        return "ok", 200, None
+    age = (now - newest).total_seconds()
+    if age > max_age_multiplier * poll_interval_seconds:
+        return "degraded", 503, age
+    return "ok", 200, age
+
+
 @router.get("/health")
-async def health() -> dict[str, Any]:
+async def health(response: Response) -> dict[str, Any]:
     from app.config import get_settings
     from app.maintenance.upstream_watch import LAST_CHECK
     from app.pipeline import LAST_POLL
 
+    settings = get_settings()
+    # P0-3: real liveness — a process that is up but whose poll cycles stopped
+    # finishing (starved/dead scraper) now reads degraded/503 instead of a
+    # hardcoded "ok"/200. Based on poll freshness, never pick count.
+    status, http_status, newest_age = _poll_health(
+        LAST_POLL, datetime.now(tz=UTC), settings.poll_interval_seconds
+    )
+    response.status_code = http_status
     return {
-        "status": "ok",
+        "status": status,
         "mode": "picks-only",
         "upstream": LAST_CHECK,
         "polls": LAST_POLL,
+        # Newest cycle's age + the staleness ceiling the dead-engine check uses
+        # (N x poll_interval). status flips to "degraded" (503) when the age
+        # exceeds it. None age == no cycle recorded yet (still "ok").
+        "newest_poll_age_seconds": newest_age,
+        "poll_max_age_seconds": settings.poll_interval_seconds * HEALTH_MAX_POLL_AGE_MULTIPLIER,
         # The dashboard derives its "verified within" window from the value
         # freshness window (MAX_ODDS_AGE_SECONDS): a pick whose last re-price is
         # older than this has a STALE price and must read UNVERIFIED, not show a

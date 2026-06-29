@@ -46,6 +46,7 @@ from app.ingestion.football_data import (
 )
 from app.ingestion.odds_api import OddsApiClient
 from app.ingestion.oddsportal import OddsPortalLoader
+from app.maintenance.self_audit import SelfAuditMonitorState
 from app.models.base import NullModel, ProbabilityModel
 from app.models.football_dc import DixonColesFootballModel
 from app.models.value_filter import ValueFilterModel
@@ -593,15 +594,31 @@ def build_scheduler(
         except Exception as exc:
             logger.error("upstream watch failed: %s", type(exc).__name__)
 
+    # P0-2/P0-4: a dedicated dispatcher + cross-cycle monitor state so the
+    # self-audit can ALERT (not just log) on anomalies and run the dead-man's
+    # switch. State lives in the closure (one instance, persists across cycles);
+    # the dispatcher reuses the configured Telegram/webhook sinks and no-ops
+    # gracefully when neither is configured.
+    self_audit_dispatcher = _dispatcher(settings, http_client, redis)
+    self_audit_state = SelfAuditMonitorState()
+
     async def run_self_audit_job() -> None:
         # Runtime self-audit: cheap READ-ONLY DB anomaly checks (awaiting-result
-        # backlog, stale odds) that WARN/ERROR so the health monitor catches
-        # operational problems proactively. Never raises (self_audit_job guards).
+        # backlog, stale odds, dead-man's switch) that WARN/ERROR *and* dispatch
+        # an alert per new anomaly so failures are visible, not just logged.
+        # Never raises (self_audit_job guards).
         if session_factory is None:
             return
         from app.maintenance.self_audit import self_audit_job
 
-        await self_audit_job(session_factory)
+        await self_audit_job(
+            session_factory,
+            dispatcher=self_audit_dispatcher,
+            monitor_state=self_audit_state,
+            # Fresh-odds window for the dead-man's switch == one audit cycle, so
+            # K consecutive empty audits ≈ K cycles with no live odds ingested.
+            cycle_window=timedelta(seconds=settings.self_audit_interval_seconds),
+        )
 
     scheduler.add_job(
         settle_results,

@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import FastAPI
@@ -28,12 +29,63 @@ def make_app() -> FastAPI:
 
 
 def test_health_reports_picks_only_mode() -> None:
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()  # no recorded cycles -> no evidence of a dead engine
     client = TestClient(make_app())
     response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
     assert body["mode"] == "picks-only"
+
+
+def test_health_degraded_when_polls_stale() -> None:
+    # P0-3: a recorded cycle whose newest finish is far older than N*poll_interval
+    # means the engine is starved/dead -> 503 + status:"degraded" + the stale age,
+    # while KEEPING the existing payload (dashboard contract).
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = {
+        "finished_at": "2026-06-01T00:00:00+00:00",  # weeks old
+        "snapshots": 0,
+        "picks": 0,
+        "matches_found": 0,
+        "per_market": {},
+    }
+    try:
+        resp = TestClient(make_app()).get("/health")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "degraded"
+        assert body["mode"] == "picks-only"  # existing fields preserved
+        assert body["newest_poll_age_seconds"] > 0
+    finally:
+        LAST_POLL.clear()
+
+
+def test_health_ok_when_polls_fresh() -> None:
+    # A cycle that finished moments ago is healthy regardless of pick count
+    # (a quiet slate that still completes cycles must read 200/"ok").
+    from app.pipeline import LAST_POLL
+
+    LAST_POLL.clear()
+    LAST_POLL["soccer"] = {
+        "finished_at": datetime.now(tz=UTC).isoformat(),
+        "snapshots": 12,
+        "picks": 0,  # quiet slate, engine alive
+        "matches_found": 6,
+        "per_market": {},
+    }
+    try:
+        resp = TestClient(make_app()).get("/health")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
+        assert body["newest_poll_age_seconds"] is not None
+    finally:
+        LAST_POLL.clear()
 
 
 def test_health_exposes_poll_liveness_payload() -> None:

@@ -33,7 +33,7 @@ import httpx
 
 from app.backtesting.clv import clv_log
 from app.ingestion.beatthebookie_series import load_series_any, to_fd_row
-from app.ingestion.betfair_bsp import attach_betfair_close, load_betfair_dir
+from app.ingestion.betfair_bsp import attach_betfair_close, load_betfair_dir, load_betfair_tar
 from app.ingestion.football_data import fetch_season_csv
 from app.ingestion.oddspapi import OddsPapiGame, load_oddspapi_dir
 from app.ingestion.sbr_nba import load_sbr_nba_dir
@@ -234,8 +234,20 @@ def bets_for(
                     won=won,
                     odds=mx[i],  # type: ignore[arg-type]
                     edge=edge,
-                    clv_pinn=clv_log(mx[i], close_p[i]) if close_p else None,  # type: ignore[arg-type]
-                    clv_max=clv_log(mx[i], close_m[i]) if close_m else None,  # type: ignore[arg-type]
+                    # 0 < p < 1 is nan-safe (nan comparisons are False) and matches
+                    # clv_log's (0,1) precondition: a degenerate/missing close devig
+                    # (e.g. a bad Betfair close price -> nan) yields no CLV for that
+                    # bet rather than crashing the sweep — same as a None close.
+                    clv_pinn=(
+                        clv_log(mx[i], close_p[i])  # type: ignore[arg-type]
+                        if close_p and 0.0 < close_p[i] < 1.0
+                        else None
+                    ),
+                    clv_max=(
+                        clv_log(mx[i], close_m[i])  # type: ignore[arg-type]
+                        if close_m and 0.0 < close_m[i] < 1.0
+                        else None
+                    ),
                 )
             )
     return out
@@ -419,40 +431,85 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
     (account-gated, sandbox-unreachable); when the dir is absent we print the
     operator instruction and place no bets.
     """
+    from app.ingestion.betfair_bsp import read_market_cache, write_market_cache
+
     bsp_dir = Path(args.betfair_bsp_dir)
-    markets = load_betfair_dir(bsp_dir)
+    cache_path = bsp_dir / "soccer_match_odds.jsonl.gz"
+    # A Betfair Basic historical archive ships as a single multi-GB .tar of
+    # 1M+ per-market .bz2 files; scanning it takes ~90 min. We cache the parsed
+    # soccer MATCH_ODDS closes to a JSONL.gz on first scan and reuse it after.
+    # Source precedence: existing cache > explicit --betfair-bsp-tar > a data.tar
+    # auto-detected in --betfair-bsp-dir > loose per-market files in the dir.
+    tar_path: Path | None = None
+    if args.betfair_bsp_tar:
+        tar_path = Path(args.betfair_bsp_tar)
+    elif (bsp_dir / "data.tar").is_file():
+        tar_path = bsp_dir / "data.tar"
+    if cache_path.is_file():
+        markets = read_market_cache(cache_path)
+        print(f"Loaded {len(markets)} cached soccer MATCH_ODDS markets from {cache_path}")
+    elif tar_path is not None:
+        print(f"Streaming soccer MATCH_ODDS from tar: {tar_path} (one-time ~90-min scan)")
+        markets = load_betfair_tar(tar_path)
+        if markets:
+            n = write_market_cache(cache_path, markets)
+            print(f"Cached {n} soccer MATCH_ODDS markets to {cache_path} (reused next run)")
+    else:
+        markets = load_betfair_dir(bsp_dir)
     if not markets:
         print("Betfair historical data not found. Operator must place the unzipped")
         print("per-market STREAM files (one market per .bz2 / .json, Exchange Stream")
         print(f"market-change format) at, e.g.:\n    {bsp_dir}")
+        print("(or a Basic-archive data.tar there / via --betfair-bsp-tar).")
         print("Source (account-gated Basic tier): historicdata.betfair.com — soccer")
         print("(eventTypeId=1) + basketball (eventTypeId=7522) MATCH_ODDS markets.")
         print("A live fetch from this sandbox returns HTTP 401. Read-only; places no bets.")
         return
 
     leagues = [x.strip() for x in args.leagues.split(",") if x.strip()]
-    train_s = [x.strip() for x in args.train_seasons.split(",") if x.strip()]
-    test_s = [x.strip() for x in args.test_seasons.split(",") if x.strip()]
+    # The BSP archive is ONE contiguous recent block (the seasons it overlaps).
+    # A season-based train/test split would dump that whole block onto one side
+    # and leave the other empty (the original bug). Instead we load every fd
+    # season the archive can overlap, JOIN them all, then split the JOINED rows
+    # by kickoff DATE so the held-out portion is a genuine out-of-sample set.
+    seasons = sorted(
+        {x.strip() for x in (args.train_seasons + "," + args.test_seasons).split(",") if x.strip()}
+    )
+    split = date.fromisoformat(args.betfair_bsp_split_date)
     min_odds, max_odds = args.min_odds, args.max_odds
     aliases = default_aliases()
 
     print("\nBETFAIR-BSP BACKTEST — sharp CLOSE = Betfair BSP/last-pre-in-play")
-    print(f"{len(markets)} operator-placed markets | pre-match = football-data Max (soft)")
+    print(f"{len(markets)} markets | pre-match = football-data Max (soft) | seasons {seasons}")
+    print(f"OOS split by kickoff date {split.isoformat()} (train < split <= test)")
     print("CLV is vs a REAL sharp close (not consensus). BSP is CLOSE-only; the bet")
     print("price is the pre-match Max line, joined by date + canonical team name.\n")
 
-    fd_train = await load(leagues, train_s)
-    fd_test = await load(leagues, test_s)
-    train_rows, train_stats = attach_betfair_close(fd_train, markets, aliases=aliases)
-    test_rows, test_stats = attach_betfair_close(fd_test, markets, aliases=aliases)
-    for label, st in (("train", train_stats), ("test", test_stats)):
-        print(
-            f"join[{label}]: fd_rows={st.n_fd_rows} markets={st.n_markets} "
-            f"joined={st.n_joined} unmatched={st.n_unmatched} "
-            f"result_conflict={st.n_result_conflict}"
-        )
+    fd_rows = await load(leagues, seasons)
+    joined_rows, join_stats = attach_betfair_close(fd_rows, markets, aliases=aliases)
+    print(
+        f"join: fd_rows={join_stats.n_fd_rows} markets={join_stats.n_markets} "
+        f"joined={join_stats.n_joined} unmatched={join_stats.n_unmatched} "
+        f"result_conflict={join_stats.n_result_conflict}"
+    )
+
+    def _row_date(row: dict) -> date | None:
+        raw = (row.get("Date") or "").strip()
+        for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    train_rows = [r for r in joined_rows if (d := _row_date(r)) is not None and d < split]
+    test_rows = [r for r in joined_rows if (d := _row_date(r)) is not None and d >= split]
+    print(
+        f"date-split: train(joined, <{split})={len(train_rows)} "
+        f"test(joined, >={split})={len(test_rows)}"
+    )
     if not train_rows or not test_rows:
-        print("\nToo few joined rows to evaluate (place more overlapping Betfair markets).")
+        print("\nToo few joined rows on one side of the split (adjust --betfair-bsp-split-date).")
         print("Read-only; this script places no bets.")
         return
 
@@ -840,7 +897,23 @@ async def main() -> None:
     p.add_argument(
         "--betfair-bsp-dir",
         default="data/betfair/bsp",
-        help="dir of operator-placed Betfair historical STREAM market files (.bz2/.json)",
+        help=(
+            "dir of operator-placed Betfair historical STREAM market files (.bz2/.json); "
+            "a data.tar Basic archive there is auto-detected and streamed"
+        ),
+    )
+    p.add_argument(
+        "--betfair-bsp-tar",
+        default="",
+        help="explicit path to a Betfair Basic historical .tar (streamed, not extracted)",
+    )
+    p.add_argument(
+        "--betfair-bsp-split-date",
+        default="2025-01-01",
+        help=(
+            "OOS split (ISO date) WITHIN the BSP-joined rows: threshold/devig is "
+            "selected on rows before this kickoff date, evaluated once on rows on/after"
+        ),
     )
     p.add_argument(
         "--btb-dir",

@@ -56,9 +56,10 @@ from __future__ import annotations
 import bz2
 import json
 import logging
+import tarfile
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -363,6 +364,197 @@ def load_betfair_dir(path: Path) -> list[BetfairMarketClose]:
     return markets
 
 
+def _peek_market_def(lines: Iterable[str]) -> tuple[str | None, str | None]:
+    """Cheap filter probe: scan a stream's lines for the FIRST ``marketDefinition``
+    and return ``(eventTypeId, marketType)`` without building any runner state.
+
+    Used to skip the ~95% of Betfair markets that are not soccer MATCH_ODDS
+    BEFORE paying for a full :func:`parse_market_stream`. Stops at the first
+    definition seen (Betfair emits the full definition in the opening message)."""
+    for line in lines:
+        if not line or not line.strip():
+            continue
+        try:
+            msg = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(msg, dict) or msg.get("op") != "mcm":
+            continue
+        for mc in msg.get("mc", []) or []:
+            if not isinstance(mc, dict):
+                continue
+            mdef = mc.get("marketDefinition")
+            if isinstance(mdef, dict):
+                et = mdef.get("eventTypeId")
+                mt = mdef.get("marketType")
+                return (et if isinstance(et, str) else None, mt if isinstance(mt, str) else None)
+    return (None, None)
+
+
+def load_betfair_tar(
+    tar_path: Path,
+    *,
+    event_type_id: str = SOCCER_EVENT_TYPE_ID,
+    market_type: str = "MATCH_ODDS",
+    log_every: int = 50_000,
+) -> list[BetfairMarketClose]:
+    """Read-only: stream soccer MATCH_ODDS closes straight out of a Betfair
+    historical ``.tar`` archive WITHOUT extracting its (1M+) members to disk.
+
+    The Basic archive packs one market per ``.bz2`` member under
+    ``BASIC/YYYY/Mon/Day/EVENTID/MARKETID.bz2``; only a fraction are soccer
+    (``eventTypeId == "1"``) MATCH_ODDS. Each member is read, bz2-decompressed,
+    and CHEAPLY peeked (:func:`_peek_market_def`); members that are not the
+    requested sport+market type are skipped before any full parse. Matching
+    members are handed to :func:`parse_market_stream` verbatim. The tar is read
+    member-by-member in streaming mode (``r|*``) so the 5 GB archive is never
+    buffered whole; only the kept (soccer MATCH_ODDS) markets accumulate.
+
+    An absent tar returns ``[]`` (the caller prints the operator instruction).
+    Sorted by (kickoff, market_id) for determinism — matching ``load_betfair_dir``.
+    """
+    if not tar_path.is_file():
+        return []
+    markets: list[BetfairMarketClose] = []
+    scanned = 0
+    try:
+        # Streaming mode (r|*): sequential read, no random seeking, low memory.
+        with tarfile.open(tar_path, mode="r|*") as tar:
+            for member in tar:
+                scanned += 1
+                if log_every and scanned % log_every == 0:
+                    logger.info(
+                        "betfair tar scan: %d members read, %d soccer MATCH_ODDS kept",
+                        scanned,
+                        len(markets),
+                    )
+                if not member.isfile() or not member.name.endswith(".bz2"):
+                    continue
+                fobj = tar.extractfile(member)
+                if fobj is None:
+                    continue
+                try:
+                    raw = bz2.decompress(fobj.read())
+                except (OSError, ValueError, EOFError):
+                    continue
+                lines = raw.decode("utf-8", errors="replace").splitlines()
+                et, mt = _peek_market_def(lines)
+                if et != event_type_id or mt != market_type:
+                    continue  # skip cheaply — non-matching market never fully parsed
+                market = parse_market_stream(lines)
+                if market is not None and market.runners:
+                    markets.append(market)
+    except (tarfile.TarError, OSError) as exc:
+        logger.warning("betfair tar read aborted after %d members: %s", scanned, type(exc).__name__)
+    logger.info(
+        "betfair tar done: %d members read, %d soccer MATCH_ODDS markets", scanned, len(markets)
+    )
+    markets.sort(key=lambda m: (m.kickoff_utc or datetime.min.replace(tzinfo=UTC), m.market_id))
+    return markets
+
+
+def _market_to_dict(m: BetfairMarketClose) -> dict:
+    """BetfairMarketClose -> JSON-safe dict (Decimal->str, datetime->ISO-8601)."""
+    return {
+        "market_id": m.market_id,
+        "event_type_id": m.event_type_id,
+        "event_name": m.event_name,
+        "competition": m.competition,
+        "market_type": m.market_type,
+        "kickoff_utc": m.kickoff_utc.isoformat() if m.kickoff_utc else None,
+        "in_play_utc": m.in_play_utc.isoformat() if m.in_play_utc else None,
+        "settled": m.settled,
+        "bsp_reconciled": m.bsp_reconciled,
+        "runners": [
+            {
+                "selection_id": r.selection_id,
+                "name": r.name,
+                "sort_priority": r.sort_priority,
+                "status": r.status,
+                "close_price": str(r.close_price) if r.close_price is not None else None,
+                "bsp": str(r.bsp) if r.bsp is not None else None,
+                "won": r.won,
+            }
+            for r in m.runners
+        ],
+    }
+
+
+def _dt_from_iso(raw: object) -> datetime | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    dt = datetime.fromisoformat(raw)
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def _market_from_dict(d: dict) -> BetfairMarketClose:
+    """Inverse of :func:`_market_to_dict` — rebuild Decimal/UTC-typed objects."""
+    runners = tuple(
+        BetfairRunner(
+            selection_id=int(r["selection_id"]),
+            name=r.get("name"),
+            sort_priority=r.get("sort_priority"),
+            status=str(r.get("status") or ""),
+            close_price=_to_decimal(r.get("close_price")),
+            bsp=_to_decimal(r.get("bsp")),
+            won=r.get("won"),
+        )
+        for r in d.get("runners", [])
+    )
+    return BetfairMarketClose(
+        market_id=str(d.get("market_id") or ""),
+        event_type_id=d.get("event_type_id"),
+        event_name=d.get("event_name"),
+        competition=d.get("competition"),
+        market_type=d.get("market_type"),
+        kickoff_utc=_dt_from_iso(d.get("kickoff_utc")),
+        in_play_utc=_dt_from_iso(d.get("in_play_utc")),
+        settled=bool(d.get("settled")),
+        bsp_reconciled=bool(d.get("bsp_reconciled")),
+        runners=runners,
+    )
+
+
+def write_market_cache(path: Path, markets: Iterable[BetfairMarketClose]) -> int:
+    """Write parsed soccer MATCH_ODDS closes to a gzip-compressed JSONL cache.
+
+    A DERIVED artefact (one JSON market per line) so the ~90-minute tar scan
+    runs once; subsequent backtests load the cache via :func:`read_market_cache`.
+    Returns the number of markets written. Read-only w.r.t. the raw archive."""
+    import gzip
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        for m in markets:
+            fh.write(json.dumps(_market_to_dict(m), separators=(",", ":")))
+            fh.write("\n")
+            count += 1
+    return count
+
+
+def read_market_cache(path: Path) -> list[BetfairMarketClose]:
+    """Load the gzip JSONL market cache written by :func:`write_market_cache`.
+
+    An absent cache returns ``[]``. Unparseable lines are skipped with a log
+    line. Sorted by (kickoff, market_id) to match the loaders' determinism."""
+    import gzip
+
+    if not path.is_file():
+        return []
+    markets: list[BetfairMarketClose] = []
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                markets.append(_market_from_dict(json.loads(line)))
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+                logger.warning("skip betfair cache line: %s", type(exc).__name__)
+    markets.sort(key=lambda m: (m.kickoff_utc or datetime.min.replace(tzinfo=UTC), m.market_id))
+    return markets
+
+
 @dataclass(frozen=True, slots=True)
 class JoinStats:
     """Data-quality counters for the football-data <- Betfair-close join."""
@@ -406,8 +598,14 @@ def attach_betfair_close(
     """
     from app.resolution.matching import EventCandidate, match_event
 
-    candidates: list[EventCandidate] = []
+    # Index candidates by kickoff DATE. match_event already filters by
+    # max_day_drift, but scanning all ~59k candidates for every fd row is
+    # O(fd_rows x markets) (~386M comparisons -> the join hang that killed the
+    # run). Pre-bucketing by date means each fd row only matches the handful of
+    # candidates within +/- max_day_drift calendar days — identical result set,
+    # match_event still applies the precise drift inside the bucket.
     by_ref: dict[str, BetfairMarketClose] = {}
+    by_date: dict[date, list[EventCandidate]] = {}
     for m in markets:
         if m.kickoff_utc is None:
             continue
@@ -421,11 +619,10 @@ def attach_betfair_close(
         home_r, away_r = non_draw[0], non_draw[1]
         ref = m.market_id or f"mkt-{len(by_ref)}"
         by_ref[ref] = m
-        candidates.append(
-            EventCandidate(
-                ref=ref, home=home_r.name or "", away=away_r.name or "", kickoff=m.kickoff_utc
-            )
+        cand = EventCandidate(
+            ref=ref, home=home_r.name or "", away=away_r.name or "", kickoff=m.kickoff_utc
         )
+        by_date.setdefault(m.kickoff_utc.date(), []).append(cand)
 
     joined: list[dict] = []
     n_unmatched = 0
@@ -437,8 +634,12 @@ def attach_betfair_close(
         if not home or not away or kickoff is None:
             n_unmatched += 1
             continue
+        kdate = kickoff.date()
+        local: list[EventCandidate] = []
+        for off in range(-max_day_drift, max_day_drift + 1):
+            local.extend(by_date.get(kdate + timedelta(days=off), ()))
         match = match_event(
-            home, away, kickoff, candidates, aliases=aliases, max_day_drift=max_day_drift
+            home, away, kickoff, local, aliases=aliases, max_day_drift=max_day_drift
         )
         if match is None:
             n_unmatched += 1
@@ -483,5 +684,8 @@ __all__ = [
     "attach_betfair_close",
     "home_draw_away_close",
     "load_betfair_dir",
+    "load_betfair_tar",
     "parse_market_stream",
+    "read_market_cache",
+    "write_market_cache",
 ]

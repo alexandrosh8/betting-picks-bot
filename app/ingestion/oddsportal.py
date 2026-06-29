@@ -139,7 +139,11 @@ def _market_for_key(key: str) -> Market | None:
         return _EXACT_MARKETS[key]
     if key.startswith("over_under_"):
         return Market.TOTALS
-    if key.startswith(("asian_handicap_", "european_handicap_")):
+    if key.startswith(("asian_handicap", "european_handicap")):
+        # Matches both the line-qualified detail ("asian_handicap_-1_5",
+        # "asian_handicap_games_-7_5") AND the bare family key ("asian_handicap",
+        # the football AH wildcard) — the trailing "_" is dropped so the JSON
+        # feed's bare family resolves to SPREADS like the other wildcards.
         return Market.SPREADS
     return None
 
@@ -183,7 +187,7 @@ def _fmt_line(line: float) -> str:
 # — the JSON enumerator (oddsportal_json) drops integer/quarter lines as it reads
 # the feed. `_market_for_key` already classifies them (over_under_ -> TOTALS,
 # asian_handicap_ -> SPREADS), so they pass the unknown-market check too.
-_WILDCARD_MARKET_KEYS = frozenset({"over_under_games", "asian_handicap_games"})
+_WILDCARD_MARKET_KEYS = frozenset({"over_under_games", "asian_handicap_games", "asian_handicap"})
 
 
 def _validate_markets(markets: Sequence[str]) -> None:

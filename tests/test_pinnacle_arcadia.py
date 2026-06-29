@@ -443,6 +443,40 @@ async def test_client_sends_key_only_when_set() -> None:
     assert seen == [None, "PUBLIC-CONST"]
 
 
+async def test_client_sends_pinnacle_referer_on_every_request() -> None:
+    # The public web client (and the operator-provided R reference) set a
+    # Referer of the Pinnacle site; arcadia's blocked-egress 403s are less
+    # likely with it present. Asserted with AND without a guest key, since the
+    # header rides every GET regardless of key state.
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("referer"))
+        return httpx.Response(200, content="[]")
+
+    await _make_client(handler).fetch_matchups(33)
+    await _make_client(handler, guest_key="PUBLIC-CONST").fetch_straight_markets(33)
+    assert seen == ["https://www.pinnacle.com/", "https://www.pinnacle.com/"]
+
+
+async def test_discover_arcadia_config_sends_pinnacle_referer() -> None:
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("referer"))
+        return httpx.Response(
+            200,
+            json={
+                "api": {"haywire": {"apiKey": "PUBLIC-CONST"}},
+                "routes": {"curacao": {"guestRoot": "https://guest.example/0.1"}},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await discover_arcadia_config(client)
+    assert seen == ["https://www.pinnacle.com/"]
+
+
 class _NamedTransport(httpx.AsyncBaseTransport):
     def __init__(self, name: str, seen: list[str]) -> None:
         self._name = name

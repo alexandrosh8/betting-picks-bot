@@ -15,6 +15,33 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # Postgres service so the 163 DB-gated tests RUN in CI instead of silently
+    # skipping. tests/conftest.py probes localhost:5433 (the compose host port)
+    # and pytest.skip()s the whole DB suite when it is unreachable — without this
+    # service the settlement engine, CLV re-pricing, snapshot-close and the
+    # Pinnacle close re-key had ZERO CI signal. On ubuntu-latest the job runs on
+    # the runner host (not in a container), so the service's 5433:5432 mapping is
+    # reachable at localhost:5433, exactly where conftest connects. The healthcheck
+    # makes the job wait for readiness before the first step. Credentials match
+    # conftest._BASE (betting_ai/betting_ai) — a throwaway CI database, not a
+    # secret; the schema is built from ORM metadata (no alembic step needed).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: betting_ai
+          POSTGRES_PASSWORD: betting_ai
+          POSTGRES_DB: betting_ai
+          TZ: UTC
+        ports:
+          - "5433:5432"
+        options: >-
+          --health-cmd "pg_isready -U betting_ai -d betting_ai"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v6
         with:

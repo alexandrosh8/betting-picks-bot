@@ -33,7 +33,12 @@ import httpx
 
 from app.backtesting.clv import clv_log
 from app.ingestion.beatthebookie_series import load_series_any, to_fd_row
-from app.ingestion.betfair_bsp import attach_betfair_close, load_betfair_dir, load_betfair_tar
+from app.ingestion.betfair_bsp import (
+    JoinStats,
+    attach_betfair_close,
+    load_betfair_dir,
+    load_betfair_tar,
+)
 from app.ingestion.football_data import fetch_season_csv
 from app.ingestion.oddspapi import OddsPapiGame, load_oddspapi_dir
 from app.ingestion.sbr_nba import load_sbr_nba_dir
@@ -431,13 +436,20 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
     (account-gated, sandbox-unreachable); when the dir is absent we print the
     operator instruction and place no bets.
     """
-    from app.ingestion.betfair_bsp import read_market_cache, write_market_cache
+    from app.ingestion.betfair_bsp import (
+        load_betfair_tar_by_type,
+        read_market_cache,
+        write_market_cache,
+    )
 
     bsp_dir = Path(args.betfair_bsp_dir)
     cache_path = bsp_dir / "soccer_match_odds.jsonl.gz"
+    ou_cache_path = bsp_dir / "soccer_over_under.jsonl.gz"
+    ah_cache_path = bsp_dir / "soccer_handicap.jsonl.gz"
     # A Betfair Basic historical archive ships as a single multi-GB .tar of
     # 1M+ per-market .bz2 files; scanning it takes ~90 min. We cache the parsed
-    # soccer MATCH_ODDS closes to a JSONL.gz on first scan and reuse it after.
+    # soccer closes (MATCH_ODDS, OVER_UNDER_25, ASIAN_HANDICAP) to separate
+    # JSONL.gz files on first scan and reuse them after.
     # Source precedence: existing cache > explicit --betfair-bsp-tar > a data.tar
     # auto-detected in --betfair-bsp-dir > loose per-market files in the dir.
     tar_path: Path | None = None
@@ -456,6 +468,32 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
             print(f"Cached {n} soccer MATCH_ODDS markets to {cache_path} (reused next run)")
     else:
         markets = load_betfair_dir(bsp_dir)
+
+    # OVER_UNDER_25 + ASIAN_HANDICAP closes (separate caches; MATCH_ODDS untouched
+    # and not re-scanned). A missing cache triggers a ONE-TIME combined tar pass
+    # that extracts only the still-missing types in a single ~5 GB read.
+    ou_markets = read_market_cache(ou_cache_path) if ou_cache_path.is_file() else []
+    ah_markets = read_market_cache(ah_cache_path) if ah_cache_path.is_file() else []
+    need_types = []
+    if not ou_markets:
+        need_types.append("OVER_UNDER_25")
+    if not ah_markets:
+        need_types.append("ASIAN_HANDICAP")
+    if need_types and tar_path is not None:
+        print(f"Streaming {need_types} from tar: {tar_path} (one-time combined scan)")
+        buckets = load_betfair_tar_by_type(tar_path, market_types=tuple(need_types))
+        if buckets.get("OVER_UNDER_25"):
+            ou_markets = buckets["OVER_UNDER_25"]
+            n = write_market_cache(ou_cache_path, ou_markets)
+            print(f"Cached {n} soccer OVER_UNDER_25 markets to {ou_cache_path}")
+        if buckets.get("ASIAN_HANDICAP"):
+            ah_markets = buckets["ASIAN_HANDICAP"]
+            n = write_market_cache(ah_cache_path, ah_markets)
+            print(f"Cached {n} soccer ASIAN_HANDICAP markets to {ah_cache_path}")
+    if ou_markets:
+        print(f"Loaded {len(ou_markets)} soccer OVER_UNDER_25 markets")
+    if ah_markets:
+        print(f"Loaded {len(ah_markets)} soccer ASIAN_HANDICAP markets")
     if not markets:
         print("Betfair historical data not found. Operator must place the unzipped")
         print("per-market STREAM files (one market per .bz2 / .json, Exchange Stream")
@@ -485,13 +523,9 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
     print("CLV is vs a REAL sharp close (not consensus). BSP is CLOSE-only; the bet")
     print("price is the pre-match Max line, joined by date + canonical team name.\n")
 
+    from app.ingestion.betfair_bsp import attach_betfair_ou_close
+
     fd_rows = await load(leagues, seasons)
-    joined_rows, join_stats = attach_betfair_close(fd_rows, markets, aliases=aliases)
-    print(
-        f"join: fd_rows={join_stats.n_fd_rows} markets={join_stats.n_markets} "
-        f"joined={join_stats.n_joined} unmatched={join_stats.n_unmatched} "
-        f"result_conflict={join_stats.n_result_conflict}"
-    )
 
     def _row_date(row: dict) -> date | None:
         raw = (row.get("Date") or "").strip()
@@ -502,17 +536,6 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
                 continue
         return None
 
-    train_rows = [r for r in joined_rows if (d := _row_date(r)) is not None and d < split]
-    test_rows = [r for r in joined_rows if (d := _row_date(r)) is not None and d >= split]
-    print(
-        f"date-split: train(joined, <{split})={len(train_rows)} "
-        f"test(joined, >={split})={len(test_rows)}"
-    )
-    if not train_rows or not test_rows:
-        print("\nToo few joined rows on one side of the split (adjust --betfair-bsp-split-date).")
-        print("Read-only; this script places no bets.")
-        return
-
     devig_methods = (
         DevigMethod.POWER,
         DevigMethod.SHIN,
@@ -520,17 +543,64 @@ async def run_betfair_bsp(args: argparse.Namespace) -> None:
         DevigMethod.ODDS_RATIO,
     )
     thresholds = (0.005, 0.010, 0.020, 0.030, 0.050)
-    _sweep_and_eval(
-        train_rows,
-        test_rows,
-        ("1x2",),
-        min_odds,
-        max_odds,
-        devig_methods,
-        thresholds,
-        train_label="train (fd Max + Betfair close)",
-        test_label="test (fd Max + Betfair close)",
-    )
+
+    def _run_market(
+        kind: str,
+        join_rows: list[dict],
+        stats: JoinStats,
+        label: str,
+    ) -> None:
+        """Date-split a set of Betfair-close-joined rows and run the shared
+        TRAIN-sweep -> one-shot held-out evaluation for one market kind."""
+        print(
+            f"\n[{kind}] join: fd_rows={stats.n_fd_rows} markets={stats.n_markets} "
+            f"joined={stats.n_joined} unmatched={stats.n_unmatched} "
+            f"result_conflict={stats.n_result_conflict}"
+        )
+        train = [r for r in join_rows if (d := _row_date(r)) is not None and d < split]
+        test = [r for r in join_rows if (d := _row_date(r)) is not None and d >= split]
+        print(f"[{kind}] date-split: train(<{split})={len(train)} test(>={split})={len(test)}")
+        if not train or not test:
+            print(f"[{kind}] Too few joined rows on one side of the split — skipped. No bets.")
+            return
+        _sweep_and_eval(
+            train,
+            test,
+            (kind,),
+            min_odds,
+            max_odds,
+            devig_methods,
+            thresholds,
+            train_label=f"train ({label})",
+            test_label=f"test ({label})",
+        )
+
+    # --- 1x2 (MATCH_ODDS) — the committed sharp-CLV anchor path -------------
+    joined_1x2, stats_1x2 = attach_betfair_close(fd_rows, markets, aliases=aliases)
+    _run_market("1x2", joined_1x2, stats_1x2, "fd Max + Betfair MATCH_ODDS close")
+
+    # --- ou25 (OVER_UNDER_25) — totals validated vs the BSP close -----------
+    if ou_markets:
+        joined_ou, stats_ou = attach_betfair_ou_close(fd_rows, ou_markets, aliases=aliases)
+        _run_market("ou25", joined_ou, stats_ou, "fd Max + Betfair OVER_UNDER_25 close")
+    else:
+        print("\n[ou25] No OVER_UNDER_25 markets available — skipped.")
+
+    # --- ASIAN_HANDICAP — VISIBILITY-ONLY (settlement deferred) -------------
+    # Betfair AH markets carry MANY handicap lines per market (quarter-goal lines:
+    # -3.75, -4.0, ...) and AH settlement is push/half-win dependent on the exact
+    # line AND the goal margin. Joining a single football-data AH closing line to
+    # the right Betfair runner AND settling pushes/half-wins is non-trivial; faking
+    # it would manufacture CLV (the cardinal sin). Per doctrine this stays
+    # VISIBILITY-ONLY: the closes are CACHED for a future, honest AH settlement
+    # join, but NO CLV is reported here.
+    if ah_markets:
+        print(
+            f"\n[AH] ASIAN_HANDICAP: {len(ah_markets)} soccer markets cached "
+            f"({ah_cache_path.name}). VISIBILITY-ONLY / DEFERRED — multi-line + "
+            "push/half-win settlement is non-trivial; no CLV faked. This system places no bets."
+        )
+
     print(
         "\nNote: 'CLVpinn' here is CLV vs the BETFAIR sharp close (the close slots were "
         "overwritten with BSP/last-pre-in-play). Manual review required; places no bets."

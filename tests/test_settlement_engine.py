@@ -682,6 +682,10 @@ async def test_performance_report_aggregates(session, monkeypatch) -> None:  # t
     # anchored by Pinnacle. closing_odds is now just the optional soft display price.
     won.closing_anchor_type = "pinnacle"
     won.has_snapshot_close = True
+    # The INDEPENDENCE guard (2026-06-28) admits a row to the trusted sharp subset
+    # only when close_independent_of_fill is EXACTLY True (None no longer leaks in).
+    # This test predates that column, so set it — else n_sharp_close is 0.
+    won.close_independent_of_fill = True
     won.closing_odds = Decimal("2.1000")
     lost = await seed_pick(session, "evt-perf-2")
     lost.clv_log = Decimal("-0.01")

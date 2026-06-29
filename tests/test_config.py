@@ -638,9 +638,11 @@ def test_parse_visibility_only_markets_plain_and_sport_qualified() -> None:
 
     # plain market key (any sport) and a sport-qualified key coexist; lowercased,
     # de-blanked, order preserved.
-    assert parse_visibility_only_markets(
-        " Asian_Handicap , SOCCER:Asian_Handicap ,, totals "
-    ) == ("asian_handicap", "soccer:asian_handicap", "totals")
+    assert parse_visibility_only_markets(" Asian_Handicap , SOCCER:Asian_Handicap ,, totals ") == (
+        "asian_handicap",
+        "soccer:asian_handicap",
+        "totals",
+    )
     assert parse_visibility_only_markets("") == ()
 
 

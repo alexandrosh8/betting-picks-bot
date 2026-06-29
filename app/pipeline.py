@@ -98,6 +98,7 @@ def _record_poll(
     snapshots_persisted: int | None = None,
     volume_picks: int = 0,
     stale_candidates: int = 0,
+    stale_drop_ratio: float = 0.0,
 ) -> None:
     per_market: dict[str, int] = {}
     for snap in snapshots:
@@ -124,10 +125,30 @@ def _record_poll(
         # cycle is too slow for its slate (trim markets/leagues, raise
         # concurrency). Surfaced so a slate collapse is visible, not silent.
         "stale_candidates": stale_candidates,
+        # Fraction of this cycle's mintable candidates dropped SOLELY for
+        # staleness (n_stale / candidates reaching the freshness gate). 0.0 when
+        # nothing was mintable. A value near 1.0 means the scrape outran the
+        # freshness window and the slate is STARVING — the self-audit/alert layer
+        # watches this to catch a too-slow cycle that stale_candidates alone hides.
+        "stale_drop_ratio": stale_drop_ratio,
         # Listings parsed but ZERO odds rows: selector/DOM break or anti-bot
         # wall. finished_at alone would look healthy — flag it explicitly.
         "degraded": bool(matches_found) and not snapshots,
     }
+
+
+def _candidate_age_seconds(now: datetime, captured_at: datetime | None) -> float:
+    """Freshness age (seconds) of a candidate's best-book price.
+
+    SAFETY (fails CLOSED): the odds-age gate is a strict guard — the operator
+    cannot take a price of unknown age. An UNKNOWABLE capture time (None) returns
+    +inf so the gate ALWAYS drops the candidate rather than minting from it. (The
+    prior ``... if cap else 0.0`` failed OPEN: a None cap became age 0.0 and
+    sailed through the gate.) A future captured_at — live scrapes stamp DURING the
+    multi-minute fetch — clamps to 0.0 (fresh, never negative)."""
+    if captured_at is None:
+        return float("inf")
+    return max((now - captured_at).total_seconds(), 0.0)
 
 
 def _loader_event_ids(loader: OddsLoader, sport_key: str) -> tuple[str, ...] | None:
@@ -287,6 +308,13 @@ class PipelineDeps:
     value_min_edge: float = 0.015
     value_volume_min_edge: float = 0.015
     value_min_odds: float = 1.30
+    # Stale-starvation alarm threshold: when MORE than this fraction of a cycle's
+    # mintable candidates are dropped SOLELY for staleness (the scrape outran the
+    # freshness window), run_value_pipeline logs a WARNING-level "picks starving"
+    # line and the ratio rides on LAST_POLL for the self-audit/alert layer. Set
+    # from Settings.stale_drop_ratio_warn_threshold at the composition root; the
+    # 0.5 default means "warn once a slow cycle costs us over half the slate".
+    stale_drop_ratio_warn: float = 0.5
     # OPTIONAL value-gate refinements (app/edge/value_policy.py): per-market
     # premium floors, raw-odds bands, per-market min book counts. The default
     # all-empty policy is a strict no-op — current behavior, untouched. Built
@@ -886,6 +914,9 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     picks: list[PickOut] = []
     n_volume = 0
     n_stale = 0
+    # Denominator for the stale-drop RATIO: candidates reaching the freshness
+    # gate (i.e. cleared the AH guard) — the mintable universe this cycle.
+    n_freshness_candidates = 0
     n_ml_demoted = 0
     n_major_demoted = 0
     n_no_sharp_demoted = 0
@@ -948,8 +979,12 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             ):
                 n_ah_rejected += 1
                 continue
+            # Freshness gate (a candidate that cleared the AH guard is part of
+            # the mintable universe — count it so the stale-drop RATIO below is
+            # measured against the right denominator).
+            n_freshness_candidates += 1
             cap = captured.get((v.selection, v.best_book))
-            age = max((now - cap).total_seconds(), 0.0) if cap else 0.0
+            age = _candidate_age_seconds(now, cap)
             if age > deps.gate_policy.max_odds_age_seconds:
                 n_stale += 1
                 continue
@@ -1371,6 +1406,25 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             n_stale,
             deps.gate_policy.max_odds_age_seconds,
         )
+    # STALE-DROP RATIO: fraction of this cycle's mintable universe (candidates
+    # that reached the freshness gate) lost SOLELY to staleness. The count above
+    # is invisible without a denominator — 50 stale of 50 is a starving slate; 50
+    # of 5000 is noise. Surfaced on LAST_POLL so the self-audit/alert layer (added
+    # on main) can fire on starvation; a per-cycle WARNING makes a slow cycle loud
+    # here too. NOT wired to the dispatcher here (out of this module's scope).
+    stale_drop_ratio = n_stale / n_freshness_candidates if n_freshness_candidates else 0.0
+    if n_freshness_candidates and stale_drop_ratio > deps.stale_drop_ratio_warn:
+        logger.warning(
+            "value pipeline %s: cycle too slow for freshness window — picks starving "
+            "(stale-drop ratio %.0f%% = %d/%d mintable candidates dropped for staleness "
+            ">%.0fs old; threshold %.0f%%) — trim markets/leagues or raise concurrency",
+            sport_key,
+            stale_drop_ratio * 100.0,
+            n_stale,
+            n_freshness_candidates,
+            deps.gate_policy.max_odds_age_seconds,
+            deps.stale_drop_ratio_warn * 100.0,
+        )
     _record_available_games(
         sport_key, snapshots, deps.loader, deps.directory, deps.league or sport_key, now
     )
@@ -1382,6 +1436,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
         snapshots_persisted=persisted,
         volume_picks=n_volume,
         stale_candidates=n_stale,
+        stale_drop_ratio=stale_drop_ratio,
     )
     return picks
 

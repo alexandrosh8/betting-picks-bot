@@ -471,6 +471,7 @@ def build_scheduler(
             # volume (shadow) tier floor; == value_min_edge disables it
             value_volume_min_edge=settings.value_volume_min_edge,
             value_min_odds=settings.value_min_odds,
+            stale_drop_ratio_warn=settings.stale_drop_ratio_warn_threshold,
             # optional per-market/odds-band/book-count refinements — the
             # default (all env knobs empty) is the all-empty no-op policy
             value_policy=value_policy(settings),

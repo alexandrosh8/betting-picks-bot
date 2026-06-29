@@ -407,6 +407,51 @@ def test_significance_computed_on_clean_subset_only() -> None:
     assert agg["sharp_clv_mean"] == 0.04
 
 
+def test_blended_headline_explicitly_marked_non_evidential() -> None:
+    # CLV audit P1 / H5: the blended stake_weighted_clv_log / beat_close_rate mix
+    # EVERY non-excluded close — including consensus-anchored and poll-time
+    # re-scrape FALLBACK closes — which are NOT independent sharp evidence. They are
+    # kept for continuity, but the payload MUST carry an unambiguous machine-readable
+    # marker so a consumer cannot read the blended number as the strategy's proven
+    # edge. The trusted sharp subset is THE evidential edge metric.
+    rows = [_row(closing_anchor="consensus", clv_log=0.05) for _ in range(MIN_HEADLINE_N)]
+    rows += [
+        _row(
+            closing_anchor="pinnacle", clv_log=0.03, close_independent=True, has_snapshot_close=True
+        )
+        for _ in range(MIN_HEADLINE_N)
+    ]
+    agg = _aggregate_settled(rows)
+    # blended fields PRESERVED for continuity ...
+    assert "stake_weighted_clv_log" in agg
+    assert "beat_close_rate" in agg
+    assert agg["stake_weighted_clv_log"] is not None
+    # ... but explicitly flagged indicative / non-evidential.
+    assert agg["blended_clv_evidential"] is False
+    # the trusted sharp subset is THE evidential edge metric.
+    assert agg["sharp_clv_evidential"] is True
+    assert agg["sharp_stake_weighted_clv_log"] is not None
+
+
+def test_evidential_markers_are_structural_not_data_dependent() -> None:
+    # The evidential markers are STRUCTURAL (constant per stratum), not data-
+    # dependent: a consumer can rely on them even on an empty population. This is
+    # what lets a "does it work?" reader distinguish indicative (blended) from
+    # evidential (sharp_*) WITHOUT inspecting which closes were mixed in.
+    agg = _aggregate_settled([])
+    assert agg["blended_clv_evidential"] is False
+    assert agg["sharp_clv_evidential"] is True
+
+
+def test_evidential_markers_propagate_per_sport() -> None:
+    # The per-sport split runs through _aggregate_settled, so every sport stratum
+    # inherits the same non-evidential blended / evidential sharp markers.
+    soccer = [("soccer", _row(outcome="won", pnl=1.0)) for _ in range(MIN_HEADLINE_N)]
+    by_sport = _aggregate_settled_by_sport(soccer)
+    assert by_sport["soccer"]["blended_clv_evidential"] is False
+    assert by_sport["soccer"]["sharp_clv_evidential"] is True
+
+
 def test_null_independence_excluded_from_trusted_subset() -> None:
     # Audit 2026-06-28 P2: the trusted subset now requires close_independent_of_fill
     # IS TRUE (not merely "IS NOT FALSE"). A NULL/unknown independence (pre-column or

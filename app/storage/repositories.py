@@ -889,6 +889,14 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
     -EV). Those are the closes whose CLV the platform can stand behind; the
     blended ``stake_weighted_clv_log`` still mixes every close in for continuity.
 
+    EVIDENTIAL MARKERS (CLV audit P1 / H5 — labelling only, NO math change): the
+    payload carries ``blended_clv_evidential`` (always False) on the blended
+    headline and ``sharp_clv_evidential`` (always True) on the trusted subset, so a
+    consumer can distinguish the INDICATIVE blended figure (mixes consensus +
+    poll-time fallback closes) from the EVIDENTIAL sharp edge (independent sharp
+    closes only) without inspecting which closes fed each aggregate. The blended
+    fields are NOT removed — only flagged.
+
     Each row is (outcome, pnl, stake, clv_log, beat_close, closing_odds,
     closing_anchor, close_independent, has_snapshot_close, decimal_odds,
     closing_fair_probability, model_probability). ``closing_odds`` is now purely the
@@ -1014,9 +1022,22 @@ def _aggregate_settled(rows: Sequence[Any]) -> dict[str, Any]:
         "beat_close_rate": (
             _ratio(Decimal(beat_true), Decimal(beat_known)) if headline_ok else None
         ),
+        # CLV audit P1 / H5 — EVIDENTIAL MARKER (labelling only, NO math change). The
+        # blended stake_weighted_clv_log / beat_close_rate mix EVERY non-excluded close,
+        # including consensus-anchored and poll-time re-scrape FALLBACK closes, which are
+        # NOT independent sharp evidence. They are retained for continuity but are
+        # INDICATIVE ONLY: a consumer (dashboard / "does it work?" reader) must NOT read
+        # them as the strategy's proven edge. This structural flag (always False) makes
+        # that machine-readable without inspecting which closes were mixed in. The honest
+        # proof of edge is the trusted ``sharp_*`` subset below (``sharp_clv_evidential``).
+        "blended_clv_evidential": False,
         "min_headline_n": MIN_HEADLINE_N,
         # TRUSTED subset — genuine sharp snapshot closes only (see docstring) —
         # gated on its own n (n_sharp_close), naturally thinner than n_settled.
+        # ``sharp_clv_evidential`` (always True) is the counterpart marker: THIS is the
+        # evidential edge metric — independent sharp closes only, the figure the platform
+        # can stand behind — as opposed to the indicative blended headline above.
+        "sharp_clv_evidential": True,
         "n_sharp_close": n_sharp,
         "sharp_status": "ok" if sharp_ok else "insufficient",
         "sharp_stake_weighted_clv_log": (

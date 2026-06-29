@@ -815,6 +815,21 @@ def test_dashboard_clv_hero_tiles_use_sharp_subset() -> None:
     assert "perf.stake_weighted_clv_log" in text
 
 
+def test_dashboard_blended_clv_labelled_non_evidential() -> None:
+    """CLV audit P1 / H5: the blended (all-closes) CLV tile must CONSUME the
+    payload's blended_clv_evidential marker and carry explicit indicative /
+    non-evidential copy, so no consumer reads the blended figure — which mixes
+    consensus + poll-time fallback closes that are NOT independent sharp evidence
+    — as the proof of edge. The trusted sharp subset stays THE evidential headline."""
+    text = TestClient(make_app()).get("/").text
+    # the machine-readable evidential marker travels into the UI
+    assert "blended_clv_evidential" in text
+    # the blended tile carries explicit indicative / non-evidential copy
+    assert "Indicative only" in text
+    # the evidential proof-of-edge headline remains the sharp subset
+    assert "perf.sharp_stake_weighted_clv_log" in text
+
+
 def test_dashboard_clv_hero_shows_accruing_progress_when_insufficient() -> None:
     """DASHBOARD CLARITY: below the sharp-close floor (sharp_status !== 'ok') the
     PROOF-OF-EDGE hero must render an explicit INSUFFICIENT-EVIDENCE progress

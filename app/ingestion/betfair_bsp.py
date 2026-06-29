@@ -337,6 +337,79 @@ def home_draw_away_close(
     )
 
 
+# Betfair fixed selection ids for the soccer OVER_UNDER_25 (Over/Under 2.5 goals)
+# market — stable across every soccer OU 2.5 market (like DRAW_SELECTION_ID for
+# MATCH_ODDS), so the Over/Under runners are identifiable even if a Basic-tier
+# file omits runner names.
+OVER_25_SELECTION_ID = 47973
+UNDER_25_SELECTION_ID = 47972
+
+
+@dataclass(frozen=True, slots=True)
+class OverUnderClose:
+    """Over/Under 2.5 closing prices + settled result.
+
+    ``result`` is "O" (Over won, total goals >= 3), "U" (Under won), or None when
+    the market is not settled."""
+
+    over_close: Decimal | None
+    under_close: Decimal | None
+    result: str | None  # "O" | "U" | None
+
+
+def over_under_close(market: BetfairMarketClose) -> OverUnderClose | None:
+    """Map an OVER_UNDER_25 market's runners to its Over/Under close + result.
+
+    Over/Under runners are identified by the fixed 2.5-line selection ids
+    (:data:`OVER_25_SELECTION_ID` / :data:`UNDER_25_SELECTION_ID`) or, as a
+    fallback, by a runner name starting with "over"/"under". Returns None if
+    either side cannot be identified — a missing side would attach a wrong close
+    (fake CLV, the cardinal sin)."""
+    over_runner: BetfairRunner | None = None
+    under_runner: BetfairRunner | None = None
+    for r in market.runners:
+        name = (r.name or "").strip().lower()
+        if r.selection_id == OVER_25_SELECTION_ID or name.startswith("over"):
+            if over_runner is not None:
+                return None  # ambiguous
+            over_runner = r
+        elif r.selection_id == UNDER_25_SELECTION_ID or name.startswith("under"):
+            if under_runner is not None:
+                return None
+            under_runner = r
+    if over_runner is None or under_runner is None:
+        return None
+    result: str | None = None
+    if over_runner.won:
+        result = "O"
+    elif under_runner.won:
+        result = "U"
+    return OverUnderClose(
+        over_close=over_runner.close_price,
+        under_close=under_runner.close_price,
+        result=result,
+    )
+
+
+def event_name_home_away(event_name: str | None) -> tuple[str, str] | None:
+    """Parse (home, away) from a Betfair ``eventName`` ("Home v Away").
+
+    OVER_UNDER / ASIAN_HANDICAP soccer runners are "Over 2.5 Goals"/team-with-
+    handicap, NOT plain team names, so the join key for those markets comes from
+    the event name. Betfair uses the " v " separator consistently. Returns None
+    when the name is absent or does not split into EXACTLY two sides (more than
+    one " v " is ambiguous -> refuse rather than guess a wrong fixture)."""
+    if not event_name:
+        return None
+    parts = event_name.split(" v ")
+    if len(parts) != 2:
+        return None
+    home, away = parts[0].strip(), parts[1].strip()
+    if not home or not away:
+        return None
+    return home, away
+
+
 def load_betfair_dir(path: Path) -> list[BetfairMarketClose]:
     """Read-only: parse every operator-placed market file in ``path``.
 
@@ -451,6 +524,70 @@ def load_betfair_tar(
     )
     markets.sort(key=lambda m: (m.kickoff_utc or datetime.min.replace(tzinfo=UTC), m.market_id))
     return markets
+
+
+def load_betfair_tar_by_type(
+    tar_path: Path,
+    *,
+    event_type_id: str = SOCCER_EVENT_TYPE_ID,
+    market_types: tuple[str, ...] = ("MATCH_ODDS",),
+    log_every: int = 50_000,
+) -> dict[str, list[BetfairMarketClose]]:
+    """Read-only: ONE streaming pass over a Betfair Basic ``.tar`` that buckets
+    every soccer market whose ``marketType`` is in ``market_types`` into a
+    ``{market_type: [BetfairMarketClose, ...]}`` dict.
+
+    Generalises :func:`load_betfair_tar` (which keeps a single type): the same
+    cheap :func:`_peek_market_def` skip drops the ~97% of members that are not
+    the requested sport+types BEFORE any full parse, but MULTIPLE types are
+    extracted in a single ~5 GB sequential read so OVER_UNDER and ASIAN_HANDICAP
+    can be cached alongside MATCH_ODDS without re-scanning. Each bucket is sorted
+    by (kickoff, market_id) for determinism. An absent tar returns a dict of
+    empty buckets (one per requested type). Memory-safe: only kept markets
+    accumulate; the archive is never buffered whole.
+    """
+    wanted = set(market_types)
+    buckets: dict[str, list[BetfairMarketClose]] = {mt: [] for mt in market_types}
+    if not tar_path.is_file():
+        return buckets
+    scanned = 0
+    kept = 0
+    try:
+        with tarfile.open(tar_path, mode="r|*") as tar:
+            for member in tar:
+                scanned += 1
+                if log_every and scanned % log_every == 0:
+                    logger.info(
+                        "betfair tar scan: %d members read, %d kept (%s)",
+                        scanned,
+                        kept,
+                        ",".join(market_types),
+                    )
+                if not member.isfile() or not member.name.endswith(".bz2"):
+                    continue
+                fobj = tar.extractfile(member)
+                if fobj is None:
+                    continue
+                try:
+                    raw = bz2.decompress(fobj.read())
+                except (OSError, ValueError, EOFError):
+                    continue
+                lines = raw.decode("utf-8", errors="replace").splitlines()
+                et, mt = _peek_market_def(lines)
+                if et != event_type_id or mt is None or mt not in wanted:
+                    continue  # skip cheaply — non-matching member never fully parsed
+                market = parse_market_stream(lines)
+                if market is not None and market.runners:
+                    buckets[mt].append(market)
+                    kept += 1
+    except (tarfile.TarError, OSError) as exc:
+        logger.warning("betfair tar read aborted after %d members: %s", scanned, type(exc).__name__)
+    for mt in buckets:
+        buckets[mt].sort(
+            key=lambda m: (m.kickoff_utc or datetime.min.replace(tzinfo=UTC), m.market_id)
+        )
+    logger.info("betfair tar done: %d members read, %d kept across %s", scanned, kept, market_types)
+    return buckets
 
 
 def _market_to_dict(m: BetfairMarketClose) -> dict:
@@ -673,18 +810,118 @@ def attach_betfair_close(
     )
 
 
+def attach_betfair_ou_close(
+    fd_rows: list[dict],
+    markets: list[BetfairMarketClose],
+    *,
+    aliases: AliasTable,
+    max_day_drift: int = 1,
+) -> tuple[list[dict], JoinStats]:
+    """Join Betfair OVER_UNDER_25 sharp closes onto football-data pre-match rows.
+
+    Mirrors :func:`attach_betfair_close` for the totals market. The OU market's
+    home/away come from the Betfair ``eventName`` ("Home v Away") since its
+    runners are "Over/Under 2.5 Goals", not team names; the strict
+    ``match_event`` then finds the UNIQUE same-fixture football-data row within
+    ``max_day_drift`` days. On a match the closing OU slots (``PC>2.5``/``PC<2.5``
+    and ``MaxC>2.5``/``MaxC<2.5``) are OVERWRITTEN with the Betfair Over/Under
+    close decimal odds; pre-match OU columns are untouched. A row is DROPPED
+    (data-quality gate) when the Betfair Over/Under settled result disagrees with
+    the football-data total goals (FTHG+FTAG: Over iff total >= 3).
+
+    Returns (joined_rows, stats); only successfully-joined rows are returned, so
+    every returned row carries a genuine sharp OU close.
+    """
+    from app.resolution.matching import EventCandidate, match_event
+
+    by_ref: dict[str, BetfairMarketClose] = {}
+    by_date: dict[date, list[EventCandidate]] = {}
+    for m in markets:
+        if m.kickoff_utc is None:
+            continue
+        teams = event_name_home_away(m.event_name)
+        if teams is None:
+            continue
+        home_name, away_name = teams
+        ref = m.market_id or f"ou-{len(by_ref)}"
+        by_ref[ref] = m
+        by_date.setdefault(m.kickoff_utc.date(), []).append(
+            EventCandidate(ref=ref, home=home_name, away=away_name, kickoff=m.kickoff_utc)
+        )
+
+    joined: list[dict] = []
+    n_unmatched = 0
+    n_conflict = 0
+    for row in fd_rows:
+        home = (row.get("HomeTeam") or "").strip()
+        away = (row.get("AwayTeam") or "").strip()
+        kickoff = _fd_date_to_utc(row.get("Date") or "")
+        if not home or not away or kickoff is None:
+            n_unmatched += 1
+            continue
+        kdate = kickoff.date()
+        local: list[EventCandidate] = []
+        for off in range(-max_day_drift, max_day_drift + 1):
+            local.extend(by_date.get(kdate + timedelta(days=off), ()))
+        match = match_event(
+            home, away, kickoff, local, aliases=aliases, max_day_drift=max_day_drift
+        )
+        if match is None:
+            n_unmatched += 1
+            continue
+        ou = over_under_close(by_ref[match.ref])
+        if ou is None or ou.over_close is None or ou.under_close is None:
+            n_unmatched += 1
+            continue
+        # Data-quality gate: Betfair Over/Under result must agree with the
+        # football-data total goals (Over iff FTHG+FTAG >= 3).
+        total: int | None
+        try:
+            total = int(row["FTHG"]) + int(row["FTAG"])
+        except (KeyError, TypeError, ValueError):
+            total = None
+        if ou.result is not None and total is not None:
+            fd_over = total >= 3
+            bf_over = ou.result == "O"
+            if fd_over != bf_over:
+                n_conflict += 1
+                continue
+        new_row = dict(row)
+        new_row["PC>2.5"] = str(ou.over_close)
+        new_row["PC<2.5"] = str(ou.under_close)
+        new_row["MaxC>2.5"] = str(ou.over_close)
+        new_row["MaxC<2.5"] = str(ou.under_close)
+        new_row["BetfairOuMarketId"] = match.ref
+        joined.append(new_row)
+
+    return joined, JoinStats(
+        n_fd_rows=len(fd_rows),
+        n_markets=len(markets),
+        n_joined=len(joined),
+        n_unmatched=n_unmatched,
+        n_result_conflict=n_conflict,
+    )
+
+
 __all__ = [
     "BASKETBALL_EVENT_TYPE_ID",
     "DRAW_SELECTION_ID",
+    "OVER_25_SELECTION_ID",
     "SOCCER_EVENT_TYPE_ID",
+    "UNDER_25_SELECTION_ID",
     "BetfairMarketClose",
     "BetfairRunner",
     "HdaClose",
     "JoinStats",
+    "OverUnderClose",
     "attach_betfair_close",
+    "attach_betfair_ou_close",
+    "event_name_home_away",
     "home_draw_away_close",
     "load_betfair_dir",
     "load_betfair_tar",
+    "load_betfair_tar_by_type",
+    "over_under_close",
     "parse_market_stream",
     "read_market_cache",
     "write_market_cache",

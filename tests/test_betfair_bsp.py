@@ -280,6 +280,197 @@ def _make_betfair_tar(path: Path) -> None:
             tar.addfile(info, io.BytesIO(payload))
 
 
+OVER_25_ID = 47973
+UNDER_25_ID = 47972
+
+
+def _soccer_ou_stream(*, over_wins: bool = True, with_bsp: bool = False) -> list[str]:
+    """Soccer (eventTypeId=1) OVER_UNDER_25 market with a settled result.
+
+    Runners use the real fixed Betfair 2.5-line selection ids (Over 47973 /
+    Under 47972). Close = last pre-in-play best-back unless ``with_bsp``."""
+    over_status = "WINNER" if over_wins else "LOSER"
+    under_status = "LOSER" if over_wins else "WINNER"
+    active = [_runner(OVER_25_ID, "Over 2.5 Goals", 1), _runner(UNDER_25_ID, "Under 2.5 Goals", 2)]
+    settled = [
+        _runner(
+            OVER_25_ID, "Over 2.5 Goals", 1, status=over_status, bsp=1.80 if with_bsp else None
+        ),
+        _runner(
+            UNDER_25_ID, "Under 2.5 Goals", 2, status=under_status, bsp=2.15 if with_bsp else None
+        ),
+    ]
+    mdef = {
+        "marketType": "OVER_UNDER_25",
+        "eventTypeId": "1",
+        "eventName": "Arsenal v Chelsea",
+        "competition": {"id": "10", "name": "English Premier League"},
+        "marketTime": MARKET_TIME,
+        "status": "OPEN",
+        "inPlay": False,
+        "bspMarket": True,
+        "bspReconciled": with_bsp,
+        "runners": active,
+    }
+    return [
+        _mcm(
+            1_700_000_000_000,
+            market_def=mdef,
+            rc=[_rc(OVER_25_ID, back=1.90), _rc(UNDER_25_ID, back=2.05)],
+        ),
+        # last pre-in-play snapshot — the CLOSE when no BSP
+        _mcm(1_700_000_060_000, rc=[_rc(OVER_25_ID, back=1.85), _rc(UNDER_25_ID, back=2.10)]),
+        # in-play turn — must NOT be the close
+        _mcm(
+            1_700_000_120_000, market_def={**mdef, "inPlay": True}, rc=[_rc(OVER_25_ID, back=1.40)]
+        ),
+        _mcm(
+            1_700_000_900_000,
+            market_def={
+                **mdef,
+                "inPlay": True,
+                "status": "CLOSED",
+                "bspReconciled": with_bsp,
+                "runners": settled,
+            },
+        ),
+    ]
+
+
+def _soccer_ah_stream() -> list[str]:
+    """Soccer (eventTypeId=1) ASIAN_HANDICAP market — runners carry handicap lines."""
+    runners = [
+        {"id": 111, "name": "Arsenal", "sortPriority": 1, "status": "ACTIVE", "hc": -1.0},
+        {"id": 222, "name": "Chelsea", "sortPriority": 2, "status": "ACTIVE", "hc": 1.0},
+    ]
+    mdef = {
+        "marketType": "ASIAN_HANDICAP",
+        "eventTypeId": "1",
+        "eventName": "Arsenal v Chelsea",
+        "competition": {"id": "10", "name": "English Premier League"},
+        "marketTime": MARKET_TIME,
+        "status": "OPEN",
+        "inPlay": False,
+        "runners": runners,
+    }
+    return [
+        _mcm(1_700_000_000_000, market_def=mdef, rc=[_rc(111, back=1.95), _rc(222, back=1.95)]),
+        _mcm(
+            1_700_000_120_000,
+            market_def={**mdef, "inPlay": True, "status": "CLOSED", "runners": runners},
+        ),
+    ]
+
+
+def test_over_under_close_parses_and_settles() -> None:
+    from app.ingestion.betfair_bsp import over_under_close
+
+    market = parse_market_stream(_soccer_ou_stream(over_wins=True))
+    assert market is not None
+    assert market.market_type == "OVER_UNDER_25"
+    ou = over_under_close(market)
+    assert ou is not None
+    # close = last pre-in-play best-back (2nd message); in-play 1.40 ignored
+    assert ou.over_close == Decimal("1.85")
+    assert ou.under_close == Decimal("2.10")
+    assert ou.result == "O"
+
+
+def test_over_under_close_prefers_bsp_and_settles_under() -> None:
+    from app.ingestion.betfair_bsp import over_under_close
+
+    market = parse_market_stream(_soccer_ou_stream(over_wins=False, with_bsp=True))
+    assert market is not None
+    ou = over_under_close(market)
+    assert ou is not None
+    assert ou.over_close == Decimal("1.80")  # reconciled BSP overrides snapshot
+    assert ou.under_close == Decimal("2.15")
+    assert ou.result == "U"
+
+
+def test_event_name_home_away_parses_and_rejects_garbage() -> None:
+    from app.ingestion.betfair_bsp import event_name_home_away
+
+    assert event_name_home_away("Real Madrid v Atalanta") == ("Real Madrid", "Atalanta")
+    assert event_name_home_away("Brighton & Hove Albion v Wolves") == (
+        "Brighton & Hove Albion",
+        "Wolves",
+    )
+    assert event_name_home_away(None) is None
+    assert event_name_home_away("no separator here") is None
+    assert event_name_home_away("a v b v c") is None  # ambiguous -> refuse
+
+
+def test_attach_betfair_ou_close_joins_and_rejects_total_goals_conflict() -> None:
+    from app.ingestion.betfair_bsp import attach_betfair_ou_close
+
+    market = parse_market_stream(_soccer_ou_stream(over_wins=True))
+    assert market is not None
+    aliases = default_aliases()
+    good = {
+        "Date": "28/06/2026",
+        "HomeTeam": "Arsenal",
+        "AwayTeam": "Chelsea",
+        "Max>2.5": "1.95",
+        "Max<2.5": "2.00",
+        "P>2.5": "1.85",
+        "P<2.5": "2.05",
+        "FTHG": "2",
+        "FTAG": "1",  # total 3 -> Over (agrees with Betfair Over WINNER)
+    }
+    # total 1 -> Under, but Betfair settled Over -> result conflict -> drop
+    conflict = {**good, "FTHG": "1", "FTAG": "0"}
+    joined, stats = attach_betfair_ou_close([good, conflict], [market], aliases=aliases)
+    assert stats.n_fd_rows == 2
+    assert stats.n_markets == 1
+    assert stats.n_joined == 1
+    assert stats.n_result_conflict == 1
+    row = joined[0]
+    # Betfair Over/Under close written into the closing slots (decimal odds)
+    assert float(row["PC>2.5"]) == 1.85
+    assert float(row["PC<2.5"]) == 2.10
+    assert float(row["MaxC>2.5"]) == 1.85
+    # pre-match Max preserved untouched
+    assert row["Max>2.5"] == "1.95"
+
+
+def test_load_betfair_tar_by_type_extracts_ou_and_ah(tmp_path: Path) -> None:
+    from app.ingestion.betfair_bsp import load_betfair_tar_by_type
+
+    tar_path = tmp_path / "data.tar"
+    members = {
+        "BASIC/2024/Aug/2/111/1.111.bz2": _soccer_stream(with_bsp=True),  # MATCH_ODDS
+        "BASIC/2024/Aug/2/222/1.222.bz2": _basketball_stream(),  # wrong sport -> skip
+        "BASIC/2024/Aug/2/333/1.333.bz2": _soccer_ou_stream(over_wins=True),  # OVER_UNDER_25
+        "BASIC/2024/Aug/2/444/1.444.bz2": _soccer_ah_stream(),  # ASIAN_HANDICAP
+    }
+    with tarfile.open(tar_path, "w") as tar:
+        for name, lines in members.items():
+            payload = bz2.compress("\n".join(lines).encode("utf-8"))
+            info = tarfile.TarInfo(name=name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+
+    buckets = load_betfair_tar_by_type(
+        tar_path, market_types=("MATCH_ODDS", "OVER_UNDER_25", "ASIAN_HANDICAP")
+    )
+    assert set(buckets) == {"MATCH_ODDS", "OVER_UNDER_25", "ASIAN_HANDICAP"}
+    assert len(buckets["MATCH_ODDS"]) == 1
+    assert len(buckets["OVER_UNDER_25"]) == 1
+    assert len(buckets["ASIAN_HANDICAP"]) == 1
+    # basketball MATCH_ODDS (eventTypeId 7522) is excluded by the soccer filter
+    assert all(m.event_type_id == "1" for ms in buckets.values() for m in ms)
+    assert buckets["OVER_UNDER_25"][0].market_type == "OVER_UNDER_25"
+    assert buckets["ASIAN_HANDICAP"][0].market_type == "ASIAN_HANDICAP"
+
+
+def test_load_betfair_tar_by_type_absent_is_empty_buckets(tmp_path: Path) -> None:
+    from app.ingestion.betfair_bsp import load_betfair_tar_by_type
+
+    buckets = load_betfair_tar_by_type(tmp_path / "nope.tar", market_types=("OVER_UNDER_25",))
+    assert buckets == {"OVER_UNDER_25": []}
+
+
 def test_load_betfair_tar_keeps_only_soccer_match_odds(tmp_path: Path) -> None:
     tar_path = tmp_path / "data.tar"
     _make_betfair_tar(tar_path)

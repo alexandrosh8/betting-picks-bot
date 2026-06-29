@@ -656,11 +656,17 @@ async def test_settle_event_picks_skips_unparseable(session) -> None:  # type: i
     assert (settled, skipped) == (0, 1)
 
 
-async def test_performance_report_aggregates(session) -> None:  # type: ignore[no-untyped-def]
+async def test_performance_report_aggregates(session, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     from sqlalchemy import delete as sa_delete
     from sqlalchemy import update as sa_update
 
     from app.storage.repositories import performance_report
+
+    # MIN_HEADLINE_N=50 suppresses headline ratios below 50 settled picks (P2-1
+    # min-n suppression). This test exercises the AGGREGATION MATH on a tiny
+    # deterministic sample, so patch the threshold down to 1 for THIS test only
+    # (production stays 50) — otherwise roi/clv would be nulled to "insufficient".
+    monkeypatch.setattr("app.storage.repositories.MIN_HEADLINE_N", 1)
 
     # The dev warehouse may hold real picks/results; neutralize them inside
     # this rolled-back transaction so the aggregates are deterministic.
@@ -676,6 +682,10 @@ async def test_performance_report_aggregates(session) -> None:  # type: ignore[n
     # anchored by Pinnacle. closing_odds is now just the optional soft display price.
     won.closing_anchor_type = "pinnacle"
     won.has_snapshot_close = True
+    # The INDEPENDENCE guard (2026-06-28) admits a row to the trusted sharp subset
+    # only when close_independent_of_fill is EXACTLY True (None no longer leaks in).
+    # This test predates that column, so set it — else n_sharp_close is 0.
+    won.close_independent_of_fill = True
     won.closing_odds = Decimal("2.1000")
     lost = await seed_pick(session, "evt-perf-2")
     lost.clv_log = Decimal("-0.01")

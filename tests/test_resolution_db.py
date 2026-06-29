@@ -284,13 +284,25 @@ def _pin_snap_at(selection: str, odds: float, event: str, captured: datetime) ->
 
 
 async def test_resolver_caps_cutoff_at_arcadia_kickoff(factory) -> None:  # type: ignore[no-untyped-def]
-    # The arcadia event kicks off a DAY before the pick (within the match
-    # window). A Pinnacle row captured AFTER the arcadia kickoff (in-play) must
-    # NOT become the close — the cutoff is capped at the arcadia kickoff.
+    # The arcadia event kicks off BEFORE the pick but WITHIN the hardened matcher's
+    # tight 6h accept bound (app.resolution.matching._ACCEPT_MINUTE_DRIFT = 360m). A
+    # Pinnacle row captured AFTER the arcadia kickoff (in-play) must NOT become the
+    # close — the cutoff is capped at the arcadia event's OWN kickoff, not the
+    # (later) pick kickoff.
+    #
+    # STALE-TEST CORRECTION (2026-06-29): this case previously set the pick a FULL
+    # DAY (24h) after the arcadia kickoff. The wrong-game-safe hardened matcher now
+    # REJECTS a same-teams fixture more than 6h away as a DIFFERENT game (a team
+    # plays ~once/day; 24h apart is a different match -> a wrong-game close is fake
+    # CLV), so that setup resolved to [] before the cutoff logic ever ran — the
+    # assertion below was asserting outdated behavior. The gap is now 3h (a real
+    # same-game cross-source timezone/rounding drift), so the cutoff-capping
+    # behavior is genuinely exercised; the 24h case is asserted to REJECT below.
+    # (The matcher is correct; the fix is to the test, NOT to the accept bound.)
     arc_ko = datetime(2026, 12, 1, 18, 0, tzinfo=UTC)
-    pick_ko = arc_ko + timedelta(days=1)
+    pick_ko = arc_ko + timedelta(hours=3)  # earlier arcadia KO, inside the 6h accept bound
     pre = arc_ko - timedelta(hours=2)  # valid pre-kickoff close
-    inplay = arc_ko + timedelta(hours=1)  # in-play; must be excluded
+    inplay = arc_ko + timedelta(hours=1)  # after arcadia KO (before pick KO); must be excluded
     ref = "pin-cutoff"
     snaps = [
         _pin_snap_at("Alpha", 2.10, ref, pre),
@@ -311,8 +323,24 @@ async def test_resolver_caps_cutoff_at_arcadia_kickoff(factory) -> None:  # type
             max_day_drift=1,
         )
     by_sel = {s.selection: s for s in out}
-    # the Alpha close must be the PRE-kickoff 2.10, NOT the in-play 1.50
+    # the Alpha close must be the PRE-kickoff 2.10 (cutoff capped at the arcadia
+    # kickoff), NOT the in-play 1.50 — the in-play row sits between the arcadia KO
+    # and the later pick KO, so admitting it would prove the cap used the pick KO.
     assert by_sel["Alpha"].decimal_odds == pytest.approx(2.10)
+
+    # WRONG-GAME BOUND (must NOT loosen): the SAME arcadia event a full day from the
+    # pick is a different fixture to the hardened matcher -> rejected, no close.
+    async with factory() as session:
+        wrong_game = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_soccer",
+            pick_external_ref="evt-pick",
+            home="Alpha",
+            away="Beta",
+            kickoff=arc_ko + timedelta(days=1),  # 24h apart > 6h accept bound -> reject
+            max_day_drift=1,
+        )
+    assert wrong_game == []
 
 
 # --- PER-MARKET re-key: H2H re-keys by OUTCOME (team name); TOTALS/SPREADS are

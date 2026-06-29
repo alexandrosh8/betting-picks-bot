@@ -1618,12 +1618,24 @@
           const allClv = perf.stake_weighted_clv_log == null ? "—"
             : (clvFromLog(perf.stake_weighted_clv_log) >= 0 ? "+" : "") +
               clvFromLog(perf.stake_weighted_clv_log).toFixed(1) + "%";
+          // CLV audit P1/H5: the blended all-closes CLV is INDICATIVE ONLY. The
+          // payload flags it non-evidential (perf.blended_clv_evidential === false):
+          // it mixes consensus-anchored + poll-time fallback closes that are NOT
+          // independent sharp evidence. Surface it dim, as context, with an explicit
+          // non-evidential tooltip — never as the proof of edge (that is the sharp
+          // headline above). The flag is structural; treat anything but true as
+          // non-evidential so a missing flag fails to the honest (dim) side.
+          const blendedEvidential = perf.blended_clv_evidential === true;
+          const allClvTitle = blendedEvidential ? ""
+            : "Indicative only — blends consensus + poll-time fallback closes that are " +
+              "NOT independent sharp evidence. Not the proof of edge; see the sharp " +
+              "stake-weighted CLV headline above.";
 
           addStat(stats, beat, "Beat close · sharp", stale, false);
           addStat(stats, String(perf.n_settled), "Settled", stale, false);
           addStat(stats, record, "Record W-L-P", stale, false);
           addStat(stats, pnlText, "P&L / ROI · units", stale, pnl < 0);
-          addStat(stats, allClv, "All-closes CLV · context", stale, false, true);
+          addStat(stats, allClv, "All-closes CLV · context · indicative", stale, false, true, allClvTitle);
 
           if (stale) {
             heroSub.textContent += " · STALE — /performance failing, frozen at " +
@@ -1631,9 +1643,10 @@
           }
           renderDistribution();
         }
-        function addStat(parent, value, label, stale, neg, dim) {
+        function addStat(parent, value, label, stale, neg, dim, title) {
           const w = document.createElement("div");
           w.className = "hstat" + (stale ? " stale" : "");
+          if (title) w.title = title;
           const v = document.createElement("span");
           v.className = "v" + (neg ? " neg" : dim ? " dim" : "");
           v.textContent = value;

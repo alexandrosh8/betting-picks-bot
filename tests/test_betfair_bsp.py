@@ -13,7 +13,9 @@ schema. No bets are ever placed.
 from __future__ import annotations
 
 import bz2
+import io
 import json
+import tarfile
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +26,7 @@ from app.ingestion.betfair_bsp import (
     attach_betfair_close,
     home_draw_away_close,
     load_betfair_dir,
+    load_betfair_tar,
     parse_market_stream,
 )
 from app.resolution.matching import default_aliases
@@ -236,6 +239,92 @@ def test_load_betfair_dir_reads_bz2_and_plain(tmp_path: Path) -> None:
 
 def test_load_betfair_dir_absent_is_empty(tmp_path: Path) -> None:
     assert load_betfair_dir(tmp_path / "nope") == []
+
+
+def _soccer_over_under_stream() -> list[str]:
+    """A soccer (eventTypeId=1) but NON-MATCH_ODDS market — must be skipped."""
+    runners = [_runner(901, "Over 2.5 Goals", 1), _runner(902, "Under 2.5 Goals", 2)]
+    mdef = {
+        "marketType": "OVER_UNDER_25",
+        "eventTypeId": "1",
+        "eventName": "Arsenal v Chelsea",
+        "competition": {"id": "10", "name": "English Premier League"},
+        "marketTime": MARKET_TIME,
+        "status": "OPEN",
+        "inPlay": False,
+        "runners": runners,
+    }
+    return [
+        _mcm(1_700_000_000_000, market_def=mdef, rc=[_rc(901, back=1.90), _rc(902, back=1.95)]),
+        _mcm(
+            1_700_000_120_000,
+            market_def={**mdef, "inPlay": True, "status": "CLOSED", "runners": runners},
+        ),
+    ]
+
+
+def _make_betfair_tar(path: Path) -> None:
+    """Build a fixture tar mimicking BASIC/YYYY/Mon/Day/EVENT/MARKET.bz2 layout
+    with three members: soccer MATCH_ODDS (kept), basketball MATCH_ODDS (skip,
+    wrong sport), soccer OVER_UNDER_25 (skip, wrong market type)."""
+    members = {
+        "BASIC/2024/Aug/2/111/1.111.bz2": _soccer_stream(with_bsp=True),
+        "BASIC/2024/Aug/2/222/1.222.bz2": _basketball_stream(),
+        "BASIC/2024/Aug/2/333/1.333.bz2": _soccer_over_under_stream(),
+    }
+    with tarfile.open(path, "w") as tar:
+        for name, lines in members.items():
+            payload = bz2.compress("\n".join(lines).encode("utf-8"))
+            info = tarfile.TarInfo(name=name)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+
+
+def test_load_betfair_tar_keeps_only_soccer_match_odds(tmp_path: Path) -> None:
+    tar_path = tmp_path / "data.tar"
+    _make_betfair_tar(tar_path)
+    markets = load_betfair_tar(tar_path)
+    # Only the soccer MATCH_ODDS member survives the cheap peek filter.
+    assert len(markets) == 1
+    m = markets[0]
+    assert m.event_type_id == "1"
+    assert m.market_type == "MATCH_ODDS"
+    assert m.event_name == "Arsenal v Chelsea"
+    # parse_market_stream was reused: BSP-reconciled close is preserved.
+    by_id = {r.selection_id: r for r in m.runners}
+    assert by_id[HOME_ID].close_price == Decimal("2.05")
+    assert by_id[HOME_ID].won is True
+
+
+def test_load_betfair_tar_absent_is_empty(tmp_path: Path) -> None:
+    assert load_betfair_tar(tmp_path / "nope.tar") == []
+
+
+def test_market_cache_round_trips(tmp_path: Path) -> None:
+    from app.ingestion.betfair_bsp import read_market_cache, write_market_cache
+
+    original = [
+        parse_market_stream(_soccer_stream(with_bsp=True)),
+        parse_market_stream(_soccer_stream(with_bsp=False)),
+    ]
+    assert all(m is not None for m in original)
+    cache = tmp_path / "soccer_match_odds.jsonl.gz"
+    n = write_market_cache(cache, [m for m in original if m is not None])
+    assert n == 2
+    restored = read_market_cache(cache)
+    assert restored == original  # frozen dataclasses compare by value (Decimal/UTC intact)
+    # spot-check the load-bearing fields survive the JSON boundary as Decimal/UTC
+    by_id = {r.selection_id: r for r in restored[0].runners}
+    assert by_id[HOME_ID].close_price == Decimal("2.05")
+    assert isinstance(by_id[HOME_ID].close_price, Decimal)
+    assert restored[0].kickoff_utc == datetime(2026, 6, 28, 18, 0, 0, tzinfo=UTC)
+    assert restored[0].kickoff_utc.tzinfo is not None
+
+
+def test_read_market_cache_absent_is_empty(tmp_path: Path) -> None:
+    from app.ingestion.betfair_bsp import read_market_cache
+
+    assert read_market_cache(tmp_path / "nope.jsonl.gz") == []
 
 
 def test_attach_betfair_close_joins_and_rejects_result_mismatch() -> None:

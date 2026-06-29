@@ -828,6 +828,69 @@ def build_scheduler(
             settings.betfair_exchange_sports,
         )
 
+    # --- Betfair Exchange API (STRICTLY READ-ONLY) SHADOW capture ------------ #
+    # Default-OFF and fully inert unless VALUE_BETFAIR_API_ENABLED is set AND all
+    # credentials are present (build_shadow_capture returns None otherwise, so no
+    # login / network ever happens). SHADOW: it fetches the Betfair Match-Odds
+    # catalogue, routes each market through the EXISTING hardened matcher, and
+    # LOGS the match rate + would-be BACK anchor — it persists NOTHING and never
+    # replaces the OddsPortal-sourced "Betfair Exchange" anchor.
+    if (
+        settings.value_betfair_api_enabled
+        and settings.betfair_api_credentials() is not None
+        and session_factory is not None
+    ):
+        from app.ingestion.betfair_api import EVENT_TYPE_SOCCER, build_shadow_capture
+        from app.resolution.matching import EventCandidate
+        from app.storage.repositories import select_betfair_targets
+
+        bfapi_session_factory = session_factory
+        bfapi_window = timedelta(hours=settings.betfair_api_window_hours)
+        bfapi_limit = settings.betfair_api_max_targets_per_cycle
+        # SINGLE dedicated proxy (NO rotation — operator requirement). Direct egress
+        # when unset. A dedicated client so the proxy never leaks to other callers.
+        bfapi_proxy = settings.betfair_api_proxy_url()
+        bfapi_http = httpx.AsyncClient(proxy=bfapi_proxy) if bfapi_proxy else httpx.AsyncClient()
+
+        async def _betfair_api_candidates() -> list[EventCandidate]:
+            rows = await select_betfair_targets(
+                bfapi_session_factory, sport="soccer", window=bfapi_window, limit=bfapi_limit
+            )
+            return [
+                EventCandidate(
+                    ref=row.external_ref, home=row.home, away=row.away, kickoff=row.starts_at
+                )
+                for row in rows
+                if row.starts_at is not None
+            ]
+
+        betfair_api_capture = build_shadow_capture(
+            enabled=settings.value_betfair_api_enabled,
+            credentials=settings.betfair_api_credentials(),
+            window_hours=settings.betfair_api_window_hours,
+            http_client=bfapi_http,
+            candidates_fn=_betfair_api_candidates,
+            event_type_ids=(EVENT_TYPE_SOCCER,),
+        )
+
+        async def capture_betfair_api_shadow() -> None:
+            if betfair_api_capture is None:
+                return
+            try:
+                await betfair_api_capture.capture_once()
+            except Exception as exc:  # type-only log (never the URL/creds)
+                logger.error("betfair api shadow capture failed: %s", type(exc).__name__)
+
+        scheduler.add_job(
+            capture_betfair_api_shadow,
+            IntervalTrigger(seconds=settings.betfair_api_poll_interval_seconds),
+            id="capture_betfair_api_shadow",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=None,
+        )
+        logger.info("betfair API SHADOW capture ENABLED (read-only, persists nothing)")
+
     return scheduler
 
 

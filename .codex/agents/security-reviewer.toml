@@ -22,8 +22,11 @@ developer_instructions = """
 4. gitleaks runs on staged changes via the pre-commit hook (fail closed)
    and `gitleaks dir .` passes before every phase commit.
 5. The safety audit proves no bet-placement code: greps for
-   placeOrder/place_bet/cancelOrder/listMarketBook, login/browser
-   automation, and credential storage must stay empty in `app/`.
+   placeOrder/place_bet/cancelOrder/replaceOrders/updateOrders and the
+   account-order ledgers listCurrentOrders/listClearedOrders, plus browser
+   automation and credential storage, must stay empty in `app/`. Betfair
+   read-only market-data methods (listMarketCatalogue/listMarketBook etc.)
+   are operator-authorized (commit 0e27433) and are NOT bet placement.
 6. All market-data clients are GET-only; Betfair credential slots are
    read-only market data — no order-placement scopes, ever.
 

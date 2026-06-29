@@ -6,9 +6,16 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 fail=0
 
-echo "== 1. order-placement identifiers must be ABSENT from app/ =="
-if grep -rnE "placeOrder|place_order|placeBets|place_bet|cancelOrder|cancel_order|listMarketBook|replaceOrders" app/; then
-  echo "FAIL: order-placement identifiers found in app/"
+echo "== 1. order-placement + account identifiers must be ABSENT from app/ =="
+# Betfair read-only market-data methods (listEventTypes/listCompetitions/
+# listEvents/listMarketCatalogue/listMarketBook) are operator-authorized for the
+# strictly read-only price feed (CLAUDE.md Rule 1 read-only exception, commit
+# 0e27433, 2026-06-29). They return prices only and place nothing, so they are NOT
+# banned. What IS banned is every order-PLACEMENT and account/order-LEDGER method:
+# placeOrders/cancelOrders/replaceOrders/updateOrders write bets;
+# listCurrentOrders/listClearedOrders read a betting account. None may ever appear.
+if grep -rnE "placeOrder|place_order|placeBets|place_bet|cancelOrder|cancel_order|replaceOrders|updateOrders|listCurrentOrders|listClearedOrders" app/; then
+  echo "FAIL: order-placement / account-order identifiers found in app/"
   fail=1
 fi
 

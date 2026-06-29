@@ -59,6 +59,39 @@ CONFIRMED: dict[str, list[str]] = {
     "Paksi FC": ["Paks", "Paksi"],
     "Titanes del Distrito Nacional": ["Titanes Del Licey"],
     "Cañeros del Este": ["Caneros", "Caneros del Este"],
+    # --- 2026-06-29 probe_unmatched_split fixture-confirmed NAME-FORM pairs -----
+    # Each confirmed same-day, opponent-resolving against the live Pinnacle
+    # archive. Canonicals are ASCII forms matching the archive string (Nordic
+    # ð/ø are dropped by ascii-ignore normalization, so an accented canonical
+    # would mis-normalize). UNAMBIGUOUS same-club only; the bare-ambiguous /
+    # distinct-club / cross-sport cases (Racing/Beirut, Everton/Viña, Jazz Pori,
+    # Gimnasia E.R., Gigantes/Indios, Shanghai Second, Minnesota 2) are
+    # DELIBERATELY EXCLUDED to the review/omit list — NOT added here.
+    #   sponsor / mascot / city tail drop
+    "Flint City Bucks": ["Flint City"],
+    "Hudson Valley Hammers": ["Hudson Valley"],
+    "West Torrens Birkalla": ["West Torrens"],
+    "Cangrejeros de Santurce": ["Cangrejeros"],
+    "Pelita Jaya Jakarta": ["Pelita Jaya"],
+    "Kimberley Mar del Plata": ["Kimberley"],
+    "Taranaki Mountainairs": ["Taranaki Airs"],
+    #   club-type prefix / connector / abbreviation expansion
+    "RS Berkane": ["Berkane"],
+    "UMF Njardvik": ["Njardvik"],
+    "Deportivo Binacional": ["Binacional"],
+    "Deportes Puerto Montt": ["D. Puerto Montt", "Puerto Montt"],
+    "Union Espanola": ["U. Espanola"],
+    "Arsenal de Sarandi": ["Arsenal Sarandi"],
+    "Defensores de Puerto Vilelas": ["Defensores de Vilelas"],
+    "Kawkab Marrakech": ["KAC Marrakech"],
+    "SK Gjovik-Lyn": ["Gjoevik-Lyn"],
+    #   "Utd"/"Utd." -> "United"
+    "Heidelberg United": ["Heidelberg Utd"],
+    "Broadbeach United": ["Broadbeach Utd."],
+    "Cumberland United": ["Cumberland Utd."],
+    #   Scandinavian/Baltic club-type suffix / genitive
+    "Sunnersta AIF": ["Sunnersta"],
+    "Grobinas SC/LFS": ["Grobina", "Grobinas"],
 }
 
 

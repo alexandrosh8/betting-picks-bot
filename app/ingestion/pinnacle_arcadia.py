@@ -54,6 +54,11 @@ DEFAULT_BASE_URL = "https://guest.api.arcadia.pinnacle.com/0.1"
 # base URL + apiVersion. A plain public GET; never a credential/login path.
 CONFIG_APP_JSON_URL = "https://www.pinnacle.com/config/app.json"
 BOOKMAKER = "Pinnacle"  # contains "pinnacle" -> top-priority sharp anchor (value.py)
+# Sent on every arcadia GET (the public web client and the operator-provided R
+# reference both set it). A blocked/datacenter egress is 403'd less often with a
+# site Referer present; it is NOT an anti-bot bypass (GET-only, no challenge
+# solving) and carries no credential, so it is a plain public constant.
+_PINNACLE_REFERER = "https://www.pinnacle.com/"
 
 # arcadia numeric sport ids (verified live against /0.1/sports). "american_
 # football" is id 15 ("Football" upstream); soccer is the distinct id 29.
@@ -173,7 +178,11 @@ async def discover_arcadia_config(
     never the URL (which identifies the source) or the key.
     """
     try:
-        response = await client.get(url, headers={"accept": "application/json"}, timeout=timeout)
+        response = await client.get(
+            url,
+            headers={"accept": "application/json", "referer": _PINNACLE_REFERER},
+            timeout=timeout,
+        )
         if response.status_code != 200:
             logger.info(
                 "arcadia config discovery: non-200 (%d); using fallback key/base",
@@ -577,7 +586,7 @@ class PinnacleArcadiaClient:
         self._guest_key = config.guest_key.get_secret_value()
 
     def _headers(self) -> dict[str, str]:
-        headers = {"accept": "application/json"}
+        headers = {"accept": "application/json", "referer": _PINNACLE_REFERER}
         if self._guest_key:
             headers["x-api-key"] = self._guest_key
         return headers

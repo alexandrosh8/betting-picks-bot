@@ -154,6 +154,17 @@ def parse_major_leagues(raw: str) -> tuple[str, ...]:
     return tuple(name.strip() for name in raw.split(",") if name.strip())
 
 
+def parse_visibility_only_markets(raw: str) -> tuple[str, ...]:
+    """VALUE_VISIBILITY_ONLY_MARKETS csv of market keys CAPPED at the volume tier.
+
+    Each entry is a line-qualified market key ("asian_handicap_-1_5"), a market
+    family ("spreads"), or an AH/totals family stem ("asian_handicap" — caps every
+    line at once; see value_policy.is_visibility_only_market). Empty = NO-OP (no
+    market capped, the default). Lowercased + de-blanked; matched case-insensitively.
+    """
+    return tuple(key.strip().lower() for key in raw.split(",") if key.strip())
+
+
 def parse_proxy_urls(raw: str, env_name: str = "ARCADIA_PROXY_URLS") -> tuple[str, ...]:
     """Parse comma/newline separated proxy URLs without ever echoing secrets."""
     urls: list[str] = []
@@ -426,6 +437,25 @@ class Settings(BaseSettings):
     # this sharpens the SHADOW tier's fair value + consensus-vs-median
     # comparisons, NOT premium pricing. (build #1 — app/edge/value.py.)
     value_consensus_logit_pool: bool = False
+    # VISIBILITY-ONLY markets, csv (default empty = NO-OP). A market key here is
+    # CAPPED at the volume (shadow) tier — never premium, regardless of edge — so
+    # a brand-new market (e.g. football "asian_handicap") accrues forward shadow
+    # CLV (persisted + CLV-tracked) but is NEVER alerted and NEVER reserves
+    # exposure. Entries are line-detail keys ("asian_handicap_-1_5"), a family
+    # ("spreads"), or an AH/totals family stem ("asian_handicap", caps the whole
+    # line ladder). Matched line-detail-first then family (value_policy.
+    # is_visibility_only_market). Default empty leaves all markets premium-eligible.
+    value_visibility_only_markets: str = ""
+    # AH SENTINEL/IMPLAUSIBILITY guard bounds (app/edge/value.ah_candidate_plausible),
+    # applied at the AH candidate-building boundary in run_value_pipeline. A 2-way
+    # Asian-handicap candidate is REJECTED (mints no pick, premium OR shadow) when
+    # its RAW best price exceeds VALUE_AH_MAX_ODDS or its sharp-fair / soft-implied
+    # probability ratio exceeds VALUE_AH_MAX_SHARP_SOFT_RATIO — a corrupt/sentinel
+    # feed price (a backtest found odds like 22.0) fabricates a phantom edge, and a
+    # liquid 2-way AH line never sits at such a price/gap. SANE DEFAULTS (guard ON
+    # for AH); scoped to AH so non-AH markets are untouched.
+    value_ah_max_odds: float = Field(default=15.0, gt=1.0)
+    value_ah_max_sharp_soft_ratio: float = Field(default=3.0, gt=1.0)
 
     # --- Line-movement / steam-awareness gate (app/edge/steam.py) ------------
     # Guards the dominant soft-book FALSE POSITIVE: a phantom edge from a moving
@@ -1149,6 +1179,11 @@ def value_policy(settings: Settings) -> ValuePolicy:
         max_edge_by_market=parse_market_max_edges(settings.value_max_edge_per_market),
         devig_by_market=parse_market_devig(settings.value_devig_per_market),
         consensus_logit_pool=settings.value_consensus_logit_pool,
+        visibility_only_markets=parse_visibility_only_markets(
+            settings.value_visibility_only_markets
+        ),
+        ah_max_odds=settings.value_ah_max_odds,
+        ah_max_sharp_soft_ratio=settings.value_ah_max_sharp_soft_ratio,
     )
 
 

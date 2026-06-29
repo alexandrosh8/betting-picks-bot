@@ -27,6 +27,7 @@ from app.edge.value_policy import (
     devig_method_for,
     distinct_book_count,
     is_major_league,
+    is_visibility_only_market,
     max_edge_for,
     min_books_for,
     min_edge_for,
@@ -597,6 +598,16 @@ def pick_tier(edge: float, premium_min_edge: float, volume_min_edge: float) -> s
     return None
 
 
+def _is_asian_handicap(market_detail: str | None) -> bool:
+    """True for a 2-way Asian-handicap line key ("asian_handicap_-1_5",
+    "asian_handicap_games_-7_5") — the scope of the AH sentinel/implausibility
+    guard. European handicap (3-way) and totals are deliberately excluded; the
+    guard reasons about a 2-way AH line specifically."""
+    if not market_detail:
+        return False
+    return market_detail.strip().lower().startswith("asian_handicap")
+
+
 def _score_value_candidate(
     deps: "PipelineDeps",
     event_id: str,
@@ -762,6 +773,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     from app.edge.value import (
         CONSENSUS_ANCHOR,
         SHARP_BOOKS,
+        ah_candidate_plausible,
         anchor_type_for,
         find_value_bets_with_fair,
         is_sharp_anchored,
@@ -882,6 +894,8 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_experimental = 0
     n_off_band = 0
     n_thin_books = 0
+    n_visibility_capped = 0
+    n_ah_rejected = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
     # min() guards a deps-level inversion (Settings already validates the
     # ordering at startup) so a bad override can widen nothing. Per-market
@@ -921,6 +935,19 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             ),
         )
         for v in value_bets:
+            # AH SENTINEL/IMPLAUSIBILITY guard (app/edge/value.ah_candidate_plausible):
+            # a corrupt/sentinel AH feed price (a backtest found odds like 22.0) or an
+            # implausibly large sharp-vs-soft implied-prob gap fabricates a phantom edge.
+            # Reject the candidate at the candidate-building boundary BEFORE it can mint
+            # ANY pick (premium OR volume shadow). Scoped to asian_handicap lines, so
+            # non-AH markets are untouched; bounds are Settings-driven with sane defaults.
+            if _is_asian_handicap(detail) and not ah_candidate_plausible(
+                v,
+                max_odds=deps.value_policy.ah_max_odds,
+                max_sharp_soft_ratio=deps.value_policy.ah_max_sharp_soft_ratio,
+            ):
+                n_ah_rejected += 1
+                continue
             cap = captured.get((v.selection, v.best_book))
             age = max((now - cap).total_seconds(), 0.0) if cap else 0.0
             if age > deps.gate_policy.max_odds_age_seconds:
@@ -939,6 +966,20 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             tier = pick_tier(v.edge, premium_floor, deps.value_volume_min_edge)
             if tier is None:
                 continue  # below both floors (unreachable via scan_min_edge)
+            # VISIBILITY-ONLY market cap: a market in value_policy.visibility_only_markets
+            # can NEVER be premium — it is CAPPED at the volume (shadow) tier regardless
+            # of edge (even above the premium floor), so a brand-new market (football AH)
+            # accrues forward shadow CLV before it is trusted to alert. Empty set = no-op
+            # (current behavior). Runs FIRST among the demotion gates so the cap dominates;
+            # the gates below then no-op on an already-volume tier (their `tier ==
+            # "premium"` guards). Never a silent drop — surfaced on the pick + logged.
+            visibility_note = ""
+            if tier == "premium" and is_visibility_only_market(
+                deps.value_policy, str(market), detail
+            ):
+                tier = "volume"
+                n_visibility_capped += 1
+                visibility_note = " | visibility-only market: capped at volume (shadow)"
             # Major-league gate: a PREMIUM candidate whose scraped league is not
             # in the configured major set is DEMOTED to the volume (shadow) tier
             # — persisted + CLV-tracked, never alerted, never reserving exposure.
@@ -1135,6 +1176,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         if v.best_odds_effective != v.best_odds
                         else ""
                     )
+                    + visibility_note
                     + major_note
                     + sharp_note
                     + experimental_note
@@ -1284,6 +1326,24 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             "value pipeline %s: UNVALIDATED sport — %d candidate(s) kept experimental (shadow)",
             sport_key,
             n_experimental,
+        )
+    if n_visibility_capped:
+        # The visibility-only cap is never silent: these candidates cleared the
+        # premium edge gate but their market is capped at the shadow tier
+        # (VALUE_VISIBILITY_ONLY_MARKETS) — persisted + CLV-tracked, never alerted.
+        logger.info(
+            "value pipeline %s: visibility-only cap held %d candidate(s) at volume (shadow)",
+            sport_key,
+            n_visibility_capped,
+        )
+    if n_ah_rejected:
+        # The AH sentinel/implausibility guard is never silent: these AH
+        # candidates carried a corrupt/sentinel feed price or an implausible
+        # sharp-vs-soft gap and were rejected before minting any pick.
+        logger.info(
+            "value pipeline %s: AH sentinel/implausibility guard rejected %d candidate(s)",
+            sport_key,
+            n_ah_rejected,
         )
     if n_off_band:
         # VALUE_ODDS_BANDS intervention is never silent either: these

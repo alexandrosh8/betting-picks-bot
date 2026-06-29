@@ -102,6 +102,28 @@ class ValuePolicy:
     # until learned on nested walk-forward CV (<= 2324), so the default leaves
     # the validated global method in force everywhere.
     devig_by_market: tuple[tuple[str, DevigMethod], ...] = ()
+    # Markets CAPPED at the VOLUME (shadow) tier: a market in this set can NEVER
+    # be premium — it is persisted + CLV-tracked but NEVER alerted and NEVER
+    # reserving exposure, regardless of edge (even above the premium floor). This
+    # is the per-MARKET sibling of PipelineDeps.experimental_sports (per-SPORT):
+    # it lets a brand-new market (e.g. football Asian handicap) accrue FORWARD
+    # shadow CLV before it is trusted to alert. Empty () = DISABLED — no market is
+    # capped (current behavior, the BIT-IDENTICAL default). Matched line-detail
+    # first, then the AH/totals family stem, then the market family (str(Market))
+    # — so "asian_handicap" caps every "asian_handicap_<line>" line at once (see
+    # is_visibility_only_market).
+    visibility_only_markets: tuple[str, ...] = ()
+    # AH SENTINEL/IMPLAUSIBILITY guard bounds (app/edge/value.ah_candidate_plausible).
+    # A 2-way Asian-handicap candidate is REJECTED at the candidate-building
+    # boundary when its RAW best price exceeds ``ah_max_odds`` OR its sharp-fair /
+    # soft-implied probability ratio exceeds ``ah_max_sharp_soft_ratio`` — a
+    # corrupt/sentinel feed price (a backtest found odds like 22.0) fabricates a
+    # phantom edge, and a liquid 2-way AH line never sits at such a price or gap.
+    # These are SANE DEFAULTS (the guard is ON for AH); they are scoped to AH
+    # markets in the pipeline, so non-AH markets are untouched. Set from
+    # Settings (VALUE_AH_MAX_ODDS / VALUE_AH_MAX_SHARP_SOFT_RATIO).
+    ah_max_odds: float = 15.0
+    ah_max_sharp_soft_ratio: float = 3.0
     # When True, the CONSENSUS FALLBACK anchor (used only when NO genuine sharp
     # book priced the full market) is a log-odds (logit) POOL across full-market
     # books instead of the median-of-prices consensus — non-extremizing and
@@ -215,6 +237,32 @@ def is_major_league(policy: ValuePolicy, league_name: str) -> bool:
     if not norm:
         return False
     return norm in {normalize_league(major) for major in policy.major_leagues}
+
+
+def is_visibility_only_market(policy: ValuePolicy, market: str, market_detail: str | None) -> bool:
+    """Whether this market is CAPPED at the volume (shadow) tier — never premium.
+
+    Empty ``policy.visibility_only_markets`` DISABLES the cap — no market is
+    capped (current behavior, the bit-identical default). When configured, a
+    market matches if any configured entry equals (case-insensitively):
+      * the line-qualified market_detail ("asian_handicap_-1_5"), OR
+      * the market family ``str(Market)`` ("spreads"), OR
+      * a FAMILY STEM of the detail — entry E matches when the detail equals E or
+        starts with ``E + "_"`` ("asian_handicap" caps every
+        "asian_handicap_<line>" at once).
+    Most-specific-first is preserved (detail/family exact match before the stem
+    prefix), mirroring the other per-market policies while letting one family key
+    cap a whole line ladder.
+    """
+    if not policy.visibility_only_markets:
+        return False
+    members = {m.strip().lower() for m in policy.visibility_only_markets if m.strip()}
+    if not members:
+        return False
+    if any(key in members for key in market_lookup_keys(market, market_detail)):
+        return True
+    detail = (market_detail or "").strip().lower()
+    return any(detail == m or detail.startswith(f"{m}_") for m in members)
 
 
 def odds_in_bands(odds: float, bands: tuple[tuple[float, float], ...]) -> bool:

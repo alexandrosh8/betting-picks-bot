@@ -391,20 +391,37 @@ _OVER_UNDER_GAMES_PREFIX = "over_under_games_"
 # 2-way totals; feed idx 0=over, 1=under (same upstream labels as soccer OU).
 _OVER_UNDER_GAMES_LABELS: Mapping[str, str] = {"0": "odds_over", "1": "odds_under"}
 
+
 # WILDCARD market families: a bare family key (no line) means "emit EVERY HALF-LINE
 # present in this betType's feed body" — one GET captures the whole ladder, which
 # a line-shopping value strategy needs (the edge can sit on ANY line, and a fixed
 # few lines miss most games entirely — e.g. NBA-scale 220.5 never matches a WNBA
 # ~165 total). The line is read from each feed key's 5th segment (SIGNED for
-# handicap). betType binds to the event scope (defaultScopeId) at resolve time;
-# feed_key is unused (parse_feed_payload enumerates). Integer/quarter lines are
-# dropped during enumeration — only ±0.5 half-lines devig cleanly (no PUSH).
-_WILDCARD_FAMILIES: dict[str, tuple[int, Mapping[str, str]]] = {
-    # points totals -> betType 2, 2-way list [over, under].
-    "over_under_games": (2, _OVER_UNDER_GAMES_LABELS),
-    # asian handicap (points spread) -> betType 5, 2-way; idx 0=home, 1=away
-    # (live-verified 2026-06-25: the home handicap lengthens as the line steepens).
-    "asian_handicap_games": (5, {"0": "handicap_team_1", "1": "handicap_team_2"}),
+# handicap). `scope` None binds betType to the event's OWN defaultScopeId at
+# resolve time (basketball/tennis, whose full-game scope varies incl. OT); an INT
+# PINS the scope (football AH = betType 5 / scope 2, Full Time — like the static
+# soccer markets, independent of the event bootstrap default). feed_key is unused
+# (parse_feed_payload enumerates). Integer/quarter lines are dropped during
+# enumeration — only ±0.5 half-lines devig cleanly (no PUSH).
+@dataclass(frozen=True)
+class _WildcardFamily:
+    bet_type: int
+    index_to_label: Mapping[str, str]
+    scope: int | None = None  # None => bind to event defaultScopeId; int => pinned
+
+
+_WILDCARD_FAMILIES: dict[str, _WildcardFamily] = {
+    # points totals -> betType 2, 2-way list [over, under]; scope = event default.
+    "over_under_games": _WildcardFamily(2, _OVER_UNDER_GAMES_LABELS),
+    # basketball asian handicap (points spread) -> betType 5, 2-way; idx 0=home,
+    # 1=away (live-verified 2026-06-25: the home handicap lengthens as the line
+    # steepens); scope = event default (full game incl. OT).
+    "asian_handicap_games": _WildcardFamily(5, {"0": "handicap_team_1", "1": "handicap_team_2"}),
+    # FOOTBALL asian handicap (goal spread) -> betType 5, scope 2 PINNED (Full
+    # Time), signed-line ladder E-5-2-0-{line}-0; idx 0=home-handicap (team1),
+    # 1=away-handicap (team2). Labels are the football AH labels (_selections),
+    # distinct from basketball's handicap_team_1/2. Recon-confirmed 2026-06-29.
+    "asian_handicap": _WildcardFamily(5, {"0": "team1_handicap", "1": "team2_handicap"}, scope=2),
 }
 
 
@@ -450,11 +467,14 @@ def _resolve_feed_market(
         )
     wildcard = _WILDCARD_FAMILIES.get(market_key)
     if wildcard is not None:  # all-half-lines family, enumerated from the feed
-        if not default_scope_id:
+        # A PINNED scope (football AH) is independent of the event bootstrap; an
+        # UNPINNED family binds to the event's defaultScopeId (basketball/tennis),
+        # so a missing default => skip (never guessed), exactly as before.
+        scope = wildcard.scope if wildcard.scope is not None else default_scope_id
+        if not scope:
             return None
-        bet_type, wlabels = wildcard
         return _ResolvedFeedMarket(
-            bet_type, default_scope_id, "", wlabels, wildcard_prefix=market_key
+            wildcard.bet_type, scope, "", wildcard.index_to_label, wildcard_prefix=market_key
         )
     if market_key.startswith(_OVER_UNDER_GAMES_PREFIX):  # explicit single totals line
         if not default_scope_id:

@@ -217,6 +217,38 @@ class ValueBet:
     ev: float  # per unit stake at the effective price
 
 
+def ah_candidate_plausible(
+    bet: ValueBet,
+    *,
+    max_odds: float,
+    max_sharp_soft_ratio: float,
+) -> bool:
+    """Sentinel/implausibility guard for a 2-way Asian-handicap value candidate.
+
+    The read-only OddsPortal feed has been seen to carry SENTINEL AH prices (a
+    backtest found odds like 22.0) that fabricate ~45% phantom edges. A liquid
+    2-way AH line sits near pick'em — neither side is a deep longshot, and the
+    sharp fair never disagrees with the soft price by a large multiple. Rejects
+    a candidate when EITHER guard trips:
+
+      (a) ODDS CEILING — the RAW best price exceeds ``max_odds`` (a 22.0 cannot
+          be one side of a near-even 2-way market; it is a feed defect).
+      (b) SHARP-vs-SOFT RATIO — the sharp fair probability exceeds the soft
+          best-price implied probability by more than ``max_sharp_soft_ratio``×
+          (the implied-prob gap is implausibly large for a liquid AH line, so the
+          "edge" is a data artefact, not real value).
+
+    Pure function (no IO); informational-only platform — nothing here places a
+    bet. Applied ONLY to Asian-handicap candidates at the candidate-building
+    boundary, so non-AH markets are untouched.
+    """
+    if bet.best_odds > max_odds:
+        return False
+    if bet.implied_prob <= 0.0:
+        return False
+    return bet.sharp_fair_prob / bet.implied_prob <= max_sharp_soft_ratio
+
+
 def _norm(s: str) -> str:
     return s.strip().lower()
 

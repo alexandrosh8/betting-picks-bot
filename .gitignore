@@ -47,3 +47,6 @@ vendor/
 
 # Local Docker overrides (per-environment deploy topology; keep out of the repo)
 docker-compose.override.yml
+
+# Throwaway analysis/scratch scripts (workflow agents write here; never shipped)
+scratchpad/

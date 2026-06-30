@@ -355,7 +355,11 @@ class Settings(BaseSettings):
     # captures all premium upside and guards the noise; raise in .env to be
     # more conservative. (2026-06-18 floor sweep; see .claude/memory/decisions.md.)
     value_min_odds: float = 1.30
-    value_devig: str = "differential_margin_weighting"  # any DevigMethod value
+    # POWER is the canonical shift-family default (ADR-0006). All shift-family
+    # methods (power/additive/differential/shin/logit/probit) tie within 1 SE on
+    # held-out CLV; MULTIPLICATIVE is ~6-8 SE WORSE on 3-way 1X2 (favourite-longshot
+    # trap) and is rejected by _enforce_value_devig below.
+    value_devig: str = "power"  # any DevigMethod value EXCEPT multiplicative
     # --- ML value filter (meta-labeling SECONDARY model — OFF by default) ----
     # Scores value CANDIDATES (never match outcomes — ML winner-prediction
     # backtested negative and is forbidden as a strategy). One-shot held-out
@@ -493,6 +497,13 @@ class Settings(BaseSettings):
     # for AH); scoped to AH so non-AH markets are untouched.
     value_ah_max_odds: float = Field(default=15.0, gt=1.0)
     value_ah_max_sharp_soft_ratio: float = Field(default=3.0, gt=1.0)
+    # MONEYLINE (H2H/1X2) ODDS CEILING (research 2026-06-30): the 1X2 away/draw
+    # LONGSHOT band (raw best odds above this) is structurally CLV-NEGATIVE vs the
+    # Betfair sharp close (held-out CLV -0.087, >4 SE; favourite-longshot bias),
+    # so candidates priced above the ceiling are dropped BEFORE minting any pick.
+    # Scoped to H2H — OU/AH rarely price this high, so they are untouched. Set a
+    # large value (e.g. 1000) to effectively disable.
+    value_moneyline_max_odds: float = Field(default=5.0, gt=1.0)
 
     # --- Line-movement / steam-awareness gate (app/edge/steam.py) ------------
     # Guards the dominant soft-book FALSE POSITIVE: a phantom edge from a moving
@@ -1189,6 +1200,24 @@ class Settings(BaseSettings):
         # Per-market devig override: a bad method name must fail fast at startup,
         # never silently fall through to the global method on those markets.
         parse_market_devig(self.value_devig_per_market)
+        # GLOBAL devig must be a valid method AND must not be multiplicative —
+        # multiplicative is ~6-8 SE worse than the shift family on 3-way 1X2
+        # (favourite-longshot trap; ADR-0006, research 2026-06-30). Fail fast at
+        # startup rather than silently mis-price every market.
+        try:
+            global_devig = DevigMethod(self.value_devig)
+        except ValueError as exc:
+            raise ValueError(
+                f"VALUE_DEVIG={self.value_devig!r} is not a valid devig method "
+                f"(one of {[m.value for m in DevigMethod]})."
+            ) from exc
+        if global_devig is DevigMethod.MULTIPLICATIVE:
+            raise ValueError(
+                "VALUE_DEVIG must not be 'multiplicative' as the GLOBAL default — it "
+                "is ~6-8 SE worse than the shift-family methods on 3-way 1X2 "
+                "(favourite-longshot trap, ADR-0006). Use 'power' (canonical) or "
+                "another shift-family method."
+            )
         for lo, hi in parse_odds_bands(self.value_odds_bands):
             if hi < self.value_min_odds:
                 raise ValueError(
@@ -1313,6 +1342,7 @@ def value_policy(settings: Settings) -> ValuePolicy:
         ),
         ah_max_odds=settings.value_ah_max_odds,
         ah_max_sharp_soft_ratio=settings.value_ah_max_sharp_soft_ratio,
+        moneyline_max_odds=settings.value_moneyline_max_odds,
     )
 
 

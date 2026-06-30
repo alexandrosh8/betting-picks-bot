@@ -324,17 +324,29 @@ def test_out_of_range_pacing_knob_via_env_is_fatal(monkeypatch: pytest.MonkeyPat
 
 
 def test_value_strategy_defaults_are_the_train_chosen_optimum() -> None:
-    # v4: chosen on TRAIN seasons only over 7 devig methods with the 1.60
-    # odds floor, confirmed one-shot on holdout — docs/backtesting/
-    # value-findings.md. Must parse as a valid DevigMethod or the scheduler
-    # would crash at startup.
+    # Default devig reconciled to POWER (the canonical shift-family default,
+    # ADR-0006; research 2026-06-30 found all shift methods tied within 1 SE on
+    # held-out CLV, so the prior train-chosen 'differential' winner was noise).
+    # Must parse as a valid DevigMethod or the scheduler would crash at startup.
     from app.probabilities.devig import DevigMethod
 
     s = make_settings()
     assert s.pick_strategy == "value"
     assert s.value_min_edge == 0.03
     assert s.value_min_odds == 1.30  # validated floor (2026-06-18 held-out sweep)
-    assert DevigMethod(s.value_devig) is DevigMethod.DIFFERENTIAL_MARGIN
+    assert DevigMethod(s.value_devig) is DevigMethod.POWER
+
+
+def test_value_devig_rejects_multiplicative_global_default() -> None:
+    # multiplicative is ~6-8 SE worse than the shift family on 3-way 1X2
+    # (favourite-longshot trap, ADR-0006); it must NEVER be the global default.
+    with pytest.raises(ValidationError, match="multiplicative"):
+        make_settings(value_devig="multiplicative")
+
+
+def test_value_devig_rejects_unknown_method() -> None:
+    with pytest.raises(ValidationError, match="not a valid devig method"):
+        make_settings(value_devig="nonsense_method")
 
 
 def test_volume_tier_floor_default_is_validated_v2_threshold() -> None:
@@ -454,9 +466,11 @@ def test_premium_adjustment_knobs_default_to_current_behavior() -> None:
     assert s.value_min_books_per_market == ""
     assert s.stake_max_drawdown is None
     assert s.stake_max_drawdown_probability is None
-    # The premium-adjustment knobs stay no-op; the only non-empty default is the
-    # max_edge data-error ceiling — a default-ON safety guard, not a tunable knob.
-    assert value_policy(s) == ValuePolicy(max_edge=0.20)
+    # The premium-adjustment knobs stay no-op; the only non-empty defaults are two
+    # default-ON SAFETY GUARDS (not tunable knobs): the max_edge data-error ceiling
+    # (0.20) and the moneyline odds ceiling (5.0 — drops the CLV-negative 1X2
+    # longshot band, research 2026-06-30).
+    assert value_policy(s) == ValuePolicy(max_edge=0.20, moneyline_max_odds=5.0)
     stakes = stake_policy(s)
     assert stakes.max_drawdown is None
     assert stakes.max_drawdown_probability is None

@@ -124,6 +124,14 @@ class ValuePolicy:
     # Settings (VALUE_AH_MAX_ODDS / VALUE_AH_MAX_SHARP_SOFT_RATIO).
     ah_max_odds: float = 15.0
     ah_max_sharp_soft_ratio: float = 3.0
+    # MONEYLINE (H2H/1X2) ODDS CEILING. A H2H candidate whose RAW best price
+    # exceeds ``moneyline_max_odds`` is DROPPED at the candidate-building boundary:
+    # the 1X2 away/draw LONGSHOT band is structurally CLV-NEGATIVE vs the Betfair
+    # sharp close (held-out CLV -0.087, >4 SE; favourite-longshot bias — research
+    # 2026-06-30). math.inf = OFF (the default here); set from Settings
+    # (VALUE_MONEYLINE_MAX_ODDS, default 5.0). Scoped to H2H in the pipeline, so
+    # OU/AH/totals are untouched (they rarely price this high anyway).
+    moneyline_max_odds: float = math.inf
     # When True, the CONSENSUS FALLBACK anchor (used only when NO genuine sharp
     # book priced the full market) is a log-odds (logit) POOL across full-market
     # books instead of the median-of-prices consensus — non-extremizing and

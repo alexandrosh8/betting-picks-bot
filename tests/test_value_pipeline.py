@@ -162,6 +162,56 @@ async def test_major_league_gate_keeps_premium_in_major_league() -> None:
     assert LAST_POLL["soccer"]["picks"] == 1
 
 
+def longshot_market_snapshots(age_s: float = 30.0) -> list[OddsSnapshotIn]:
+    # A 3-way whose ONLY +EV candidate is the AWAY LONGSHOT: Pinnacle prices Away
+    # at 7.0 (sharp; power-devig fair ~0.133), SoftBook is generous at 10.0 (raw
+    # odds above the 5.0 ceiling; probability-space edge ~+0.033). Home/Draw carry
+    # no edge (the soft implied prob exceeds the sharp fair).
+    return [
+        snap("Pinnacle", "Home FC", 1.50, age_s),
+        snap("Pinnacle", "Draw", 4.50, age_s),
+        snap("Pinnacle", "Away FC", 7.00, age_s),
+        snap("SoftBook", "Home FC", 1.48, age_s),
+        snap("SoftBook", "Draw", 4.30, age_s),
+        snap("SoftBook", "Away FC", 10.00, age_s),
+    ]
+
+
+async def test_moneyline_ceiling_off_mints_longshot_pick() -> None:
+    # Baseline: with the ceiling OFF (bare ValuePolicy => math.inf) the only +EV
+    # candidate is the AWAY longshot at raw odds 8.0 — it mints one premium pick.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(longshot_market_snapshots()),
+        league="Premier League",
+        value_policy=ValuePolicy(),  # moneyline ceiling OFF (math.inf)
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert len(sink.sent) == 1
+    assert LAST_POLL["soccer"]["picks"] == 1
+
+
+async def test_moneyline_ceiling_drops_longshot_h2h_candidate() -> None:
+    # The 1X2 longshot band is structurally CLV-NEGATIVE vs the sharp close
+    # (research 2026-06-30). With the ceiling at 5.0 the same Away candidate (raw
+    # odds 8.0 > 5.0) is dropped BEFORE minting any pick — no alert, no pick.
+    from app.pipeline import LAST_POLL
+
+    sink = RecordingSink()
+    deps = make_deps_league(
+        sink,
+        FakeLoader(longshot_market_snapshots()),
+        league="Premier League",
+        value_policy=ValuePolicy(moneyline_max_odds=5.0),
+    )
+    await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # longshot dropped -> never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0
+
+
 async def test_experimental_sport_forces_premium_pick_to_volume() -> None:
     # An experimental (unvalidated) sport mints picks but every one is FORCED to
     # the volume/shadow tier: persisted + CLV-tracked, never alerted, no exposure

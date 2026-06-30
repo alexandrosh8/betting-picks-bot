@@ -257,6 +257,25 @@ def test_single_observation_clv_se_is_none_not_fake_zero() -> None:
     assert s.clv_pinn_se is None
 
 
+def test_roi_bootstrap_ci_brackets_point_and_is_opt_in_deterministic() -> None:
+    # ROI must carry a bootstrap CI on the FINAL report (no bare "average ROI"),
+    # but only when requested — the hot train-sweep cells stay cheap.
+    vb = sys.modules["value_backtest"]
+    bets = [
+        vb.VBet(won=(i % 2 == 0), odds=2.0, edge=0.02, clv_pinn=0.01, clv_max=0.01)
+        for i in range(40)
+    ]
+    s1 = vb.Stats.from_bets(bets, with_roi_ci=True)
+    s2 = vb.Stats.from_bets(bets, with_roi_ci=True)
+    assert s1.roi_ci is not None
+    lo, hi = s1.roi_ci
+    assert lo <= s1.roi <= hi  # the CI brackets the point estimate
+    assert s1.roi_ci == s2.roi_ci  # deterministic (fixed seed)
+    assert vb.Stats.from_bets(bets).roi_ci is None  # opt-in: default off in the sweep
+    one = [vb.VBet(won=True, odds=2.0, edge=0.02, clv_pinn=0.01, clv_max=0.01)]
+    assert vb.Stats.from_bets(one, with_roi_ci=True).roi_ci is None  # n<2 -> no CI
+
+
 def test_bootstrap_is_deterministic_and_zero_for_identical_sets() -> None:
     bets = _frame(
         [

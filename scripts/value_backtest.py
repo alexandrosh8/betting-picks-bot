@@ -30,6 +30,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
+import numpy as np
 
 from app.backtesting.clv import clv_log
 from app.ingestion.beatthebookie_series import load_series_any, to_fd_row
@@ -64,6 +65,33 @@ class VBet:
     clv_max: float | None  # vs devig(Max-of-books close) — stricter
 
 
+def _roi_bootstrap_ci(
+    pnls: list[float], *, n_paths: int = 2000, block: int = 10, seed: int = 20260630
+) -> tuple[float, float] | None:
+    """Circular-block bootstrap (1-alpha=95%) percentile CI for mean per-bet ROI.
+
+    A bare ROI point estimate is a forbidden "average ROI without a CI": the
+    block bootstrap (blocks of consecutive bets, wrapping) respects the
+    chronological dependence the same way scripts/ml/evaluate_staking does, so the
+    CI is honest about small-sample noise. Deterministic (fixed seed). None for
+    n<2 (no spread to resample). Per-path loop keeps memory flat on the 46k pool."""
+    n = len(pnls)
+    if n < 2:
+        return None
+    arr = np.asarray(pnls, dtype=float)
+    rng = np.random.default_rng(seed)
+    blk = max(1, min(block, n))
+    n_blocks = -(-n // blk)
+    offsets = np.arange(blk)
+    rois = np.empty(n_paths, dtype=float)
+    for p in range(n_paths):
+        starts = rng.integers(0, n, size=n_blocks)
+        idx = ((starts[:, None] + offsets[None, :]) % n).reshape(-1)[:n]
+        rois[p] = float(arr[idx].mean())
+    lo, hi = np.percentile(rois, [2.5, 97.5])
+    return round(float(lo), 6), round(float(hi), 6)
+
+
 @dataclass
 class Stats:
     n: int
@@ -74,13 +102,18 @@ class Stats:
     clv_max: float | None
     clv_max_se: float | None
     beat_pinn: float | None
+    # 95% circular-block bootstrap CI on mean ROI — computed ONLY for the final
+    # reported Stats (with_roi_ci=True), never in the hot train-sweep cells. None
+    # when not requested or n<2.
+    roi_ci: tuple[float, float] | None = None
 
     @classmethod
-    def from_bets(cls, bets: list[VBet]) -> "Stats":
+    def from_bets(cls, bets: list[VBet], *, with_roi_ci: bool = False) -> "Stats":
         n = len(bets)
         if n == 0:
             return cls(0, 0.0, 0.0, None, None, None, None, None)
-        profit = sum((b.odds - 1.0) if b.won else -1.0 for b in bets)
+        pnls = [(b.odds - 1.0) if b.won else -1.0 for b in bets]
+        profit = sum(pnls)
         cp = [b.clv_pinn for b in bets if b.clv_pinn is not None]
         cm = [b.clv_max for b in bets if b.clv_max is not None]
 
@@ -111,6 +144,7 @@ class Stats:
             clv_max=mm,
             clv_max_se=sm,
             beat_pinn=(sum(1 for c in cp if c > 0) / len(cp)) if cp else None,
+            roi_ci=_roi_bootstrap_ci(pnls) if with_roi_ci else None,
         )
 
 
@@ -299,9 +333,14 @@ def _fmt(stats: Stats, label: str, baseline: Stats | None = None) -> str:
     inc = ""
     if baseline and baseline.clv_pinn is not None and stats.clv_pinn is not None:
         inc = f" | incCLV {stats.clv_pinn - baseline.clv_pinn:+.4f}"
+    roi_ci = (
+        f" [{stats.roi_ci[0] * 100:+.1f}..{stats.roi_ci[1] * 100:+.1f}]"
+        if stats.roi_ci is not None
+        else ""
+    )
     return (
         f"{label:>9} | n={stats.n:5d} | hit {stats.hit * 100:4.1f}% | "
-        f"ROI {stats.roi * 100:+6.2f}% | CLVpinn {cp} | CLVmax {cm}{inc}"
+        f"ROI {stats.roi * 100:+6.2f}%{roi_ci} | CLVpinn {cp} | CLVmax {cm}{inc}"
     )
 
 
@@ -354,7 +393,8 @@ def _sweep_and_eval(
         bets_for(test_rows, 0.0, best_dm, markets, min_odds, max_odds, markets_map)
     )
     test = Stats.from_bets(
-        bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds, markets_map)
+        bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds, markets_map),
+        with_roi_ci=True,  # final holdout: report the bootstrap ROI CI
     )
     print(_fmt(baseline_test, "0.000"))
     print(_fmt(test, f"{best_thr:.3f}", baseline_test))
@@ -1105,7 +1145,9 @@ async def main() -> None:
 
     print("\nHELD-OUT TEST evaluation (single shot, never tuned on):")
     baseline_test = Stats.from_bets(bets_for(test_rows, 0.0, best_dm, markets, min_odds, max_odds))
-    test = Stats.from_bets(bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds))
+    test = Stats.from_bets(
+        bets_for(test_rows, best_thr, best_dm, markets, min_odds, max_odds), with_roi_ci=True
+    )
     print(_fmt(baseline_test, "0.000"))
     print(_fmt(test, f"{best_thr:.3f}", baseline_test))
     for market in markets:

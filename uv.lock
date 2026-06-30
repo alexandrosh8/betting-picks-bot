@@ -194,6 +194,25 @@ wheels = [
 ]
 
 [[package]]
+name = "betfair-data"
+version = "0.3.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2e/a9/7bb6178b095fce628ab29075825ad16e3e1fa315357d5149931748fb742a/betfair_data-0.3.4.tar.gz", hash = "sha256:5afd42ee5616b41dc618de3d6fc294ec015e8bd188cde19f0fdab7d84707d04b", size = 6552571, upload-time = "2022-04-08T12:27:37.431Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/41/4ff22d6a7a9a19f85bf7f6ac2d789f7342b21b83b0fbcbba35175b79083f/betfair_data-0.3.4-cp37-abi3-macosx_10_7_x86_64.whl", hash = "sha256:767d259fb38ec72025ddb3a076c85e7cc38a1f0be9529c98face616879b7778c", size = 1188426, upload-time = "2022-04-08T12:27:16.097Z" },
+    { url = "https://files.pythonhosted.org/packages/69/ef/36d2078bb254bc6e4696e8d5298c9c0bddf1f6c3eaf0c47099d2d914f113/betfair_data-0.3.4-cp37-abi3-macosx_10_9_x86_64.macosx_11_0_arm64.macosx_10_9_universal2.whl", hash = "sha256:614f90f5dff0a8925f5564c49268340cc5263f76a64e3d375a8bad506ae06dd1", size = 2241498, upload-time = "2022-04-08T12:27:18.116Z" },
+    { url = "https://files.pythonhosted.org/packages/44/a2/7a2ac682834a8cb9b1a0d8cad89c27b60e1c034c93be30084fceba4fc161/betfair_data-0.3.4-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4ff0fdbcfaa53897b20e177f5dafce31c89d40f70cd9f41620b542eb55085a26", size = 1432141, upload-time = "2022-04-08T12:27:19.918Z" },
+    { url = "https://files.pythonhosted.org/packages/78/ed/be0247682c0ea2ee07e8f849632f092b4d86086ef32b8f228fd707953be8/betfair_data-0.3.4-cp37-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:5f026572fb5f449f9dd13321e747d28d6d562ff17983cecdef20871277a058d6", size = 1413352, upload-time = "2022-04-08T12:27:21.693Z" },
+    { url = "https://files.pythonhosted.org/packages/31/71/377cbd792ca6d99d195ffeab9acc0dbff32df54e5c0df49d4accd6ff3d1e/betfair_data-0.3.4-cp37-abi3-manylinux_2_17_ppc64.manylinux2014_ppc64.whl", hash = "sha256:5664584d6e78fe804283562824abc6309fbf8f528a9e5ca260736677cdd22bf2", size = 1525308, upload-time = "2022-04-08T12:27:23.672Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/70/71f5b68a93ac6eacc4db4975e582a0077fecdde973e848dd98633e107289/betfair_data-0.3.4-cp37-abi3-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:012d228d3e2ca8c63520913f51d90fe701f0e81f04f3d8fce6968197d1f9f970", size = 1511744, upload-time = "2022-04-08T12:27:25.705Z" },
+    { url = "https://files.pythonhosted.org/packages/96/ac/9e399d71428c4a7de789aa65aa8bbb8e79a38b0ecda6615fd003bc77331f/betfair_data-0.3.4-cp37-abi3-manylinux_2_17_s390x.manylinux2014_s390x.whl", hash = "sha256:a6d5feee62ae91a446395e9d9d7eaa88fafc13e28ab3f52fdc38f7908292c0a0", size = 1936797, upload-time = "2022-04-08T12:27:27.815Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/24/192628614dab2412e6c326b985b8dac546340f122c95dbb09e0e695c004a/betfair_data-0.3.4-cp37-abi3-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:6bb6afdcc7f20fc3d10de3c1a126118e0b5224e1fcbf39dfe43ff295902df43c", size = 1490615, upload-time = "2022-04-08T12:27:29.692Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/5e/71e6ea64bc103c9d069ac28d81f89d2bddb96a6228b18bd3d1f057499242/betfair_data-0.3.4-cp37-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.whl", hash = "sha256:658cd657280d147f415845e7997765638194115909b47dacafd3e8250a9e7a94", size = 1537051, upload-time = "2022-04-08T12:27:31.276Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/3d/b53ed4f40d9df8727fa81d01edcc558925a840e96098d62c56577e858445/betfair_data-0.3.4-cp37-abi3-win32.whl", hash = "sha256:6139cb0ca0b472379162f993185405a700d52c86b0ad0c1ad5bfbb8da5dfe2a3", size = 827743, upload-time = "2022-04-08T12:27:32.646Z" },
+    { url = "https://files.pythonhosted.org/packages/76/58/87cfd8162e68e89876c189c60f7949c7eb7199fc91b31b4896718647f545/betfair_data-0.3.4-cp37-abi3-win_amd64.whl", hash = "sha256:c9889065f410ce378fccce96cda3835ba73feeda4ae0bf48b9b5411892299641", size = 909249, upload-time = "2022-04-08T12:27:34.619Z" },
+]
+
+[[package]]
 name = "betting-ai"
 version = "0.1.0"
 source = { editable = "." }
@@ -223,6 +242,9 @@ backfill = [
 backtest = [
     { name = "openpyxl" },
     { name = "pandas" },
+]
+betfair = [
+    { name = "betfair-data" },
 ]
 football = [
     { name = "penaltyblog" },
@@ -262,6 +284,7 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.10,<4" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "beautifulsoup4", specifier = ">=4.12" },
+    { name = "betfair-data", marker = "extra == 'betfair'", specifier = "==0.3.4" },
     { name = "cryptography", specifier = ">=49.0.0" },
     { name = "curl-cffi", specifier = ">=0.15.0" },
     { name = "fastapi", specifier = ">=0.111" },
@@ -288,7 +311,7 @@ requires-dist = [
     { name = "xgboost", marker = "extra == 'ml'", specifier = ">=3.2" },
     { name = "xgboost", marker = "extra == 'models'", specifier = ">=2.0" },
 ]
-provides-extras = ["football", "nba", "nfl", "models", "backfill", "ml", "backtest"]
+provides-extras = ["football", "nba", "nfl", "models", "backfill", "betfair", "ml", "backtest"]
 
 [package.metadata.requires-dev]
 dev = [

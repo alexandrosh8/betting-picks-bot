@@ -761,7 +761,8 @@ async def test_live_evidence_rows_reduce_settled_picks_to_floats(session) -> Non
             beat_close=True,
             value_filter_score=Decimal("0.81"),
             closing_anchor_type="pinnacle",
-            closing_odds=Decimal("2.1000"),  # snapshot-close marker => trusted
+            closing_odds=Decimal("2.1000"),  # snapshot-close marker
+            has_snapshot_close=True,  # the DEDICATED trusted-close column (headline parity)
         )
     )
     await session.execute(

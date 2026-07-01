@@ -1294,6 +1294,16 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
     if close_fb_attr is not None:
         close_fb_idx = len(columns)
         columns.append(close_fb_attr)  # P2-2 close devig-fallback provenance
+    # has_snapshot_close: prefer the DEDICATED column (mirrors the headline path at
+    # 1137/1199); fall back to closing_odds-non-null only pre-migration (dead today).
+    snap_close_attr = getattr(Pick, "has_snapshot_close", None)
+    snap_close_idx = None
+    if snap_close_attr is not None:
+        snap_close_idx = len(columns)
+        columns.append(snap_close_attr)
+    # decimal_odds: the fabricated-CLV guard input (mirror of _clv_row_is_fabricated).
+    decimal_odds_idx = len(columns)
+    columns.append(Pick.decimal_odds)
     rows = (
         await session.execute(
             select(*columns)
@@ -1315,7 +1325,12 @@ async def live_evidence_rows(session: AsyncSession) -> list["SettledPickRow"]:
             closing_anchor_type=row[close_anchor_idx] if close_anchor_idx is not None else None,
             # closing_odds NON-NULL marks a genuine snapshot close (not a
             # poll-time revalidation fallback) — the SOURCE half of "trusted".
-            has_snapshot_close=row[6] is not None,
+            has_snapshot_close=(
+                bool(row[snap_close_idx]) if snap_close_idx is not None else (row[6] is not None)
+            ),
+            decimal_odds=float(row[decimal_odds_idx])
+            if row[decimal_odds_idx] is not None
+            else None,
             # INDEPENDENCE half (P0-1/P0-3): False = circular self-priced close
             # (excluded from sharp subset); None = unknown (pre-column, NOT
             # treated as circular).
@@ -1897,6 +1912,16 @@ async def resolve_pinnacle_close_snaps(
             continue  # a selection we cannot confidently map -> drop (safe)
         out.append(
             snap.model_copy(update={"event_id": pick_external_ref, "selection": mapped_selection})
+        )
+    if snaps and not out:
+        # MATCHED the fixture but EVERY close dropped in the re-key — the anomalous
+        # case the silent per-selection drop hides (a re-key regression would be
+        # invisible). Counts + ref only (no odds/names/URLs). Legit-empty is rare.
+        logger.info(
+            "pinnacle close: matched %s (%s) but re-key emitted 0 of %d snaps",
+            pick_external_ref,
+            pinnacle_sport_key,
+            len(snaps),
         )
     return out
 

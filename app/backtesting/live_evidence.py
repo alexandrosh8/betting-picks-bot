@@ -60,6 +60,12 @@ _SHARP_CLOSE_ANCHORS = ("pinnacle", "sharp")
 #: archived-line resolution.
 CLV_TAUTOLOGY_EPS = 1e-3
 
+#: Physically-impossible-CLV (CLV-1) thresholds — mirror the headline guard
+#: (app.storage.repositories._clv_row_is_fabricated / CLV_IMPLAUSIBLE_*), so a
+#: fabricated close cannot leak into the live_evidence panel or the trusted subset.
+CLV_IMPLAUSIBLE_CLOSE_EDGE = 0.20
+CLV_IMPLAUSIBLE_LOG = 0.5
+
 
 @dataclass(frozen=True)
 class SettledPickRow:
@@ -98,6 +104,8 @@ class SettledPickRow:
     # treated as tautological (conservative, exactly like the persisted guard).
     closing_fair_probability: float | None = None
     model_probability: float | None = None  # the pick-time fair (1/fair_odds anchor)
+    # Fill (bet) odds — input to the fabricated-CLV (CLV-1) guard below.
+    decimal_odds: float | None = None
     # P2-2 devig-fallback provenance: did the configured devig method fall back to
     # multiplicative at MINT / at CLOSE? When they DISAGREE (exactly one fell back)
     # the mint and close fairs used different effective methods, so the CLV is a
@@ -135,6 +143,26 @@ class SettledPickRow:
         return abs(self.closing_fair_probability - self.model_probability) <= CLV_TAUTOLOGY_EPS
 
     @property
+    def is_fabricated(self) -> bool:
+        """CLV is physically impossible (CLV-1 pollution) — mirrors the headline
+        _clv_row_is_fabricated. Primary: close-implied edge (closing_fair - 1/odds)
+        exceeds CLV_IMPLAUSIBLE_CLOSE_EDGE; fallback (fair/odds absent): |clv_log|
+        exceeds CLV_IMPLAUSIBLE_LOG. No clv_log => nothing to judge (not fabricated)."""
+        if self.clv_log is None:
+            return False
+        if self.decimal_odds is not None and self.closing_fair_probability is not None:
+            try:
+                implied = 1.0 / float(self.decimal_odds)
+            except (ZeroDivisionError, ValueError, TypeError):
+                implied = None
+            if (
+                implied is not None
+                and (self.closing_fair_probability - implied) > CLV_IMPLAUSIBLE_CLOSE_EDGE
+            ):
+                return True
+        return abs(self.clv_log) > CLV_IMPLAUSIBLE_LOG
+
+    @property
     def sharp_close(self) -> bool:
         """A TRUSTED close for honest CLV: snapshot-sourced (not a poll-time
         revalidation fallback), anchored by a named sharp book (not a soft-book
@@ -154,6 +182,8 @@ class SettledPickRow:
             and not self.is_tautological_close
             # P2-2: an asymmetric mint/close devig fallback is a method artifact.
             and not self.devig_fallback_asymmetric
+            # CLV-1: a physically-impossible (fabricated) close is never trusted.
+            and not self.is_fabricated
         )
 
 
@@ -174,6 +204,7 @@ def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]
         if r.clv_log is not None
         and r.close_independent_of_fill is not False
         and not r.is_tautological_close
+        and not r.is_fabricated
     ]
     pnl_rows = [r for r in rows if r.pnl is not None]
     beat_rows = [
@@ -182,6 +213,7 @@ def _stratum_stats(rows: Sequence[SettledPickRow], min_n: int) -> dict[str, Any]
         if r.beat_close is not None
         and r.close_independent_of_fill is not False
         and not r.is_tautological_close
+        and not r.is_fabricated
     ]
 
     mean_clv: float | None = None

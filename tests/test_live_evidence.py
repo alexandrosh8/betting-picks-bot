@@ -33,8 +33,10 @@ def row(
     model_prob: float | None = None,
     mint_fell_back: bool | None = None,
     close_fell_back: bool | None = None,
+    decimal_odds: float | None = None,
 ) -> SettledPickRow:
     return SettledPickRow(
+        decimal_odds=decimal_odds,
         tier=tier,
         value_filter_score=score,
         clv_log=clv,
@@ -67,6 +69,22 @@ def test_sharp_close_stratum_counts_only_genuine_sharp_snapshot_closes() -> None
     sc = live_evidence_report(rows, ml_threshold=None, min_n=1)["sharp_close"]
     assert sc["n"] == 2  # only the two trusted sharp snapshot closes
     assert sc["stake_weighted_clv_log"] == pytest.approx((10 * 0.05 + 10 * 0.03) / 20)
+
+
+def test_fabricated_clv_close_is_excluded_from_panel_and_sharp_subset() -> None:
+    # CLV-1: a physically-impossible close (close-implied edge closing_fair - 1/odds
+    # exceeds 0.20) must not pollute the CLV panel or the trusted sharp subset —
+    # mirrors the headline _clv_row_is_fabricated guard (deep-review #4).
+    genuine = row(
+        clv=0.05, closing_anchor="pinnacle", has_snapshot=True, closing_fair=0.55, decimal_odds=2.0
+    )  # close-implied edge 0.05 — plausible
+    fabricated = row(
+        clv=0.05, closing_anchor="pinnacle", has_snapshot=True, closing_fair=0.90, decimal_odds=5.0
+    )  # close-implied edge 0.70 — physically impossible
+    assert genuine.is_fabricated is False
+    assert fabricated.is_fabricated is True
+    sc = live_evidence_report([genuine, fabricated], ml_threshold=None, min_n=1)["sharp_close"]
+    assert sc["n"] == 1  # the fabricated close is excluded; only the genuine one is trusted
     assert sc["sufficient"] is True
 
 

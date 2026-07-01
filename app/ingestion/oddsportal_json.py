@@ -513,6 +513,9 @@ def _outcome_at(outcomes: Any, index: str) -> Any:
     return None
 
 
+_GARBLE_TIME_WARNED = False  # process-lifetime one-shot for the garbled-time warning
+
+
 def _feed_captured_at(payload: Mapping[str, Any], now: datetime) -> datetime:
     """The feed's provider observation time (``d.time-base``, epoch seconds, UTC)
     as the snapshot `captured_at` — the JSON analog of the Playwright path's
@@ -524,7 +527,19 @@ def _feed_captured_at(payload: Mapping[str, Any], now: datetime) -> datetime:
         return now
     try:
         return datetime.fromtimestamp(float(raw), tz=UTC)
-    except (ValueError, OverflowError, OSError, TypeError):
+    except (ValueError, OverflowError, OSError, TypeError) as exc:
+        # GARBLED time-base (not the documented raw-is-None omission): substituting
+        # `now` lets a stale row read as fresh in the freshness gates, so surface it
+        # — once per process to avoid flooding the hot scrape path on a systemic
+        # garble. captured_at value + every gating threshold are unchanged.
+        global _GARBLE_TIME_WARNED
+        if not _GARBLE_TIME_WARNED:
+            _GARBLE_TIME_WARNED = True
+            logger.warning(
+                "oddsportal feed time-base garbled (%s: %s); using now as captured_at",
+                type(exc).__name__,
+                repr(raw)[:40],
+            )
         return now
 
 

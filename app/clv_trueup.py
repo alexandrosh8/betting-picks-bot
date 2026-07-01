@@ -1112,6 +1112,8 @@ def build_sharp_anchor_loader(
                 return []
             return rows
 
+        anchored = 0
+        eligible = 0
         async with session_factory() as session:
             for snap in snapshots:
                 ref = snap.event_id
@@ -1121,6 +1123,7 @@ def build_sharp_anchor_loader(
                 teams = directory.lookup(ref)
                 if teams is None or teams.starts_at is None:
                     continue  # need a kickoff for the cutoff + the pinnacle match
+                eligible += 1  # directory-resolvable event: a sharp anchor is possible
                 event_snaps: list[OddsSnapshotIn] = []
                 if use_betfair:
                     event_snaps.extend(
@@ -1143,7 +1146,17 @@ def build_sharp_anchor_loader(
                     )
                 if not event_snaps:
                     continue
+                anchored += 1
                 out.extend(event_snaps)
+        # Observability only (no acceptance change): a FULL miss across resolvable
+        # events signals a systemic sharp-capture/freshness outage; a partial miss
+        # is the normal capture ceiling and stays at debug to avoid per-cycle noise.
+        if eligible and anchored == 0:
+            logger.warning(
+                "sharp-anchor: 0/%d resolvable events anchored (capture outage?)", eligible
+            )
+        else:
+            logger.debug("sharp-anchor: %d/%d resolvable events anchored", anchored, eligible)
         return out
 
     return loader

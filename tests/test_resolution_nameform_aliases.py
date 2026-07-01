@@ -56,6 +56,19 @@ _AUTO_ADDED: list[tuple[str, str]] = [
     ("Kimberley", "Kimberley Mar del Plata"),
     ("Sunnersta", "Sunnersta AIF"),
     ("Grobina", "Grobinas SC/LFS"),
+    # 2026-07-01 Pinnacle-anchoring push (live-slate near-misses; unambiguous
+    # single-club name-forms only — city/full-name suffix, one club worldwide).
+    ("Xamax", "Neuchatel Xamax"),
+    ("Flora", "Flora Tallinn"),
+    ("Jihlava", "Vysocina Jihlava"),
+    ("Helmond", "Helmond Sport"),
+    ("Macva", "Macva Sabac"),
+    ("Sutjeska", "Sutjeska Niksic"),
+    ("Haukar", "Haukar Hafnarfjordur"),
+    ("Atmosfera", "Atmosfera Mazeikiai"),
+    ("Asane", "Asane Fotball"),
+    ("Csikszereda", "Csikszereda M. Ciuc"),
+    ("Limache", "Deportes Limache"),
 ]
 
 # Deliberately NOT auto-added (ambiguous / wrong-game-unsafe) — these MUST stay
@@ -69,6 +82,14 @@ _NOT_ADDED: list[tuple[str, str]] = [
     ("Bayswater", "Bayswater City"),  # bare + disambiguating "City"
     ("Redlands", "Redlands United"),  # bare + disambiguating "United"
     ("Playford Patriots", "Playford City"),  # "City" — possibly distinct clubs
+    # 2026-07-01 push: deliberately EXCLUDED near-misses (distinct clubs / bare
+    # ambiguous) — must stay distinct even though they shared a kickoff + a token.
+    ("FC Kharkiv", "Metalist Kharkiv"),  # distinct Kharkiv clubs
+    ("Zaglebie", "Zaglebie Lubin"),  # bare "Zaglebie" — Lubin vs Sosnowiec
+    ("Gremio Juventus", "Juventus SC"),  # distinct clubs sharing "Juventus"
+    ("Brevard SC", "Brevard Fire"),  # distinct Brevard clubs
+    ("Zielona Gora", "Lechia Zielona Gora"),  # bare city name — ambiguous
+    ("Galanta", "Slovan Galanta"),  # bare "Galanta" — disambiguating prefix
 ]
 
 

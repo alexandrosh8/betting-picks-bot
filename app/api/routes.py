@@ -267,7 +267,9 @@ _PWA_MANIFEST = (
 _SERVICE_WORKER = (
     "self.addEventListener('install',function(){self.skipWaiting();});"
     "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});"
-    "self.addEventListener('fetch',function(){});"  # pass-through: caches nothing
+    # No 'fetch' handler: the app caches nothing, and a NO-OP fetch handler is
+    # flagged by Chrome as needless navigation overhead ("recognized as no-op").
+    # Modern browsers keep the PWA installable from the manifest + this SW alone.
 )
 
 

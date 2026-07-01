@@ -228,11 +228,12 @@ def test_parse_market_catalogue_resolves_runners_and_utc_start() -> None:
     assert any(r.selection_id == 58805 for r in market.runners)
 
 
-def test_parse_market_book_best_back_is_highest_price() -> None:
+def test_parse_market_book_best_back_is_highest_price_with_size() -> None:
     backs = parse_market_book_backs(BOOK_RESULT)
-    assert backs["1.234567"][111] == 2.5  # max(2.5, 2.48)
-    assert backs["1.234567"][222] == 3.1
-    assert backs["1.234567"][58805] == 3.6
+    # value is now (best_back_price, size@best) — size is the API liquidity proxy.
+    assert backs["1.234567"][111] == (2.5, 100.0)  # max(2.5@100, 2.48@50) -> 2.5, size 100
+    assert backs["1.234567"][222] == (3.1, 80.0)
+    assert backs["1.234567"][58805] == (3.6, 40.0)
 
 
 def test_join_match_odds_maps_home_away_draw() -> None:
@@ -347,6 +348,21 @@ async def test_shadow_matched_builds_anchor_under_canonical_ref() -> None:
     assert len(report.snapshots) == 3
     assert {s.event_id for s in report.snapshots} == {"evt-canonical-1"}
     assert {s.selection for s in report.snapshots} == {"Alpha FC", "Beta United", "Draw"}
+
+
+async def test_shadow_snapshots_carry_best_back_liquidity() -> None:
+    # The API path persists the best-back SIZE as liquidity, so a PROMOTED row is
+    # GATED Betfair (not an ungated NULL-liquidity row like the main scrape). The
+    # fixture home best-back is 2.5@100, away 3.1@80, draw 3.6@40.
+    candidates = [
+        EventCandidate(ref="evt-canonical-1", home="Alpha FC", away="Beta United", kickoff=KICKOFF)
+    ]
+    report = await _shadow_capture(_full_odds_mock(), candidates).capture_once()
+    by_sel = {s.selection: s for s in report.snapshots}
+    assert by_sel["Alpha FC"].decimal_odds == pytest.approx(2.5)
+    assert by_sel["Alpha FC"].liquidity == pytest.approx(100.0)  # size @ best back
+    assert by_sel["Beta United"].liquidity == pytest.approx(80.0)
+    assert by_sel["Draw"].liquidity == pytest.approx(40.0)
 
 
 async def test_promote_rows_use_canonical_selection_vocabulary_not_betfair_names() -> None:

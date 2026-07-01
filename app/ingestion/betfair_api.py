@@ -274,22 +274,33 @@ def _parse_market_start(raw: str) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
-def _best_back(available_to_back: Any) -> float | None:
-    """Best (highest) BACK price from a runner's ``ex.availableToBack`` ladder, or
-    None when the ladder is empty/garbled or only holds non-prices (<=1.0)."""
+def _best_back_level(available_to_back: Any) -> tuple[float, float] | None:
+    """(best BACK price, available SIZE (£) at that price) from a runner's
+    ``ex.availableToBack`` ladder, or None when empty/garbled. The size is the
+    LIQUIDITY proxy for the API path (the dedicated OddsPortal capture uses matched
+    volume; this uses backable depth at the best price). An absent/garbled size
+    reads as 0.0 (treated as no liquidity by any downstream floor)."""
     if not isinstance(available_to_back, Sequence):
         return None
-    best: float | None = None
+    best: tuple[float, float] | None = None
     for level in available_to_back:
         if not isinstance(level, Mapping):
             continue
         price = level.get("price")
         if not isinstance(price, int | float) or price <= 1.0:
             continue
-        value = float(price)
-        if best is None or value > best:
-            best = value
+        size = level.get("size")
+        size_f = float(size) if isinstance(size, int | float) and size >= 0 else 0.0
+        if best is None or float(price) > best[0]:
+            best = (float(price), size_f)
     return best
+
+
+def _best_back(available_to_back: Any) -> float | None:
+    """Best (highest) BACK price from a runner's ``ex.availableToBack`` ladder, or
+    None when the ladder is empty/garbled or only holds non-prices (<=1.0)."""
+    level = _best_back_level(available_to_back)
+    return level[0] if level is not None else None
 
 
 @dataclass(frozen=True)
@@ -328,6 +339,11 @@ class BetfairMatchOdds:
     home_back: float | None
     away_back: float | None
     draw_back: float | None
+    # Available BACK size (£) at the best price per outcome — the API liquidity
+    # proxy persisted as OddsSnapshotIn.liquidity when promoted. None = no price.
+    home_back_size: float | None = None
+    away_back_size: float | None = None
+    draw_back_size: float | None = None
 
 
 def parse_market_catalogue(payload: Sequence[Mapping[str, Any]]) -> list[BetfairMarketCatalogue]:
@@ -373,18 +389,20 @@ def parse_market_catalogue(payload: Sequence[Mapping[str, Any]]) -> list[Betfair
     return out
 
 
-def parse_market_book_backs(payload: Sequence[Mapping[str, Any]]) -> dict[str, dict[int, float]]:
+def parse_market_book_backs(
+    payload: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[int, tuple[float, float]]]:
     """Pure parser for a ``listMarketBook`` result array (EX_BEST_OFFERS) ->
-    ``{market_id: {selection_id: best_back_price}}``. Runners with no backable
-    price are omitted (never invented)."""
-    books: dict[str, dict[int, float]] = {}
+    ``{market_id: {selection_id: (best_back_price, size@best)}}``. Runners with no
+    backable price are omitted (never invented)."""
+    books: dict[str, dict[int, tuple[float, float]]] = {}
     for market in payload:
         if not isinstance(market, Mapping):
             continue
         market_id = str(market.get("marketId", "")).strip()
         if not market_id:
             continue
-        per_runner: dict[int, float] = {}
+        per_runner: dict[int, tuple[float, float]] = {}
         for runner in market.get("runners") or []:
             if not isinstance(runner, Mapping):
                 continue
@@ -393,9 +411,9 @@ def parse_market_book_backs(payload: Sequence[Mapping[str, Any]]) -> dict[str, d
                 continue
             ex_raw = runner.get("ex")
             ex: Mapping[str, Any] = ex_raw if isinstance(ex_raw, Mapping) else {}
-            best = _best_back(ex.get("availableToBack"))
-            if best is not None:
-                per_runner[sel] = best
+            level = _best_back_level(ex.get("availableToBack"))
+            if level is not None:
+                per_runner[sel] = level  # (best_back_price, size)
         books[market_id] = per_runner
     return books
 
@@ -424,7 +442,7 @@ def _roles(
 
 def join_match_odds(
     catalogue: Sequence[BetfairMarketCatalogue],
-    backs: Mapping[str, Mapping[int, float]],
+    backs: Mapping[str, Mapping[int, tuple[float, float]]],
 ) -> list[BetfairMatchOdds]:
     """Join catalogue runner identities with their best BACK prices into
     ``BetfairMatchOdds``. A market with no resolvable home/away runner is skipped
@@ -435,6 +453,9 @@ def join_match_odds(
         if home is None or away is None:
             continue
         per_runner = backs.get(market.market_id, {})
+        home_ps = per_runner.get(home.selection_id)
+        away_ps = per_runner.get(away.selection_id)
+        draw_ps = per_runner.get(draw.selection_id) if draw is not None else None
         out.append(
             BetfairMatchOdds(
                 market_id=market.market_id,
@@ -443,9 +464,12 @@ def join_match_odds(
                 kickoff=market.market_start_time,
                 home=home.name,
                 away=away.name,
-                home_back=per_runner.get(home.selection_id),
-                away_back=per_runner.get(away.selection_id),
-                draw_back=per_runner.get(draw.selection_id) if draw is not None else None,
+                home_back=home_ps[0] if home_ps is not None else None,
+                away_back=away_ps[0] if away_ps is not None else None,
+                draw_back=draw_ps[0] if draw_ps is not None else None,
+                home_back_size=home_ps[1] if home_ps is not None else None,
+                away_back_size=away_ps[1] if away_ps is not None else None,
+                draw_back_size=draw_ps[1] if draw_ps is not None else None,
             )
         )
     return out
@@ -642,14 +666,14 @@ class BetfairApiClient:
 
     async def list_market_book_backs(
         self, market_ids: Sequence[str]
-    ) -> dict[str, dict[int, float]]:
+    ) -> dict[str, dict[int, tuple[float, float]]]:
         # Betfair caps listMarketBook at 200 weight-points/request; EX_BEST_OFFERS is
         # ~5/market, so request in batches of <=25 markets (~125 weight) to stay safely
         # under the cap (a single all-markets call returns TOO_MUCH_DATA). Read-only.
         if not market_ids:
             return {}
         ids = list(market_ids)
-        out: dict[str, dict[int, float]] = {}
+        out: dict[str, dict[int, tuple[float, float]]] = {}
         for start in range(0, len(ids), _MARKET_BOOK_BATCH):
             batch = ids[start : start + _MARKET_BOOK_BATCH]
             result = await self._rpc(
@@ -846,10 +870,10 @@ class BetfairApiShadowCapture:
         # misses (complete=False) on any name-form gap. Mirrors the Pinnacle path
         # (repositories.resolve_pinnacle_close_snaps re-keys via selection_map).
         rows: list[OddsSnapshotIn] = []
-        for selection, price in (
-            (home, odds.home_back),
-            (away, odds.away_back),
-            ("Draw", odds.draw_back),
+        for selection, price, size in (
+            (home, odds.home_back, odds.home_back_size),
+            (away, odds.away_back, odds.away_back_size),
+            ("Draw", odds.draw_back, odds.draw_back_size),
         ):
             if price is None or not selection:
                 continue
@@ -860,6 +884,7 @@ class BetfairApiShadowCapture:
                     market=Market.H2H,
                     selection=selection,
                     decimal_odds=price,
+                    liquidity=size,  # best-back available £ — gated Betfair when promoted
                     captured_at=now,  # listMarketBook is a live read; provider time ~ now
                     ingested_at=now,
                 )

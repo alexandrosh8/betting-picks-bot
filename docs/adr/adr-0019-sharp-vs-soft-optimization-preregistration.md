@@ -56,6 +56,14 @@ Anything failing these stays OFF. H1 is already live; if fresh data REFUTES it
 
 ## Consequences
 
+- **H1 self-validates forward.** The odds ceiling is applied as a SHADOW-tier CAP
+  (premium→volume), NOT a hard drop: the >5.0 1X2 longshot band is capped at the
+  shadow tier — never alerted or staked, but persisted + CLV-tracked — so it keeps
+  accruing forward CLV on OWN-captured Pinnacle+BSP data. This is the honest
+  validation path after the discovery that football-data.co.uk dropped Pinnacle
+  pre-match odds for 2026 (only ~7% coverage), which starves the retrospective
+  football-data BSP backtest of a sharp anchor. Confirm H1 on the accruing shadow
+  longshot CLV instead.
 - A clean 2026 BSP tar is now a **named blocking dependency** for STEP 4
   (the validate-first rollout). Until it lands, the live config is STEP 1 only.
 - STEP 2 instrumentation (widen the sweep to MEASURE the in-force devig + probit;

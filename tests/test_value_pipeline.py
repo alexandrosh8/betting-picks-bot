@@ -194,10 +194,17 @@ async def test_moneyline_ceiling_off_mints_longshot_pick() -> None:
     assert LAST_POLL["soccer"]["picks"] == 1
 
 
-async def test_moneyline_ceiling_drops_longshot_h2h_candidate() -> None:
+async def test_moneyline_ceiling_caps_longshot_to_shadow(caplog) -> None:  # type: ignore[no-untyped-def]
     # The 1X2 longshot band is structurally CLV-NEGATIVE vs the sharp close
-    # (research 2026-06-30). With the ceiling at 5.0 the same Away candidate (raw
-    # odds 8.0 > 5.0) is dropped BEFORE minting any pick — no alert, no pick.
+    # (research 2026-06-30, ADR-0019 H1). With the ceiling at 5.0 the same Away
+    # candidate (raw odds 10.0 > 5.0) is CAPPED at the volume (shadow) tier — never
+    # alerted, never a premium pick, but (with a DB) persisted + CLV-tracked so the
+    # band self-validates forward on own-captured data. Distinguishing shadow-cap
+    # from a hard drop needs a DB to count the volume pick; here (no DB) we assert
+    # the clean alerted set AND that the CAP path fired (the log line), proving it
+    # is a shadow-cap, not a silent drop.
+    import logging
+
     from app.pipeline import LAST_POLL
 
     sink = RecordingSink()
@@ -207,9 +214,11 @@ async def test_moneyline_ceiling_drops_longshot_h2h_candidate() -> None:
         league="Premier League",
         value_policy=ValuePolicy(moneyline_max_odds=5.0),
     )
-    await run_value_pipeline(deps, "soccer")
-    assert sink.sent == []  # longshot dropped -> never alerted
-    assert LAST_POLL["soccer"]["picks"] == 0
+    with caplog.at_level(logging.INFO):
+        await run_value_pipeline(deps, "soccer")
+    assert sink.sent == []  # longshot capped -> never alerted
+    assert LAST_POLL["soccer"]["picks"] == 0  # not premium
+    assert "moneyline odds ceiling capped" in caplog.text  # shadow-cap, not a drop
 
 
 async def test_experimental_sport_forces_premium_pick_to_volume() -> None:

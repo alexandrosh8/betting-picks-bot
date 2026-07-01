@@ -984,7 +984,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
     n_thin_books = 0
     n_visibility_capped = 0
     n_ah_rejected = 0
-    n_moneyline_rejected = 0
+    n_moneyline_capped = 0
     # Scan down to the VOLUME floor; pick_tier splits candidates per edge.
     # min() guards a deps-level inversion (Settings already validates the
     # ordering at startup) so a bad override can widen nothing. Per-market
@@ -1062,15 +1062,10 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             ):
                 n_ah_rejected += 1
                 continue
-            # 1X2/MONEYLINE ODDS CEILING (research 2026-06-30): the H2H away/draw
-            # LONGSHOT band (raw best odds above the ceiling) is structurally
-            # CLV-NEGATIVE vs the Betfair sharp close (held-out CLV -0.087, >4 SE;
-            # favourite-longshot bias) — drop it BEFORE it can mint any pick (premium
-            # OR volume). Scoped to H2H; ValuePolicy default math.inf = OFF, Settings
-            # sets 5.0. OU/AH/totals never bite (they rarely price above the ceiling).
-            if market is Market.H2H and v.best_odds > deps.value_policy.moneyline_max_odds:
-                n_moneyline_rejected += 1
-                continue
+            # (The 1X2/moneyline odds ceiling is applied as a SHADOW-tier CAP in the
+            # demotion chain below — NOT a hard drop — so the CLV-negative longshot
+            # band keeps accruing forward CLV on own-captured data, never alerted or
+            # staked. See the moneyline_note gate. ADR-0019 H1 self-validation.)
             # Freshness gate (a candidate that cleared the AH guard is part of
             # the mintable universe — count it so the stale-drop RATIO below is
             # measured against the right denominator).
@@ -1107,6 +1102,24 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                 tier = "volume"
                 n_visibility_capped += 1
                 visibility_note = " | visibility-only market: capped at volume (shadow)"
+            # 1X2/MONEYLINE ODDS CEILING (research 2026-06-30, ADR-0019 H1): a PREMIUM
+            # H2H candidate whose RAW best price exceeds moneyline_max_odds is in the
+            # structurally CLV-NEGATIVE away/draw LONGSHOT band (held-out CLV -0.087,
+            # >4 SE; favourite-longshot bias). CAP it at the volume (shadow) tier —
+            # persisted + CLV-tracked, NEVER alerted, NEVER reserving exposure — so the
+            # alerted set stays longshot-free AND the band self-validates forward on
+            # own-captured Pinnacle+BSP data (drop→shadow, so the evidence keeps
+            # flowing). Scoped to H2H; ValuePolicy default math.inf = OFF (Settings
+            # sets 5.0). OU/AH/totals rarely price this high, so they are untouched.
+            moneyline_note = ""
+            if (
+                tier == "premium"
+                and market is Market.H2H
+                and v.best_odds > deps.value_policy.moneyline_max_odds
+            ):
+                tier = "volume"
+                n_moneyline_capped += 1
+                moneyline_note = " | 1X2 longshot > odds ceiling: capped at volume (shadow)"
             # Major-league gate: a PREMIUM candidate whose scraped league is not
             # in the configured major set is DEMOTED to the volume (shadow) tier
             # — persisted + CLV-tracked, never alerted, never reserving exposure.
@@ -1304,6 +1317,7 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
                         else ""
                     )
                     + visibility_note
+                    + moneyline_note
                     + major_note
                     + sharp_note
                     + experimental_note
@@ -1494,14 +1508,15 @@ async def run_value_pipeline(deps: PipelineDeps, sport_key: str) -> list[PickOut
             sport_key,
             n_ah_rejected,
         )
-    if n_moneyline_rejected:
-        # The moneyline odds ceiling is never silent: these H2H candidates priced
-        # above VALUE_MONEYLINE_MAX_ODDS are in the structurally CLV-negative 1X2
-        # longshot band and were dropped before minting any pick.
+    if n_moneyline_capped:
+        # The moneyline odds ceiling is never silent: these premium H2H candidates
+        # priced above VALUE_MONEYLINE_MAX_ODDS are in the structurally CLV-negative
+        # 1X2 longshot band and were CAPPED at the volume (shadow) tier — tracked for
+        # forward CLV, never alerted or staked (ADR-0019 H1 self-validation).
         logger.info(
-            "value pipeline %s: moneyline odds ceiling dropped %d longshot candidate(s)",
+            "value pipeline %s: moneyline odds ceiling capped %d longshot(s) at volume (shadow)",
             sport_key,
-            n_moneyline_rejected,
+            n_moneyline_capped,
         )
     if n_off_band:
         # VALUE_ODDS_BANDS intervention is never silent either: these

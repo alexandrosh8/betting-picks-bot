@@ -773,6 +773,10 @@ class PinnacleArcadiaCapture:
     bounded bloat.
     """
 
+    # Cap the in-memory version-gate so kicked-off markets cannot accumulate forever
+    # on the unless-stopped VPS (mirrors BetfairExchangeCapture). Far above any live slate.
+    _MAX_SEEN_VERSIONS = 50000
+
     def __init__(
         self,
         client: _MarketSource | None,
@@ -817,6 +821,13 @@ class PinnacleArcadiaCapture:
                     league=matchup.league,
                     starts_at=matchup.starts_at,
                 )
+        # Bound the version-gate: evict oldest (insertion-ordered) entries so
+        # kicked-off markets don't grow it forever; a re-seen market re-emits its
+        # current line once (benign, per the class docstring).
+        overflow = len(self._seen_version) - self._MAX_SEEN_VERSIONS
+        if overflow > 0:
+            for stale_key in list(self._seen_version)[:overflow]:
+                del self._seen_version[stale_key]
         return fresh, teams
 
     async def _live_sport_ids(self) -> set[int] | None:

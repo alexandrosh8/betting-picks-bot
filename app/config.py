@@ -826,11 +826,6 @@ class Settings(BaseSettings):
     # sentinel (which parses to <=1.0 and is dropped upstream regardless).
     # Floored at 0 (0 = no gate).
     betfair_exchange_min_liquidity: float = Field(default=10.0, ge=0.0)
-    # OFF by default: when True the Betfair reader extracts row tokens from the
-    # rendered section HTML via the unit-testable bs4 parser instead of the in-page
-    # JS (identical output, validated against a real fixture). The proven JS path
-    # stays the default; this is the testable alternative.
-    betfair_html_parser: bool = False
     # csv of sport keys to capture. "soccer" (the 3-way 1X2 BACK row) and
     # "basketball" (the 2-way moneyline BACK row) are supported; the default
     # DEFAULT "soccer,basketball" (2026-06-28): the capture rides the fast curl_cffi

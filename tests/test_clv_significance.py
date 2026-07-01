@@ -49,14 +49,16 @@ def test_empty_series_returns_none() -> None:
 
 def test_zero_variance_positive_series_collapses_ci_to_mean() -> None:
     # Degenerate: every clv_log identical and > 0. SE is 0, so the CI collapses to
-    # the mean and the result is (defensibly) significant; no divide-by-zero crash.
+    # the mean with no divide-by-zero crash — but a zero-variance sample carries NO
+    # dispersion evidence, so it is NOT significant (a stratum of identical values,
+    # e.g. n small, must not read as a proven edge).
     sig = mean_significance([0.05, 0.05, 0.05, 0.05])
     assert sig is not None
     assert sig.mean == pytest.approx(0.05)
     assert sig.ci_low == pytest.approx(0.05)
     assert sig.ci_high == pytest.approx(0.05)
     assert math.isinf(sig.tstat) and sig.tstat > 0
-    assert sig.significant is True
+    assert sig.significant is False
 
 
 def test_zero_variance_negative_series_not_significant() -> None:

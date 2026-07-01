@@ -91,7 +91,10 @@ def mean_significance(values: Sequence[float], alpha: float = 0.05) -> MeanSigni
         crit = float(stats.t.ppf(1.0 - alpha / 2.0, df=n - 1))
         ci_low = mean - crit * se
         ci_high = mean + crit * se
-    significant = ci_low > 0.0
+    # A zero-variance sample (all values identical) carries NO dispersion evidence,
+    # so it cannot establish significance — even though ci_low==mean>0. Require real
+    # variance (std>0) as well as ci_low>0 (tstat stays +-inf for display only).
+    significant = std > 0.0 and ci_low > 0.0
     return MeanSignificance(
         n=n,
         mean=round(mean, 8),

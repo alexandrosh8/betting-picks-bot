@@ -1849,7 +1849,23 @@ async def resolve_pinnacle_close_snaps(
     # could never get a Pinnacle anchor). market + market_detail (the line) are
     # preserved by model_copy; only event_id and the team-named part of selection
     # are re-keyed.
-    selection_map = {normalize_name(pin_home): home, normalize_name(pin_away): away}
+    if is_tennis:
+        # UNORDERED tennis matches can accept a SWAPPED player order (the matcher
+        # runs ordered=False for tennis), so arcadia's positional pin_home/pin_away
+        # no longer correspond to the pick's home/away. Re-key by canonical NAME,
+        # never by position — else a swap attaches the WRONG player's close
+        # (wrong-side CLV, the cardinal sin). Degenerate/unmappable names drop (safe).
+        ch, ca = canonical_tennis_name(home), canonical_tennis_name(away)
+        selection_map = {}
+        if ch and ca and ch != ca:
+            for raw in (pin_home, pin_away):
+                c = canonical_tennis_name(raw)
+                if c == ch:
+                    selection_map[normalize_name(raw)] = home
+                elif c == ca:
+                    selection_map[normalize_name(raw)] = away
+    else:
+        selection_map = {normalize_name(pin_home): home, normalize_name(pin_away): away}
     out: list[OddsSnapshotIn] = []
     for snap in snaps:
         mapped_selection: str | None

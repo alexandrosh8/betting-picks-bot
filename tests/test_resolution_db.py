@@ -256,6 +256,28 @@ async def test_resolver_tennis_does_not_attach_different_same_day_player(factory
     assert out == []
 
 
+async def test_resolver_tennis_swapped_order_keys_each_price_to_right_player(factory) -> None:  # type: ignore[no-untyped-def]
+    # P1 wrong-side CLV: tennis matches UNORDERED, so arcadia may store the two
+    # players OPPOSITE to the pick. The re-key MUST map by canonical NAME, not
+    # position — else each player's close lands on the wrong selection. Seed arcadia
+    # SWAPPED (home=Alcaraz@1.80, away=Djokovic@2.05); the pick is Djokovic vs Alcaraz.
+    await _seed_pinnacle_tennis_event(factory, "pin-alc-djok", "Carlos Alcaraz", "Novak Djokovic")
+    async with factory() as session:
+        out = await resolve_pinnacle_close_snaps(
+            session,
+            pinnacle_sport_key="pinnacle_tennis",
+            pick_external_ref="evt-tennis-pick",
+            home="Djokovic N.",
+            away="Alcaraz C.",
+            kickoff=KO,
+        )
+    by_sel = {s.selection: s for s in out}
+    assert set(by_sel) == {"Djokovic N.", "Alcaraz C."}
+    # Djokovic's price (2.05, the arcadia AWAY slot) attaches to Djokovic, NOT Alcaraz.
+    assert by_sel["Djokovic N."].decimal_odds == pytest.approx(2.05)
+    assert by_sel["Alcaraz C."].decimal_odds == pytest.approx(1.80)
+
+
 async def test_resolver_kickoff_outside_window_returns_empty(factory) -> None:  # type: ignore[no-untyped-def]
     await _seed_pinnacle_event(factory, "pin-far", "Alpha", "Beta")
     async with factory() as session:

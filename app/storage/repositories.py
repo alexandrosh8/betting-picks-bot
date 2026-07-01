@@ -198,21 +198,20 @@ async def _get_or_create_sport(session: AsyncSession, key: str, name: str) -> in
 async def _get_or_create_league(
     session: AsyncSession, sport_id: int, key: str, country: str = ""
 ) -> int:
-    where = (League.sport_id == sport_id, League.key == key)
-    row = (await session.execute(select(League.id, League.country).where(*where))).first()
-    if row is not None:
-        league_id, existing_country = row
-        # Backfill the country once the source provides it — older league rows were
-        # created before country capture (display-only; never clobber a known one).
-        if country and not existing_country:
-            await session.execute(
-                sa_update(League).where(League.id == league_id).values(country=country)
-            )
-        return league_id
+    # Country is part of league IDENTITY (uq_leagues_sport_key_country): the same
+    # league KEY in different countries must be DISTINCT rows, else the first-seen
+    # country freezes and mislabels the rest ("Ethiopia — Premier League" bug).
+    # Normalize NULL/absent to '' — a NULL would be treated as distinct by the
+    # unique index and defeat dedup for country-less sources.
+    country = country or ""
+    where = (League.sport_id == sport_id, League.key == key, League.country == country)
+    found = await session.scalar(select(League.id).where(*where))
+    if found is not None:
+        return found
     await session.execute(
         pg_insert(League)
-        .values(sport_id=sport_id, key=key, name=key, country=country or None)
-        .on_conflict_do_nothing(constraint="uq_leagues_sport_key")
+        .values(sport_id=sport_id, key=key, name=key, country=country)
+        .on_conflict_do_nothing(constraint="uq_leagues_sport_key_country")
     )
     found = await session.scalar(select(League.id).where(*where))
     if found is None:  # pragma: no cover

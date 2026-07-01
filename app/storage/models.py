@@ -52,13 +52,20 @@ class Sport(Base):
 
 class League(Base):
     __tablename__ = "leagues"
-    __table_args__ = (UniqueConstraint("sport_id", "key", name="uq_leagues_sport_key"),)
+    # Country is part of league IDENTITY: same-named leagues in different countries
+    # (e.g. many "Premier League"s) must be DISTINCT rows, else the first-seen
+    # country freezes and mislabels all the others (the "Ethiopia — Premier League"
+    # merge bug). country is NOT NULL ('' when the source omits it) — a NULL would be
+    # treated as distinct by the Postgres unique index and defeat dedup.
+    __table_args__ = (
+        UniqueConstraint("sport_id", "key", "country", name="uq_leagues_sport_key_country"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     sport_id: Mapped[int] = mapped_column(ForeignKey("sports.id"))
     key: Mapped[str] = mapped_column(String(64))  # e.g. "soccer_epl"
     name: Mapped[str] = mapped_column(String(128))
-    country: Mapped[str | None] = mapped_column(String(64))
+    country: Mapped[str] = mapped_column(String(64), nullable=False, server_default="")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
